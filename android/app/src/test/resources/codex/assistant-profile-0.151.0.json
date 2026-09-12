@@ -1,0 +1,51 @@
+{
+  "id": "hans-profile-native-probe",
+  "result": {
+    "config": {
+      "model": "gpt-5.6-luna",
+      "model_reasoning_effort": "max",
+      "model_reasoning_summary": "concise",
+      "model_verbosity": "low",
+      "personality": "friendly",
+      "approval_policy": "never",
+      "sandbox_mode": "danger-full-access",
+      "web_search": "live",
+      "features": {
+        "apps": true,
+        "multi_agent": true,
+        "goals": true,
+        "multi_agent_v2": {
+          "max_concurrent_threads_per_session": 4
+        },
+        "memories": true
+      },
+      "agents": {
+        "max_concurrent_threads_per_session": 3
+      },
+      "memories": {
+        "generate_memories": true,
+        "use_memories": true,
+        "dedicated_tools": true,
+        "disable_on_external_context": false,
+        "min_rollout_idle_hours": 1,
+        "max_unused_days": 365,
+        "max_rollout_age_days": 90,
+        "min_rate_limit_remaining_percent": 10
+      },
+      "apps": {
+        "_default": {
+          "enabled": true,
+          "destructive_enabled": true,
+          "open_world_enabled": true,
+          "default_tools_approval_mode": "approve"
+        }
+      },
+      "analytics": {
+        "enabled": false
+      },
+      "otel": {
+        "log_user_prompt": false
+      }
+    }
+  }
+}

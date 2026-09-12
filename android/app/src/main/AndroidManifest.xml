@@ -1,0 +1,267 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Normal permission qualifies user-enabled network device interaction; no network switch. -->
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <uses-permission android:name="android.permission.READ_CALENDAR" />
+    <uses-permission android:name="android.permission.WRITE_CALENDAR" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <!-- Core assistant file management; Android still requires the user's special-access grant. -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <!-- Android 15+: normal permission, effective only while Hans holds ROLE_HOME. -->
+    <uses-permission android:name="android.permission.ACCESS_HIDDEN_PROFILES" />
+
+    <uses-feature
+        android:name="android.hardware.touchscreen"
+        android:required="false" />
+
+    <queries>
+        <package android:name="com.minimalcompany.quicksettings" />
+        <package android:name="com.lmqr.hMP01_comp_service" />
+
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+        <intent>
+            <action android:name="android.media.action.IMAGE_CAPTURE" />
+        </intent>
+        <intent>
+            <action android:name="android.media.action.VIDEO_CAPTURE" />
+        </intent>
+        <!-- Allows the fixed HTTPS Hans update page to be capability-probed before opening. -->
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="https" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.INSERT" />
+            <data android:mimeType="vnd.android.cursor.dir/event" />
+        </intent>
+    </queries>
+
+    <application
+        android:name=".HansApplication"
+        android:allowBackup="true"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:enableOnBackInvokedCallback="true"
+        android:extractNativeLibs="true"
+        android:fullBackupContent="@xml/backup_rules"
+        android:icon="@drawable/ic_hans"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.Hans">
+
+        <provider
+            android:name=".files.HansSharedFileProvider"
+            android:authorities="${applicationId}.files"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/hans_camera_paths" />
+        </provider>
+
+        <receiver
+            android:name=".setup.HansSetupHandoffReceiver"
+            android:exported="true"
+            android:permission="android.permission.DUMP" />
+
+        <!--
+             No intent filter: callers holding android.permission.DUMP must address this
+             read-only ordered-broadcast endpoint explicitly. Its private same-UID secondary
+             process hits HansApplication's main-process guard and therefore cannot start Codex,
+             automations, voice, or mutable Android stores.
+        -->
+        <receiver
+            android:name=".diagnostics.HansMigrationDiagnosticsReceiver"
+            android:exported="true"
+            android:permission="android.permission.DUMP"
+            android:process=":migrationDiagnostics" />
+
+        <activity
+            android:name=".LauncherActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:screenOrientation="portrait">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.HOME" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <!--
+             OAuth requires a browser-reachable activity. The filter admits only Hans's fixed
+             callback URI; RemoteMcpOAuthCallbackActivity revalidates scheme, host, path, query,
+             one-time state and the complete plugin/server/configuration identity before use.
+        -->
+        <activity
+            android:name=".mcp.oauth.RemoteMcpOAuthCallbackActivity"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@style/Theme.Hans.DictationEntry">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+
+                <data
+                    android:host="oauth"
+                    android:path="/remote-mcp/callback"
+                    android:scheme="hans" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".phone.keys.RootFreeDictationEntryActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@style/Theme.Hans.DictationEntry" />
+
+        <service
+            android:name=".runtime.RuntimeService"
+            android:exported="false"
+            android:process=":runtime" />
+
+        <service
+            android:name=".runtime.python.PythonRuntimeService"
+            android:exported="false"
+            android:isolatedProcess="true"
+            android:process=":python" />
+
+        <service
+            android:name=".phone.lifecycle.android.HansActiveWorkService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync|mediaPlayback|connectedDevice"
+            android:stopWithTask="false" />
+
+        <receiver
+            android:name=".phone.lifecycle.android.HansActiveWorkRemoteStopReceiver"
+            android:exported="false" />
+
+        <service
+            android:name=".voice.android.HansDictationService"
+            android:exported="false"
+            android:foregroundServiceType="microphone"
+            android:stopWithTask="false" />
+
+        <service
+            android:name=".voice.realtime.HansLiveVoiceForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="microphone|mediaPlayback"
+            android:stopWithTask="false" />
+
+        <service
+            android:name=".phone.notifications.HansNotificationListenerService"
+            android:exported="true"
+            android:label="@string/notification_listener_label"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
+        <service
+            android:name=".phone.keys.HansDictationTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_hans_dictation_tile"
+            android:label="@string/dictation_tile_label"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
+        <service
+            android:name=".automations.HansAutomationJobService"
+            android:exported="true"
+            android:permission="android.permission.BIND_JOB_SERVICE"
+            android:stopWithTask="false" />
+
+        <service
+            android:name=".automations.HansAutomationWakeupJobService"
+            android:exported="true"
+            android:permission="android.permission.BIND_JOB_SERVICE"
+            android:stopWithTask="false" />
+
+        <receiver
+            android:name=".automations.HansAutomationAlarmReceiver"
+            android:exported="false" />
+
+        <receiver
+            android:name=".automations.HansAutomationSystemReceiver"
+            android:directBootAware="false"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.TIME_SET" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.app.action.SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED" />
+            </intent-filter>
+        </receiver>
+
+        <!--
+             AccessibilityManager runs in system_server, so this component must
+             be exported for that system bind. BIND_ACCESSIBILITY_SERVICE is a
+             signature-level permission and is the actual bind boundary; Hans
+             exposes no additional Binder entry point from this service.
+        -->
+        <service
+            android:name=".phone.accessibility.android.HansAccessibilityService"
+            android:exported="true"
+            android:label="@string/hans_accessibility_service_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/hans_accessibility_service" />
+        </service>
+    </application>
+
+</manifest>

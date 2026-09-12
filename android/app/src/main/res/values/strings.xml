@@ -1,0 +1,12 @@
+<resources>
+    <string name="app_name">Hans</string>
+    <string name="notification_listener_label">Hans Benachrichtigungszugriff</string>
+    <string name="runtime_bind_failed">Runtime konnte nicht verbunden werden.</string>
+    <string name="runtime_binding_died">Runtime wurde unerwartet beendet.</string>
+    <string name="runtime_not_connected">Runtime ist noch nicht verbunden.</string>
+    <string name="backup_recovery_title">Hans – Wiederherstellung erforderlich</string>
+    <string name="backup_recovery_message">Hans konnte einen unterbrochenen Sicherungsimport noch nicht sicher wiederherstellen. Automationen und weitere Importe bleiben gesperrt. Die Sicherung wurde nicht gelöscht. Du kannst Android weiter verwenden oder die Wiederherstellung erneut prüfen.</string>
+    <string name="backup_recovery_retry">Wiederherstellung erneut prüfen</string>
+    <string name="backup_recovery_android_settings">Android-Einstellungen</string>
+    <string name="backup_recovery_home_settings">Anderen Standard-Launcher wählen</string>
+</resources>

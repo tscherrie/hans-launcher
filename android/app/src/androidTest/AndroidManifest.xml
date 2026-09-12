@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application android:testOnly="true">
+        <!--
+             AndroidX first probes the target package and then falls back to the
+             instrumentation package for createAndroidComposeRule<ComponentActivity>().
+             Declare that fallback host explicitly so it works on every supported
+             API level instead of relying on a transitive test manifest.
+        -->
+        <activity
+            android:name="androidx.activity.ComponentActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.Material.Light.NoActionBar" />
+        <activity
+            android:name="ai.hans.standard.setup.OrdinaryUidHandoffProbeActivity"
+            android:exported="true" />
+        <activity
+            android:name="ai.hans.standard.diagnostics.OrdinaryUidMigrationDiagnosticsProbeActivity"
+            android:exported="true" />
+        <!-- A real foreign package/process/window for call-presentation tests, not a system app. -->
+        <activity
+            android:name="ai.hans.standard.ui.LiveCallForegroundBystanderActivity"
+            android:exported="true"
+            android:process=":call_bystander"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Material.Light.NoActionBar" />
+    </application>
+</manifest>

@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="database" path="notification_inbox.db" />
+        <exclude domain="database" path="notification_inbox.db-shm" />
+        <exclude domain="database" path="notification_inbox.db-wal" />
+        <exclude domain="database" path="notification_inbox.db-journal" />
+        <!-- Selected notification facts stay device-local, including their deletion fences. -->
+        <exclude domain="database" path="notification_facts.db" />
+        <exclude domain="database" path="notification_facts.db-shm" />
+        <exclude domain="database" path="notification_facts.db-wal" />
+        <exclude domain="database" path="notification_facts.db-journal" />
+        <exclude domain="database" path="notification_facts.db.archive-state" />
+        <exclude domain="database" path="notification_facts.db.archive-state.bak" />
+        <exclude domain="database" path="notification_facts.db.archive-state.new" />
+        <exclude domain="file" path="codex-workspace" />
+        <exclude domain="sharedpref" path="hans_codex_session_v1.xml" />
+        <exclude domain="sharedpref" path="hans_dynamic_tool_contract_v1.xml" />
+        <exclude domain="sharedpref" path="hans_file_links_v1.xml" />
+        <exclude domain="sharedpref" path="hans_speech_credential_v1.xml" />
+        <!-- The private interview document is not a confirmed-profile export. -->
+        <exclude domain="file" path="hans-user-profile-v1.json" />
+        <exclude domain="file" path="hans-user-profile-v1.json.bak" />
+        <exclude domain="file" path="hans-user-profile-v1.json.new" />
+        <exclude domain="sharedpref" path="hans_mp01_vendor_action_v1.xml" />
+        <exclude domain="sharedpref" path="hans_private_space_visibility_v1.xml" />
+        <exclude domain="sharedpref" path="hans_display_motion_v1.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="database" path="notification_inbox.db" />
+        <exclude domain="database" path="notification_inbox.db-shm" />
+        <exclude domain="database" path="notification_inbox.db-wal" />
+        <exclude domain="database" path="notification_inbox.db-journal" />
+        <!-- Selected notification facts stay device-local, including their deletion fences. -->
+        <exclude domain="database" path="notification_facts.db" />
+        <exclude domain="database" path="notification_facts.db-shm" />
+        <exclude domain="database" path="notification_facts.db-wal" />
+        <exclude domain="database" path="notification_facts.db-journal" />
+        <exclude domain="database" path="notification_facts.db.archive-state" />
+        <exclude domain="database" path="notification_facts.db.archive-state.bak" />
+        <exclude domain="database" path="notification_facts.db.archive-state.new" />
+        <exclude domain="file" path="codex-workspace" />
+        <exclude domain="sharedpref" path="hans_codex_session_v1.xml" />
+        <exclude domain="sharedpref" path="hans_dynamic_tool_contract_v1.xml" />
+        <exclude domain="sharedpref" path="hans_file_links_v1.xml" />
+        <exclude domain="sharedpref" path="hans_speech_credential_v1.xml" />
+        <!-- Do not transfer drafts, confirmation nonces, or AtomicFile recovery copies. -->
+        <exclude domain="file" path="hans-user-profile-v1.json" />
+        <exclude domain="file" path="hans-user-profile-v1.json.bak" />
+        <exclude domain="file" path="hans-user-profile-v1.json.new" />
+        <exclude domain="sharedpref" path="hans_mp01_vendor_action_v1.xml" />
+        <exclude domain="sharedpref" path="hans_private_space_visibility_v1.xml" />
+        <exclude domain="sharedpref" path="hans_display_motion_v1.xml" />
+    </device-transfer>
+</data-extraction-rules>

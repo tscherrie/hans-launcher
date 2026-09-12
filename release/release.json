@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 2,
+  "releaseId": "hans-0.1.0-rc.27",
+  "releaseProfile": "standard-v2",
+  "channel": "staging",
+  "sourceRevisionPolicy": "sealed-manifest-only",
+  "publisherCertificateSha256": "823f905aa52421be5d21fc18bf55b47d452d5f4bb2f31f0ca11a3dbad4071657",
+  "metadataSignature": {
+    "algorithm": "ed25519",
+    "publicKeyFile": "metadata-public-key.pem",
+    "publicKeySha256": "6b1b850df0cb0edd81d9df5a944e935e75cd4a4a6447cac381c474972c5f7fbd"
+  },
+  "applications": {
+    "standard": {
+      "applicationId": "ai.hans.standard",
+      "versionCode": 28,
+      "versionName": "0.1.0-rc.27",
+      "publicAvailability": false
+    }
+  },
+  "plugins": {
+    "standardInstaller": {
+      "name": "hans-android-setup",
+      "version": "0.1.0",
+      "publicAvailability": false
+    }
+  }
+}

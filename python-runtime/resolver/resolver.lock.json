@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "python": "3.14",
+  "vendorTreeSha256": "98f586e23277cfc9e9eedca0261e12e0487d35d276db47c2b187a6ac9d1e970c",
+  "vendorFileCount": 33,
+  "vendorBytes": 529342,
+  "packages": [
+    {
+      "name": "packaging",
+      "version": "26.3",
+      "wheel": "packaging-26.3-py3-none-any.whl",
+      "sha256": "d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c",
+      "sizeBytes": 129956,
+      "source": "https://files.pythonhosted.org/packages/63/34/ba1c580383c9eada3711951fef0795c80b829a078d72188184bcab9dd527/packaging-26.3-py3-none-any.whl"
+    },
+    {
+      "name": "resolvelib",
+      "version": "1.2.1",
+      "wheel": "resolvelib-1.2.1-py3-none-any.whl",
+      "sha256": "fb06b66c8da04172d9e72a21d7d06186d8919e32ae5ab5cdf5b9d920be805ac2",
+      "sizeBytes": 18737,
+      "source": "https://files.pythonhosted.org/packages/e2/23/c941a0d0353681ca138489983c4309e0f5095dfd902e1357004f2357ddf2/resolvelib-1.2.1-py3-none-any.whl"
+    }
+  ]
+}

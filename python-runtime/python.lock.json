@@ -1,0 +1,103 @@
+{
+  "schemaVersion": 1,
+  "runtime": {
+    "implementation": "cpython",
+    "version": "3.14.7",
+    "upstream": {
+      "repository": "https://github.com/python/cpython.git",
+      "tag": "v3.14.7",
+      "tagObject": "dccefbc14adf6cd13693f3b6b2802945c4e23e01",
+      "commit": "823f0323ee6ec1402088b73bce1a38473cac36dc",
+      "releasedAt": "2026-08-05"
+    },
+    "android": {
+      "abi": "arm64-v8a",
+      "upstreamTarget": "aarch64-linux-android",
+      "upstreamMinimumApi": 24,
+      "hostApplicationMinimumApi": 31,
+      "pageAlignmentBytes": 16384,
+      "compatiblePageSizesBytes": [
+        4096,
+        16384
+      ],
+      "ndkVersion": "29.0.14206865"
+    },
+    "artifact": {
+      "name": "python-3.14.7-aarch64-linux-android.tar.gz",
+      "url": "https://www.python.org/ftp/python/3.14.7/python-3.14.7-aarch64-linux-android.tar.gz",
+      "bytes": 22477276,
+      "sha256": "6d50cc3aa66e414a439594089bcdfb5f1264358155c70c1f00471c24cfb477fb"
+    },
+    "sigstoreBundle": {
+      "url": "https://www.python.org/ftp/python/3.14.7/python-3.14.7-aarch64-linux-android.tar.gz.sigstore",
+      "bytes": 7054,
+      "sha256": "e65340a247a68e2248556c1ac16a5eea0689c2b3d6ec31be6f72b0dda5cd1c65"
+    },
+    "coreLibraries": [
+      {
+        "name": "libpython3.14.so",
+        "bytes": 5828520,
+        "sha256": "ec0b46cd65f228fb2a750303227f83e9e8eed83bbb95dd1b746bff61199907b5"
+      },
+      {
+        "name": "libcrypto_python.so",
+        "bytes": 4537384,
+        "sha256": "a0dd60d620cd61bac7306a8293bcb82103971a4dcfc8c11fd55be3653beb42c4"
+      },
+      {
+        "name": "libssl_python.so",
+        "bytes": 955984,
+        "sha256": "123743cc94922308a44a5a7d98854ca51fc708529d73f48ac1a380d7b7f04a2f"
+      },
+      {
+        "name": "libsqlite3_python.so",
+        "bytes": 886520,
+        "sha256": "6b0f0012ffff95d2420e88fd420d0d65dc4d63d943c1011567978f6203d118dd"
+      }
+    ],
+    "stdlib": {
+      "sourceDirectory": "prefix/lib/python3.14",
+      "asset": "hans/python/python314.zip",
+      "archiveCompression": "stored",
+      "expectedBytes": 12931326,
+      "expectedSha256": "88508a8e8be0b2ddf80dea5a0be034748987e4ba67300d9a164e788820960013",
+      "expectedFiles": 590,
+      "excludeDirectoryPrefixes": [
+        "__pycache__",
+        "idlelib",
+        "lib-dynload",
+        "test",
+        "tkinter",
+        "turtledemo"
+      ]
+    },
+    "nativeExtensions": {
+      "sourceDirectory": "prefix/lib/python3.14/lib-dynload",
+      "packagedPrefix": "libhans_py_",
+      "excludedModules": [
+        "_ctypes",
+        "_ctypes_test",
+        "_remote_debugging",
+        "_testbuffer",
+        "_testcapi",
+        "_testclinic",
+        "_testclinic_limited",
+        "_testimportmultiple",
+        "_testinternalcapi",
+        "_testlimitedcapi",
+        "_testmultiphase",
+        "_testsinglephase",
+        "_xxtestfuzz",
+        "xxlimited",
+        "xxlimited_35",
+        "xxsubtype"
+      ]
+    },
+    "environmentArchive": {
+      "format": "deterministic-pyz-v1",
+      "sitePackagesPrefix": "",
+      "pluginSourcePrefix": "__hans_plugin_source__/",
+      "transport": "read-only-parcel-file-descriptor"
+    }
+  }
+}

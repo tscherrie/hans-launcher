@@ -1,0 +1,7 @@
+gradlew.bat text eol=crlf
+
+# These trees contain downloaded or generated legal evidence whose raw bytes
+# are bound by SHA-256 values in release inventories and shipped notice indexes.
+# Git must never normalize their line endings while adding or checking them out.
+android/app/src/main/assets/hans/licenses/** -text
+release/third-party/** -text

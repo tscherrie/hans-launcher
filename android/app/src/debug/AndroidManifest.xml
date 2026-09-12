@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <application android:name="ai.hans.standard.HansAutomationFixtureApplication"
+        tools:replace="android:name">
+        <!-- Debug-only target-process host for real orientation/back instrumentation. -->
+        <activity
+            android:name="ai.hans.standard.phone.platform.AndroidPlatformCompatibilityProbeActivity"
+            android:exported="false"
+            android:screenOrientation="landscape"
+            android:theme="@style/Theme.Hans" />
+        <!-- Opt-in real-clock renderer acceptance; no runtime, account or microphone dispatch. -->
+        <activity
+            android:name="ai.hans.standard.ui.acceptance.ChatScreenIdleProbeActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:hardwareAccelerated="true"
+            android:screenOrientation="portrait"
+            android:theme="@style/Theme.Hans" />
+    </application>
+</manifest>

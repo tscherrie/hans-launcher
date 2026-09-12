@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "model": "gpt-6-astra",
+  "reasoningEffort": "medium",
+  "activeTurnInputMode": "steer",
+  "voice": "fable",
+  "speechRate": 1.25,
+  "readAloudMode": "allVisibleAssistantMessages"
+}

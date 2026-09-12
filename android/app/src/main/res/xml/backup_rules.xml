@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <!-- Credential plaintext never persists; the device-bound ciphertext is excluded below. -->
+    <!-- Notification contents are sensitive and intentionally device-local. -->
+    <exclude domain="database" path="notification_inbox.db" />
+    <exclude domain="database" path="notification_inbox.db-shm" />
+    <exclude domain="database" path="notification_inbox.db-wal" />
+    <exclude domain="database" path="notification_inbox.db-journal" />
+    <!-- Selected notification facts stay device-local, including their deletion fences. -->
+    <exclude domain="database" path="notification_facts.db" />
+    <exclude domain="database" path="notification_facts.db-shm" />
+    <exclude domain="database" path="notification_facts.db-wal" />
+    <exclude domain="database" path="notification_facts.db-journal" />
+    <exclude domain="database" path="notification_facts.db.archive-state" />
+    <exclude domain="database" path="notification_facts.db.archive-state.bak" />
+    <exclude domain="database" path="notification_facts.db.archive-state.new" />
+    <!-- Workspaces and local App Server thread pointers use explicit export/recovery. -->
+    <exclude domain="file" path="codex-workspace" />
+    <exclude domain="sharedpref" path="hans_codex_session_v1.xml" />
+    <exclude domain="sharedpref" path="hans_dynamic_tool_contract_v1.xml" />
+    <exclude domain="sharedpref" path="hans_file_links_v1.xml" />
+    <!-- Ciphertext is device-bound to a non-exportable Android Keystore key. -->
+    <exclude domain="sharedpref" path="hans_speech_credential_v1.xml" />
+    <!-- Interview drafts and confirmation nonces stay device-local, including interrupted writes. -->
+    <!-- Only the confirmed summary is portable through the user's explicit Hans export. -->
+    <exclude domain="file" path="hans-user-profile-v1.json" />
+    <exclude domain="file" path="hans-user-profile-v1.json.bak" />
+    <exclude domain="file" path="hans-user-profile-v1.json.new" />
+    <!-- Never restore a legacy claim that Minimal's hardware action was disabled. -->
+    <exclude domain="sharedpref" path="hans_mp01_vendor_action_v1.xml" />
+    <!-- UI visibility is device/profile-local and must not hide a new phone's Private Space. -->
+    <exclude domain="sharedpref" path="hans_private_space_visibility_v1.xml" />
+    <!-- Display technology belongs to this device, not the next restored phone. -->
+    <exclude domain="sharedpref" path="hans_display_motion_v1.xml" />
+</full-backup-content>

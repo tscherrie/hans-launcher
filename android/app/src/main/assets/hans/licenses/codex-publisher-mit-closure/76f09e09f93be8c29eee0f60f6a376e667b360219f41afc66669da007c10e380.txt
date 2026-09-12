@@ -1,0 +1,22 @@
+deno_core_icudata 0.77.0
+
+Publisher-declared package authors:
+the Deno authors
+
+Publisher-declared SPDX license expression:
+MIT
+
+Publisher-declared source repository:
+https://github.com/denoland/deno_core_icudata
+
+Exact crates.io archive SHA-256:
+a9efff8990a82c1ae664292507e1a5c6749ddd2312898cdf9cd7cb1fd4bc64c6
+
+Exact publisher source revision:
+83537ba16a4bf1645fc8322e81f7aaf0149a8922
+
+This attribution reproduces the package metadata from the checksum-bound
+Cargo.toml.orig and exact crates.io version record. The package archive and
+complete publisher repository history contain no standalone LICENSE file.
+The Deno-authors MIT terms and the separate ICU 77.1 data notice are retained
+as separate texts in this component.

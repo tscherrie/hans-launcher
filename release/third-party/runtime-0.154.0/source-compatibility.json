@@ -1,0 +1,47 @@
+{
+  "schema": "hans.runtime-source-compatibility.v1",
+  "scope": "bounded-source-byte-parity-not-transitive-license-or-public-release-clearance",
+  "publicReady": false,
+  "runtimeVersion": "0.154.0",
+  "runtimeCommit": "6b9826e3aa83b1a5947db50f4332cb9c65f1b340",
+  "runtimeArtifactSha256": "0c2495cedd0e01fd6ba1e9d949b637f55ac283e6019b998024c010788da8c508",
+  "runtimeArtifactBytes": 176980120,
+  "previousRuntimeVersion": "0.151.0",
+  "previousRuntimeCommit": "78c290807ce710180111df227df3b7a4fe845452",
+  "memoryMigration": {
+    "path": "codex-rs/state/memory_migrations/0001_memories.sql",
+    "url": "https://raw.githubusercontent.com/openai/codex/6b9826e3aa83b1a5947db50f4332cb9c65f1b340/codex-rs/state/memory_migrations/0001_memories.sql",
+    "retainedFile": "release/third-party/runtime-0.154.0/0001_memories.sql",
+    "bytes": 989,
+    "gitBlobSha1": "4e5b3a1e9fd55d8682047afd0a3325536be9f39f",
+    "sha384": "a1af50da50775a70f98da680006b7df4501956753ae98511ab727aa295915d9ae6f4190b4eaa5abc4fd7891642f7d21d",
+    "directoryGitTreeSha1": "a6bac84cd080a7efb725a31e0f5b8cc07a6bf158",
+    "directoryFileCount": 1,
+    "identicalInPreviousRuntime": true
+  },
+  "topLevelNotices": [
+    {
+      "path": "LICENSE",
+      "url": "https://raw.githubusercontent.com/openai/codex/6b9826e3aa83b1a5947db50f4332cb9c65f1b340/LICENSE",
+      "existingApkAsset": "android/app/src/main/assets/hans/licenses/codex-LICENSE.txt",
+      "bytes": 10926,
+      "gitBlobSha1": "4606e72e042564097e8780d66c1d4dcb611869bd",
+      "sha256": "d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc",
+      "identicalInPreviousRuntime": true
+    },
+    {
+      "path": "NOTICE",
+      "url": "https://raw.githubusercontent.com/openai/codex/6b9826e3aa83b1a5947db50f4332cb9c65f1b340/NOTICE",
+      "existingApkAsset": "android/app/src/main/assets/hans/licenses/codex-NOTICE.txt",
+      "bytes": 242,
+      "gitBlobSha1": "2805899d56d0332d175cfc613c67d45d6f006db7",
+      "sha256": "9d71575ecfd9a843fc1677b0efb08053c6ba9fd686a0de1a6f5382fd3c220915",
+      "identicalInPreviousRuntime": true
+    }
+  ],
+  "remainingScope": [
+    "The old runtime-0.151.0/V26 Cargo and native-linkage evidence remains historical and is not rebound to this runtime.",
+    "Exact 0.154.0 transitive dependency notices, source/native linkage, shipped APK inventory and final public-release review are not proved here.",
+    "The runtime lock, signed APK preflight and owner-update continuity receipts independently bind the executable actually installed."
+  ]
+}

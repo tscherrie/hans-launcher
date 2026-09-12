@@ -1,0 +1,611 @@
+musl 1.2.5 — math-complex
+Derived presentation: the source-comment blocks below are verbatim originals.
+Read together with the complete musl COPYRIGHT; this does not assert each source is linked.
+
+Source: musl-1.2.5/src/complex/__cexp.c:2 | source SHA-256 ffcf569466b0ac3defff943c989b6b181c7c41dc4f9538c32944459a5272203b
+Source: musl-1.2.5/src/complex/__cexpf.c:2 | source SHA-256 3cedd5c25cc80d78713bd44c53c7f3170dad26fde14ea5eb3b0028bfede24517
+Source: musl-1.2.5/src/complex/cexp.c:2 | source SHA-256 30943458b19d417812e326d8a61a2413ebce139c826c997ad6598dcddb6e673d
+Source: musl-1.2.5/src/complex/cexpf.c:2 | source SHA-256 7de06c6bebd823987c5eefe19821b8a473332ec724d6cc0a6a27955a33ba3734
+Original excerpt SHA-256: 929837e06c3b9c37e61b955742111a53906b7d3382fab6fd7f9a6d8c708b8e92
+
+/*-
+ * Copyright (c) 2011 David Schultz <das@FreeBSD.ORG>
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+ * SUCH DAMAGE.
+ */
+
+Source: musl-1.2.5/src/complex/catan.c:2 | source SHA-256 056cc1842d173fe90297adb4c088745cb3bcb37c95b56d72c246ae505e470eb5
+Source: musl-1.2.5/src/complex/catanf.c:2 | source SHA-256 2dbd38c8d786140372a04bfde641a9e290a842fe29133d3d0cd9f629170b9fc7
+Source: musl-1.2.5/src/complex/catanl.c:2 | source SHA-256 3857a0a047869d9219421a12a4ada0f384e9fbe7c21b3c9516622852f475cf1a
+Source: musl-1.2.5/src/math/__polevll.c:2 | source SHA-256 4fef0127318ba19fd5796b6b69a938030d22adb16aaab2ade3e634c8c5c93479
+Source: musl-1.2.5/src/math/erfl.c:12 | source SHA-256 dcce5b86a37215aee265ae27c1a00526542ab13d1dd609a560de3e3e9049a3e6
+Source: musl-1.2.5/src/math/expl.c:2 | source SHA-256 7218f10e56cd73c76f01a6924373dd1918730a0e793cf3c64670a34346173e68
+Source: musl-1.2.5/src/math/expm1l.c:2 | source SHA-256 a8362abd18ef31f00a7dd74c8b618ef658a4e9c3919c456d03d65a12fe445c2f
+Source: musl-1.2.5/src/math/lgammal.c:12 | source SHA-256 852284cc7fb67db860bcf39a3a33c74481ef28ffa7818a16de82d7e2d534c312
+Source: musl-1.2.5/src/math/log10l.c:2 | source SHA-256 d23e3d61fe4111628efdef794ae7cd614e3443a81f70742e29070f99fdd078c4
+Source: musl-1.2.5/src/math/log1pl.c:2 | source SHA-256 3846b55cbd55e3d3f90d7484216663030ec98c4c353e644ce3c4e3122080e4c4
+Source: musl-1.2.5/src/math/log2l.c:2 | source SHA-256 c3294ef6fcf96c061c4511fb3f6cd2886b2f513938deadcfb16fc19fb2a9ff03
+Source: musl-1.2.5/src/math/logl.c:2 | source SHA-256 e1612b2bb9a010c1914beb93fa242981f69f323392bd9816415cafaaec0d94b0
+Source: musl-1.2.5/src/math/powl.c:2 | source SHA-256 b1c9f5993fe37ce04e4291cdeaa8d690587f25076525a417c9657f082b7ae987
+Source: musl-1.2.5/src/math/tgammal.c:2 | source SHA-256 b9f00584454232f6d4c6cf76b8198221a4cc047c92fa749e5f41476c9b54579f
+Original excerpt SHA-256: d9d69faa82c4f80279a3832834c9a1482c52b8b3b5895f2cc869c0e4db33f36e
+
+/*
+ * Copyright (c) 2008 Stephen L. Moshier <steve@moshier.net>
+ *
+ * Permission to use, copy, modify, and distribute this software for any
+ * purpose with or without fee is hereby granted, provided that the above
+ * copyright notice and this permission notice appear in all copies.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+ */
+
+Source: musl-1.2.5/src/complex/ccosh.c:2 | source SHA-256 9997abb272468781bc9b6b61a1550e95d1f956df109e0a646d578a3dc2c3aef9
+Source: musl-1.2.5/src/complex/ccoshf.c:2 | source SHA-256 6ebf4355682268356685ba79621a47f2f955ca910bf13ca6ed32bb52e893574f
+Source: musl-1.2.5/src/complex/csinh.c:2 | source SHA-256 ed236ed0232c73d39a372a6799ba63b2eaeccc5f03aca0045fcb1504bb489489
+Source: musl-1.2.5/src/complex/csinhf.c:2 | source SHA-256 4ed3be03188b48d701d8edaa88b0e282cb2ec88b8af1c2f0e2a3f76fba60a773
+Original excerpt SHA-256: 3a1692b72fb1f66d3f082862dea0bbf69cba16bba5c9d1ec144d683aba49cf53
+
+/*-
+ * Copyright (c) 2005 Bruce D. Evans and Steven G. Kargl
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice unmodified, this list of conditions, and the following
+ *    disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
+ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+ * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
+ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+ * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+ * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+Source: musl-1.2.5/src/complex/csqrt.c:2 | source SHA-256 4f6cfa6aec61754c1ee2ea683ec00e7837eaa1993edafbc516c6c4978e3567b4
+Source: musl-1.2.5/src/complex/csqrtf.c:2 | source SHA-256 8dd69a3ec2052cf54f38e61156b057c2ff74d00da9db64da63f646e30a36e8e3
+Original excerpt SHA-256: 6679e9aa1a98bbb9f73d944ecc84eaf508b2df5d30f620a3af64aa40e5df55fc
+
+/*-
+ * Copyright (c) 2007 David Schultz <das@FreeBSD.ORG>
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+ * SUCH DAMAGE.
+ */
+
+Source: musl-1.2.5/src/complex/ctanh.c:2 | source SHA-256 7daa31e0831e9805934bd0e6a33816daf16c0bf1076babeb9799fe6e185ac045
+Source: musl-1.2.5/src/complex/ctanhf.c:2 | source SHA-256 1ebb7bddc872c96bf3e7c8d1a529c14f28db4cf75cc8237fdb1ad62764b405bf
+Original excerpt SHA-256: f11ac8260c79e3792b711323df93ff6dd6ef7866b95708c3a83626b65e579df2
+
+/*-
+ * Copyright (c) 2011 David Schultz
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice unmodified, this list of conditions, and the following
+ *    disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
+ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+ * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
+ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+ * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+ * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+Source: musl-1.2.5/src/math/__cos.c:2 | source SHA-256 3f0f774aab60a18d7ef935ffdf121bcda17cbadabff14096c614da22e31a42c1
+Source: musl-1.2.5/src/math/__rem_pio2_large.c:2 | source SHA-256 b97f19fb5951c83a0c10506fab35646caefde13bd03100ad2af55ef00af0b9fb
+Source: musl-1.2.5/src/math/__sin.c:2 | source SHA-256 f3a37ef9bcfb8a2f9c809d8c7f1aa2c17c8c3319ad7fb2fe7c0a6284ea8859d2
+Source: musl-1.2.5/src/math/acos.c:2 | source SHA-256 cc6f9017e7e2e0ef01516fa12c68aa63865e6415c90dc039dfce9abffae09a4c
+Source: musl-1.2.5/src/math/acosl.c:2 | source SHA-256 ed40b99c604aa593ee2ee71c02f928cb68c1afdf8a18243b0e7b6cc9a65586c1
+Source: musl-1.2.5/src/math/asin.c:2 | source SHA-256 9302dd0b2f302f7b7decce82e737ed250bae1bcc65c19eaf3d7ec19010892e63
+Source: musl-1.2.5/src/math/asinl.c:2 | source SHA-256 4a0e729842b1bf3181bad43b2f048dd3652b73456e0a3f44f6e65c2c51765e9f
+Source: musl-1.2.5/src/math/j0.c:2 | source SHA-256 88fc190ff03d253791b9fab281caf82e5943e5d4251052c91cc29b14b39055bd
+Source: musl-1.2.5/src/math/j1.c:2 | source SHA-256 73ec22fae7f2e3fccd2cc6ea777b296d0022a7c1d137035f1ef45cbf0c75ed4e
+Source: musl-1.2.5/src/math/jn.c:2 | source SHA-256 cd602fc99cea2f33d8b39462f9f0523c8bc3da646fa349de87e206eb3bb2aded
+Source: musl-1.2.5/src/math/log10.c:2 | source SHA-256 ef9b4b1f0918cf1fcb797f9fa4d4ffe177bfa27f668d74a41d613bfbcd83850a
+Source: musl-1.2.5/src/math/scalb.c:2 | source SHA-256 7f7eda8fd9d537105136d56661d70788f912b9584bb116dea185db340c78ada5
+Original excerpt SHA-256: 74344ebf347f27ca446e00f1c1921f705546f4b20e0fb31c183cd2c8464b1bc5
+
+/*
+ * ====================================================
+ * Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+ *
+ * Developed at SunSoft, a Sun Microsystems, Inc. business.
+ * Permission to use, copy, modify, and distribute this
+ * software is freely granted, provided that this notice
+ * is preserved.
+ * ====================================================
+ */
+
+Source: musl-1.2.5/src/math/__cosdf.c:6 | source SHA-256 0ba872cc7e26b93bb9784d19fee84b263e1fa3543a76ec3c0893aea47453a2a7
+Source: musl-1.2.5/src/math/__rem_pio2f.c:6 | source SHA-256 b73a0219ba4a34e39ed904b5008126ff1b12dfa1a4a380941363c8db5088d756
+Source: musl-1.2.5/src/math/__sindf.c:6 | source SHA-256 de7026bcd159b7d06a8cbcc162df722014f3b1a3cc4183116b6b7829eef1d118
+Source: musl-1.2.5/src/math/acosf.c:5 | source SHA-256 b20b3dcb58ce7cc55963945f8cb83efbf064b29d2da3011f2cec5d08459f2aa7
+Source: musl-1.2.5/src/math/asinf.c:5 | source SHA-256 6bc9b2392b81efa4c6a80c8602a2c0898d3b5c77444f6d3266ac71c18df222c5
+Source: musl-1.2.5/src/math/atan.c:2 | source SHA-256 1cffb67a65456ae0bc5f07a94df04a4f18ebc1ac0bffe3219250c4e0555ee01d
+Source: musl-1.2.5/src/math/atan2f.c:5 | source SHA-256 31a61a0a4c7b00db625b708525f24673a83df868a3e363042c9cc9dcf0aaeec8
+Source: musl-1.2.5/src/math/atanf.c:5 | source SHA-256 e0533d7b72aabce311a758a1f94fd15e5d4067be73b716cb1f425df5bc9039d6
+Source: musl-1.2.5/src/math/atanl.c:2 | source SHA-256 5c6f655740e6f594db8a045e529582f20613d14ac2bca8bf3f881145bf459325
+Source: musl-1.2.5/src/math/cbrtf.c:6 | source SHA-256 87b7065f44ac0cef6d21385c2b453dde7e15a51e9008ae0d726cd9eaa2dc43da
+Source: musl-1.2.5/src/math/cos.c:2 | source SHA-256 3a74e054057d636fa494bdd76a53a40db5cee618264f6ab31cb0538ba63c6bda
+Source: musl-1.2.5/src/math/cosf.c:6 | source SHA-256 33cf828e8e733da2b72c723b9ff20057b9a4f10df72a3923dadcb626c23d222c
+Source: musl-1.2.5/src/math/erf.c:2 | source SHA-256 795f05c9388ac277ab27cb5dc63fb4f82620a0ee11eaf8403201df5bc65c0f5b
+Source: musl-1.2.5/src/math/erff.c:5 | source SHA-256 876ad823d25e58330628ccdc5d24a3f10cc255135046a4e2903daf33cb75c18f
+Source: musl-1.2.5/src/math/erfl.c:2 | source SHA-256 dcce5b86a37215aee265ae27c1a00526542ab13d1dd609a560de3e3e9049a3e6
+Source: musl-1.2.5/src/math/expm1.c:2 | source SHA-256 c4764166cea03420f2dfc1840a6a7615934192d851b96d5d2dcc321cc1e39460
+Source: musl-1.2.5/src/math/expm1f.c:5 | source SHA-256 a7d4e8f8b41f04d4b977deb59e6bf96067371387062a5987fcc3b4464f54f5e9
+Source: musl-1.2.5/src/math/j0f.c:5 | source SHA-256 d0721c1c30f12badb67820e33299a2db0d9cec0209f7993fddee2a40d8d296a4
+Source: musl-1.2.5/src/math/j1f.c:5 | source SHA-256 1b16747ce913d4e65dec522710265bd004f923a7f33b5e88d7e4057b9c7b8d79
+Source: musl-1.2.5/src/math/jnf.c:5 | source SHA-256 cab6c734e9a718a3e7c41b22e0e69893453befa805f2ebdafca3264d81dbcf71
+Source: musl-1.2.5/src/math/lgammaf_r.c:5 | source SHA-256 5aa1db729889e0705ef94b2cb4d7ab5fa6a615d28fd74b7bdf7579a22f6e7ed4
+Source: musl-1.2.5/src/math/lgammal.c:2 | source SHA-256 852284cc7fb67db860bcf39a3a33c74481ef28ffa7818a16de82d7e2d534c312
+Source: musl-1.2.5/src/math/log10f.c:2 | source SHA-256 b8de5c0f14be2c622eca1cb33e80e5b131576c7c229aeffb8ea9f1d61555f6b9
+Source: musl-1.2.5/src/math/log1p.c:2 | source SHA-256 c76bbf714cd456a9f0de6e2c94853c27e7865581a2edfdef6d1f861739bbcb46
+Source: musl-1.2.5/src/math/log1pf.c:2 | source SHA-256 6c01aff9fcee1dcaca4d4581f17357e0f069643321c00288c672adc3521d0cc8
+Source: musl-1.2.5/src/math/scalbf.c:5 | source SHA-256 b4a0485f7a11d994960c31947f0132c45afd47f599abbae4a9f2041f7f346a3f
+Source: musl-1.2.5/src/math/sin.c:2 | source SHA-256 24e53a9d85f196f66919cc19247be5480bb607ef38844b1a24bc47c4fe4974ef
+Source: musl-1.2.5/src/math/sincos.c:2 | source SHA-256 2b88cfba380b8d5aa8f8f6b9f055aee91fe112de9f967a4484807afcb5405d9d
+Source: musl-1.2.5/src/math/sincosf.c:6 | source SHA-256 0196bf2ccfa370be120b917f2379bb533950ea50818d329aeee076081690c95d
+Source: musl-1.2.5/src/math/sinf.c:6 | source SHA-256 2583af55446f07da3225186c368a7aae5a0a0a0edab268967f4122b92e222b87
+Source: musl-1.2.5/src/math/tan.c:2 | source SHA-256 422d411bac962a1077ae394d14e54313012a6faa3476c20b2a66d3fb3f7a923f
+Source: musl-1.2.5/src/math/tanf.c:6 | source SHA-256 38b39aaf03d33341e606b67b3743ee5fa436b7e8338af155994d4b794b366003
+Original excerpt SHA-256: 0c3d0381d2cd647be68590170490be5f624c962d9f95eb698489e578c1de8f05
+
+/*
+ * ====================================================
+ * Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+ *
+ * Developed at SunPro, a Sun Microsystems, Inc. business.
+ * Permission to use, copy, modify, and distribute this
+ * software is freely granted, provided that this notice
+ * is preserved.
+ * ====================================================
+ */
+
+Source: musl-1.2.5/src/math/__cosl.c:3 | source SHA-256 fd644ce4ab8797b1220e2197b284212094a3b299bdf2c4faf66ead81b0fc620d
+Source: musl-1.2.5/src/math/__sinl.c:3 | source SHA-256 b6dfffc327cac147a0a2b17a12e9f4ec8ff6df463733db55c316a55ef4bcdb96
+Original excerpt SHA-256: eba82a2e9f34f53e0faf5a5b6f4d9f588760d888e6aae20a2f8d7406eb256167
+
+/*
+ * ====================================================
+ * Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+ * Copyright (c) 2008 Steven G. Kargl, David Schultz, Bruce D. Evans.
+ *
+ * Developed at SunSoft, a Sun Microsystems, Inc. business.
+ * Permission to use, copy, modify, and distribute this
+ * software is freely granted, provided that this notice
+ * is preserved.
+ * ====================================================
+ */
+
+Source: musl-1.2.5/src/math/__rem_pio2.c:2 | source SHA-256 938329e0939cd83ee2185a52154b41242f618d4a6df1b08395f344da33d4f1e6
+Original excerpt SHA-256: c90662135910b0f0edd97131d0e116a027ec79e46b2785b7b596fa617cca78e3
+
+/*
+ * ====================================================
+ * Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+ *
+ * Developed at SunSoft, a Sun Microsystems, Inc. business.
+ * Permission to use, copy, modify, and distribute this
+ * software is freely granted, provided that this notice
+ * is preserved.
+ * ====================================================
+ *
+ * Optimized by Bruce D. Evans.
+ */
+
+Source: musl-1.2.5/src/math/__rem_pio2l.c:2 | source SHA-256 70f1c69285c0d211d696d5c048e269d46000e5d75fc6a80623ef45e861447a94
+Original excerpt SHA-256: 5660964828a36e1680c465c6c3ac8669926917d347dc66f803897708af319f29
+
+/*
+ * ====================================================
+ * Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+ * Copyright (c) 2008 Steven G. Kargl, David Schultz, Bruce D. Evans.
+ *
+ * Developed at SunSoft, a Sun Microsystems, Inc. business.
+ * Permission to use, copy, modify, and distribute this
+ * software is freely granted, provided that this notice
+ * is preserved.
+ * ====================================================
+ *
+ * Optimized by Bruce D. Evans.
+ */
+
+Source: musl-1.2.5/src/math/__tan.c:2 | source SHA-256 e18b65b69fced8dbb2d3ed1a3dc6daea0e9f857f2762f274380bd89a6f89d2c4
+Source: musl-1.2.5/src/math/__tandf.c:6 | source SHA-256 60455f3cc0ac743f3eaf0017a3a4f0adbab37c0ee30d29397852d22904c40444
+Original excerpt SHA-256: 5a534ed1f9266ed799e9f2e3f830f15411762021829da121b23df5edc498c6b6
+
+/*
+ * ====================================================
+ * Copyright 2004 Sun Microsystems, Inc.  All Rights Reserved.
+ *
+ * Permission to use, copy, modify, and distribute this
+ * software is freely granted, provided that this notice
+ * is preserved.
+ * ====================================================
+ */
+
+Source: musl-1.2.5/src/math/__tanl.c:3 | source SHA-256 3788db7251d2e14b17e761bc2eccd0d8faa3c72c16eef7a56ca2ca75eca177df
+Original excerpt SHA-256: a8a75da52cf114b28d33e48992435876d121c7d410ebf740ce651821afcc79aa
+
+/*
+ * ====================================================
+ * Copyright 2004 Sun Microsystems, Inc.  All Rights Reserved.
+ * Copyright (c) 2008 Steven G. Kargl, David Schultz, Bruce D. Evans.
+ *
+ * Permission to use, copy, modify, and distribute this
+ * software is freely granted, provided that this notice
+ * is preserved.
+ * ====================================================
+ */
+
+Source: musl-1.2.5/src/math/atan2.c:2 | source SHA-256 a5f94b09b10b4e72bb15d94ae403c9dfd27d7ad881ecd729000004429acfca63
+Source: musl-1.2.5/src/math/atan2l.c:2 | source SHA-256 c13d4d9e1329ffcbbf3ef1dd755602c771612f2dd98f38464fc9fb0f7bdf3c68
+Source: musl-1.2.5/src/math/lgamma_r.c:2 | source SHA-256 df81910c12c2ba5e82295cea6bfc6f3863e367cc6043d1bf91be1fb9597b2811
+Original excerpt SHA-256: 11f476f899dacfef801a097465ad0755ad4546afe03b02c9a17aa38e228344e1
+
+/*
+ * ====================================================
+ * Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+ *
+ * Developed at SunSoft, a Sun Microsystems, Inc. business.
+ * Permission to use, copy, modify, and distribute this
+ * software is freely granted, provided that this notice
+ * is preserved.
+ * ====================================================
+ *
+ */
+
+Source: musl-1.2.5/src/math/cbrt.c:2 | source SHA-256 af442893d4048c0eb485b93b5628792fb796d45ffc0f88c682041366c7da611d
+Original excerpt SHA-256: 11a1dc1ce0b6b2879da93a266c5aebe81c4324e749c77a2ce3048b5b24ab58c0
+
+/*
+ * ====================================================
+ * Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+ *
+ * Developed at SunPro, a Sun Microsystems, Inc. business.
+ * Permission to use, copy, modify, and distribute this
+ * software is freely granted, provided that this notice
+ * is preserved.
+ * ====================================================
+ *
+ * Optimized by Bruce D. Evans.
+ */
+
+Source: musl-1.2.5/src/math/cbrtl.c:2 | source SHA-256 ee82c17b1a24681dfd7de0161088b45ecbd2d0346ddeda9d4594b48e4da0d3e5
+Original excerpt SHA-256: 57c0d6534118d909d6b3e78366981596013f999307b9d0d7711a8998a0410d61
+
+/*-
+ * ====================================================
+ * Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+ * Copyright (c) 2009-2011, Bruce D. Evans, Steven G. Kargl, David Schultz.
+ *
+ * Developed at SunPro, a Sun Microsystems, Inc. business.
+ * Permission to use, copy, modify, and distribute this
+ * software is freely granted, provided that this notice
+ * is preserved.
+ * ====================================================
+ *
+ * The argument reduction and testing for exceptional cases was
+ * written by Steven G. Kargl with input from Bruce D. Evans
+ * and David A. Schultz.
+ */
+
+Source: musl-1.2.5/src/math/exp.c:1 | source SHA-256 7db56f21ca9b8915d36dd5099b707aafeb6a736eae798e19b76b074764e75f34
+Original excerpt SHA-256: 7e52a70e5de1143e4fdb710116f76b27eced3e41be7ab70310138928a3b34e5e
+
+/*
+ * Double-precision e^x function.
+ *
+ * Copyright (c) 2018, Arm Limited.
+ * SPDX-License-Identifier: MIT
+ */
+
+Source: musl-1.2.5/src/math/exp2.c:1 | source SHA-256 b771de769e1b69b931d1f95baa39b429a73c9904e8b5607e1736771c6ace92b1
+Original excerpt SHA-256: e8f314eb6ab51b691f02a126ad69d2c7996a5eeb091f95f5033b1a806288e5d1
+
+/*
+ * Double-precision 2^x function.
+ *
+ * Copyright (c) 2018, Arm Limited.
+ * SPDX-License-Identifier: MIT
+ */
+
+Source: musl-1.2.5/src/math/exp2f.c:1 | source SHA-256 1753e636d3b395160a03e9dd4a4ed4fba2abcd9ee12e4cf2d919f5a6bd7e2732
+Original excerpt SHA-256: 9cd52ae0042ec9364291994dc497f2497414eeddaac23e792f1ab477576dfacf
+
+/*
+ * Single-precision 2^x function.
+ *
+ * Copyright (c) 2017-2018, Arm Limited.
+ * SPDX-License-Identifier: MIT
+ */
+
+Source: musl-1.2.5/src/math/exp2f_data.c:1 | source SHA-256 3da38c471cc5eb8dc1c2e283c6c00a36b1d353ba5c8ca1e82d95180948e26bd5
+Original excerpt SHA-256: eb8e488b7148e706986f5be08c5efbfcc96edb4ed7415391c12be3e512b24c74
+
+/*
+ * Shared data between expf, exp2f and powf.
+ *
+ * Copyright (c) 2017-2018, Arm Limited.
+ * SPDX-License-Identifier: MIT
+ */
+
+Source: musl-1.2.5/src/math/exp2f_data.h:1 | source SHA-256 fb52b690bef63df2e8996f2d2b3fd77f9ea08795863e73afdc882df04460e850
+Source: musl-1.2.5/src/math/log2f_data.h:1 | source SHA-256 cb65ee48f557b19c8a6366a05f16ffba38aa46b00c4c136faf2dea8f53675a9b
+Source: musl-1.2.5/src/math/logf_data.h:1 | source SHA-256 80176d1f045f162e917ca5c2879994ab0ed9e27b479086d752e5793c91135adf
+Source: musl-1.2.5/src/math/powf.c:1 | source SHA-256 74069b3a380cf954361e0243b38de2094ae680e2ecfb3e50af61ab576f13babf
+Source: musl-1.2.5/src/math/powf_data.h:1 | source SHA-256 5d632276e5f21cdcd47f35c53cf792640ad347aabce1e1bd5774fad5371fc8d8
+Original excerpt SHA-256: 72a9b46f0fe5f4ab99af914882d3ad50f72612ca79b3192db87f37a06b841853
+
+/*
+ * Copyright (c) 2017-2018, Arm Limited.
+ * SPDX-License-Identifier: MIT
+ */
+
+Source: musl-1.2.5/src/math/exp2l.c:2 | source SHA-256 0eeba2725b540b0d5dd84b732d4c496d8e8d9492cf863dbb5c83fe102771352c
+Original excerpt SHA-256: a0f470d9d239f56f7d6504b1bfcd80a0dbe8f90a895558d4040d4395100ad607
+
+/*-
+ * Copyright (c) 2005-2008 David Schultz <das@FreeBSD.ORG>
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+ * SUCH DAMAGE.
+ */
+
+Source: musl-1.2.5/src/math/exp_data.c:1 | source SHA-256 c55dff64e369fe816cd8ce367064989bb119f85783599680d1a329031c660689
+Original excerpt SHA-256: f6b5b71ae6dc49255b8982a8de10bb97d66035b0b6ad91843da71fcde64cf45f
+
+/*
+ * Shared data between exp, exp2 and pow.
+ *
+ * Copyright (c) 2018, Arm Limited.
+ * SPDX-License-Identifier: MIT
+ */
+
+Source: musl-1.2.5/src/math/exp_data.h:1 | source SHA-256 df77fca837edd02b260dd09a2914202775909ae67a059218ae38cfab104e6d16
+Source: musl-1.2.5/src/math/log2_data.h:1 | source SHA-256 b56e1a56f73a8700caa9787cd399fecf7f96038af56c2a590aeb6f0f8662ea8e
+Source: musl-1.2.5/src/math/log_data.h:1 | source SHA-256 a8dced6f0821f30cad040ba326b03e419fbe0a750ed8f3b0d7145992bee4bccc
+Source: musl-1.2.5/src/math/pow_data.h:1 | source SHA-256 5014345a7958adcf6ff835b5e96afa99dd5a98c40dfe968442288e002b8e01a3
+Original excerpt SHA-256: 6ac2dcacfaa533da778dce54dac87709a1285f08d070d9d95790b50199f71486
+
+/*
+ * Copyright (c) 2018, Arm Limited.
+ * SPDX-License-Identifier: MIT
+ */
+
+Source: musl-1.2.5/src/math/expf.c:1 | source SHA-256 225123b9b3a47a083c06f2580c6b73d5cadae5cec545f9e928f7041ff837b4b4
+Original excerpt SHA-256: 722fce9131e08cd408ec1029bb4fc7ad15c899b6e62ebacb911b298ad069728d
+
+/*
+ * Single-precision e^x function.
+ *
+ * Copyright (c) 2017-2018, Arm Limited.
+ * SPDX-License-Identifier: MIT
+ */
+
+Source: musl-1.2.5/src/math/fmaf.c:2 | source SHA-256 e5baf54228b74b036da629902d811f9f57de26133a03ce290879b5ec6de04433
+Source: musl-1.2.5/src/math/fmal.c:2 | source SHA-256 1c7587e59b9f249bd5e8dfabb154b602978fbb490348f92af5300ee8eadce518
+Original excerpt SHA-256: c9479241e4e7e711c5cf43e95b86a79af7209b5ea23b8c55f8b95f1788eb5a82
+
+/*-
+ * Copyright (c) 2005-2011 David Schultz <das@FreeBSD.ORG>
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+ * SUCH DAMAGE.
+ */
+
+Source: musl-1.2.5/src/math/log.c:1 | source SHA-256 a0694d8587a0d145d0f8ae87cbffba014d7988bc2ebcbfad94cea73b394c9ecc
+Original excerpt SHA-256: 7d44f8a20ce2b9ab074ce883201b78815c98e669108b1dbdf3a699098444c326
+
+/*
+ * Double-precision log(x) function.
+ *
+ * Copyright (c) 2018, Arm Limited.
+ * SPDX-License-Identifier: MIT
+ */
+
+Source: musl-1.2.5/src/math/log2.c:1 | source SHA-256 281e4fc0f737419e245019d8bc8a8ca53032c2d88c31d08561e9e59dcb4b4640
+Original excerpt SHA-256: c359dfaf15768892478461e9cb40da11d380123e47c50f29b3ede8207c04486d
+
+/*
+ * Double-precision log2(x) function.
+ *
+ * Copyright (c) 2018, Arm Limited.
+ * SPDX-License-Identifier: MIT
+ */
+
+Source: musl-1.2.5/src/math/log2_data.c:1 | source SHA-256 5a62bb213f19dc1364cddb612e3d13831e382f5ae6f7fafd7064362f53478dfb
+Original excerpt SHA-256: 74ae9464d17802e1e8394431844a842eb25efad729748a359a518d26685beedf
+
+/*
+ * Data for log2.
+ *
+ * Copyright (c) 2018, Arm Limited.
+ * SPDX-License-Identifier: MIT
+ */
+
+Source: musl-1.2.5/src/math/log2f.c:1 | source SHA-256 f2393ef18e78e6dc540e7349dbfea000018246d64fca3eefe73f11a286403352
+Original excerpt SHA-256: dfbd4e6eba80a4f25005d42aef337397554ca46598f64439e166633baa58cb3f
+
+/*
+ * Single-precision log2 function.
+ *
+ * Copyright (c) 2017-2018, Arm Limited.
+ * SPDX-License-Identifier: MIT
+ */
+
+Source: musl-1.2.5/src/math/log2f_data.c:1 | source SHA-256 9261d7fdef29db26bd75310f029823593639ecf7c1cc089a6014623d49d21abe
+Original excerpt SHA-256: 719c803a410da68f48b70270cd181806b44d0c87ccec10bcba36973c8382a2a9
+
+/*
+ * Data definition for log2f.
+ *
+ * Copyright (c) 2017-2018, Arm Limited.
+ * SPDX-License-Identifier: MIT
+ */
+
+Source: musl-1.2.5/src/math/log_data.c:1 | source SHA-256 e96bcd99d88fc57e0f3686299014f4b949a6212603ce237f39e16cedc155617a
+Original excerpt SHA-256: d22e34751c18a13e5cb7e974c1b94c2cc89caad9d2b4f2ef1c85994d32292805
+
+/*
+ * Data for log.
+ *
+ * Copyright (c) 2018, Arm Limited.
+ * SPDX-License-Identifier: MIT
+ */
+
+Source: musl-1.2.5/src/math/logf.c:1 | source SHA-256 eecf8e5dd0afd5f64f938ccae07c85b0a8e82919f5d4269936a3b8493fb64e47
+Original excerpt SHA-256: ffd4560b424a532b17b1f8af4405f11b4ceeaf9880ca33ad43f896b620bfb52c
+
+/*
+ * Single-precision log function.
+ *
+ * Copyright (c) 2017-2018, Arm Limited.
+ * SPDX-License-Identifier: MIT
+ */
+
+Source: musl-1.2.5/src/math/logf_data.c:1 | source SHA-256 60b08342fcef877b393a76fc36d92c576d6340ce153459aad03aad3d4716f9b5
+Original excerpt SHA-256: 7b69dd50886f7e59e969f2d7c91f6d694a42989bde841e57bed58f71a6d34fde
+
+/*
+ * Data definition for logf.
+ *
+ * Copyright (c) 2017-2018, Arm Limited.
+ * SPDX-License-Identifier: MIT
+ */
+
+Source: musl-1.2.5/src/math/pow.c:1 | source SHA-256 b06f0a08d74fcff8cced7afa2c0e47e301e3e8a19c0de5becdec28cd7b014027
+Original excerpt SHA-256: 5fa165f5ae7e7b676b5ea1e2ab501f258932355ebad0ffaa76865149b47cc00a
+
+/*
+ * Double-precision x^y function.
+ *
+ * Copyright (c) 2018, Arm Limited.
+ * SPDX-License-Identifier: MIT
+ */
+
+Source: musl-1.2.5/src/math/pow_data.c:1 | source SHA-256 2052ec913f9b4a2170a98a6fcbcd7694f5dec220036b00c36106a2b4b65a4c55
+Original excerpt SHA-256: 8867dc852d8c09b25648ac08bb5e7d7effdbff03e10614f13f8e681774ec1414
+
+/*
+ * Data for the log part of pow.
+ *
+ * Copyright (c) 2018, Arm Limited.
+ * SPDX-License-Identifier: MIT
+ */
+
+Source: musl-1.2.5/src/math/powf_data.c:1 | source SHA-256 136f491b0f904842b926784134d0adba7a9103d2ce8a226276dd6e9260457398
+Original excerpt SHA-256: 0bf37177bf53722a813bbd05dce155746ceb21a1aeee3c7b13a3927554fe53d6
+
+/*
+ * Data definition for powf.
+ *
+ * Copyright (c) 2017-2018, Arm Limited.
+ * SPDX-License-Identifier: MIT
+ */
+

@@ -1,0 +1,30 @@
+{
+  "name": "hans-setup",
+  "version": "0.2.7+codex.20260828031843",
+  "description": "Conversational setup and repair guidance for the root-free Hans Android launcher.",
+  "author": {
+    "name": "Hans"
+  },
+  "keywords": [
+    "android",
+    "onboarding",
+    "permissions",
+    "setup"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Hans Setup",
+    "shortDescription": "Richtet Hans gemeinsam mit dir ein",
+    "longDescription": "Ein turn-basiertes Kennenlern- und Einrichtungsgespr\u00e4ch f\u00fcr Berechtigungen, Sprachsteuerung, Modellwahl und Nutzerprofil.",
+    "developerName": "Hans",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Richte Hans gemeinsam mit mir ein.",
+      "Pr\u00fcfe und repariere meine Hans-Einrichtung."
+    ],
+    "brandColor": "#1F2937"
+  }
+}

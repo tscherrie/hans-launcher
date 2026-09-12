@@ -1,0 +1,93 @@
+musl 1.2.5 — crypt-des-blowfish
+Derived presentation: the source-comment blocks below are verbatim originals.
+Read together with the complete musl COPYRIGHT; this does not assert each source is linked.
+
+Source: musl-1.2.5/src/crypt/crypt_blowfish.c:5 | source SHA-256 0f9054739e295e3e981e7aa29c8f287a190aef065b84a82a4c6817120d5da05d
+Original excerpt SHA-256: a17e0d141e431d3f15bd03901da69575531e23e4556847a1de209e79c6f3a1fb
+
+/*
+ * The crypt_blowfish homepage is:
+ *
+ *	http://www.openwall.com/crypt/
+ *
+ * This code comes from John the Ripper password cracker, with reentrant
+ * and crypt(3) interfaces added, but optimizations specific to password
+ * cracking removed.
+ *
+ * Written by Solar Designer <solar at openwall.com> in 1998-2012.
+ * No copyright is claimed, and the software is hereby placed in the public
+ * domain.  In case this attempt to disclaim copyright and place the software
+ * in the public domain is deemed null and void, then the software is
+ * Copyright (c) 1998-2014 Solar Designer and it is hereby released to the
+ * general public under the following terms:
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted.
+ *
+ * There's ABSOLUTELY NO WARRANTY, express or implied.
+ *
+ * It is my intent that you should be able to use this on your system,
+ * as part of a software package, or anywhere else to improve security,
+ * ensure compatibility, or for any other purpose.  I would appreciate
+ * it if you give credit where it is due and keep your modifications in
+ * the public domain as well, but I don't require that in order to let
+ * you place this code and any modifications you make under a license
+ * of your choice.
+ *
+ * This implementation is fully compatible with OpenBSD's bcrypt.c for prefix
+ * "$2b$", originally by Niels Provos <provos at citi.umich.edu>, and it uses
+ * some of his ideas.  The password hashing algorithm was designed by David
+ * Mazieres <dm at lcs.mit.edu>.  For information on the level of
+ * compatibility for bcrypt hash prefixes other than "$2b$", please refer to
+ * the comments in BF_set_key() below and to the included crypt(3) man page.
+ *
+ * There's a paper on the algorithm that explains its design decisions:
+ *
+ *	http://www.usenix.org/events/usenix99/provos.html
+ *
+ * Some of the tricks in BF_ROUND might be inspired by Eric Young's
+ * Blowfish library (I can't be sure if I would think of something if I
+ * hadn't seen his code).
+ */
+
+Source: musl-1.2.5/src/crypt/crypt_des.c:18 | source SHA-256 546b4ee35446fb2a551d7414779395789f81d53aefbabd8914375686af5d228e
+Original excerpt SHA-256: 30c3222fecfdbda6900218b4da3fe68f4753cba41a3a71dac7e05345447c40fb
+
+/*
+ * FreeSec: libcrypt for NetBSD
+ *
+ * Copyright (c) 1994 David Burren
+ * Copyright (c) 2000,2002,2010,2012 Solar Designer
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the author nor the names of other contributors
+ *    may be used to endorse or promote products derived from this software
+ *    without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+ * SUCH DAMAGE.
+ *
+ *	$Owl: Owl/packages/glibc/crypt_freesec.c,v 1.6 2010/02/20 14:45:06 solar Exp $
+ *	$Id: crypt.c,v 1.15 1994/09/13 04:58:49 davidb Exp $
+ *
+ * This is an original implementation of the DES and the crypt(3) interfaces
+ * by David Burren.  It has been heavily re-worked by Solar Designer.
+ */
+

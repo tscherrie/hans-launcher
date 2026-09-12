@@ -1,0 +1,17 @@
+.gradle/
+.kotlin/
+.idea/
+local.properties
+**/build/
+/artifacts/
+/output/
+/site/web/
+__pycache__/
+*.py[cod]
+*.jks
+*.keystore
+*.p12
+*.pfx
+*-private-key.pem
+*.log
+.DS_Store

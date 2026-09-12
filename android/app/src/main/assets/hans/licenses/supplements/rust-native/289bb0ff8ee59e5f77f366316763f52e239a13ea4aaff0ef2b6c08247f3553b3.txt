@@ -1,0 +1,24 @@
+musl 1.2.5 — aarch64-string
+Derived presentation: the source-comment blocks below are verbatim originals.
+Read together with the complete musl COPYRIGHT; this does not assert each source is linked.
+
+Source: musl-1.2.5/src/string/aarch64/memcpy.S:1 | source SHA-256 1ead3716276e8a58e2e015e89fd565d9f33c10b2bc482c303b68b90c9d0f7cef
+Original excerpt SHA-256: 6eca170c32acaced38b3e559fda9908b2f16717fc7b4cde36ced5fb407f4f114
+
+/*
+ * memcpy - copy memory area
+ *
+ * Copyright (c) 2012-2020, Arm Limited.
+ * SPDX-License-Identifier: MIT
+ */
+
+Source: musl-1.2.5/src/string/aarch64/memset.S:1 | source SHA-256 4eacce5e57f178a284fd5a48925f4398d593df6cb2b6f727bb495a78fd3cbabf
+Original excerpt SHA-256: b538ed96d0c4574442e0e3d9be99ca108335ab88db8ef8ca96a08bc9e8d74fa8
+
+/*
+ * memset - fill memory with a constant byte
+ *
+ * Copyright (c) 2012-2020, Arm Limited.
+ * SPDX-License-Identifier: MIT
+ */
+

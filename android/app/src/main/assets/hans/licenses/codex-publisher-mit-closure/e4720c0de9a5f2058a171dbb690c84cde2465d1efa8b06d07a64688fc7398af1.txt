@@ -1,0 +1,22 @@
+debugserver-types 0.5.0
+
+Publisher-declared package author:
+Markus Westerlind <marwes91@gmail.com>
+
+Publisher-declared SPDX license expression:
+MIT
+
+Publisher-declared source repository:
+https://github.com/Marwes/debugserver-types
+
+Exact crates.io archive SHA-256:
+2bf6834a70ed14e8e4e41882df27190bea150f1f6ecf461f1033f8739cd8af4a
+
+Exact publisher source revision:
+d444f163123af5b4fbce7375d1afead7e9b8a224
+
+This attribution reproduces the package metadata from the checksum-bound
+Cargo.toml.orig and exact crates.io version record. The package archive and
+complete publisher repository history contain no standalone LICENSE file.
+Complete MIT terms and the separately identified Microsoft Debug Adapter
+Protocol schema notice are retained as separate texts in this component.

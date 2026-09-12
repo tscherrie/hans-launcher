@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "packages": [
+    {
+      "catalogId": "msgpack-1.2.1-cp314-android31-arm64-v8a",
+      "packageName": "msgpack",
+      "version": "1.2.1",
+      "source": {
+        "name": "msgpack-1.2.1.tar.gz",
+        "url": "https://files.pythonhosted.org/packages/31/f9/c0a1c127f9049db9155afc316952ea571720dd01833ff5e4d7e8e6352dbb/msgpack-1.2.1.tar.gz",
+        "bytes": 183960,
+        "sha256": "04c721c2c7448767e9e3f2520a475663d8ee0f09c31890f6d2bd70fd636a9647"
+      },
+      "target": {
+        "pythonSeries": "3.14",
+        "interpreterTag": "cp314",
+        "androidAbi": "arm64-v8a",
+        "minimumAndroidApi": 31,
+        "directorySegment": "cp314-android_arm64_v8a"
+      },
+      "requiresPython": ">=3.10",
+      "requiresDist": [],
+      "importNames": [
+        "msgpack",
+        "msgpack._cmsgpack"
+      ],
+      "companionWheel": {
+        "assetPath": "hans/python/native-packages/msgpack-1.2.1-py3-none-any.whl",
+        "fileName": "msgpack-1.2.1-py3-none-any.whl",
+        "bytes": 43486,
+        "sha256": "d4d73313577410bc14c09a59af5821dd973f2f011f9a90b633147d52d1e8b26e"
+      },
+      "nativeLibraries": [
+        {
+          "moduleName": "msgpack._cmsgpack",
+          "packagedName": "libhans_py_msgpack___cmsgpack.so",
+          "bytes": 161760,
+          "sha256": "c2be049193ed2345b44dc195b0372054539b8b4ce5cef16c8ec808dbd7de9490"
+        }
+      ],
+      "payloadSha256": "05f9c31ae33dd23421ee8a2a96a13e1bf219b52fc2df1af29975cb82a2dd5e8e"
+    }
+  ]
+}
