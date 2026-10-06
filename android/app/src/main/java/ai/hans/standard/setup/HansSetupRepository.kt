@@ -53,17 +53,6 @@ class HansSetupRepository(
                 "hardware_toggle" -> current.copy(
                     inputChoice = HansSetupInputChoice.HARDWARE_TOGGLE,
                 ).withStatus(step, HansSetupStepStatus.VERIFIED, "hardware_toggle_selected")
-                "hardware_hold" -> if (hardwareHoldCompatible) {
-                    current.copy(
-                        inputChoice = HansSetupInputChoice.HARDWARE_HOLD,
-                    ).withStatus(step, HansSetupStepStatus.VERIFIED, "hardware_hold_selected")
-                } else {
-                    current.withStatus(
-                        step,
-                        HansSetupStepStatus.BLOCKED,
-                        "stock_mp01_hold_blocked",
-                    )
-                }
                 "no_hardware_key", "skip" -> current.copy(
                     inputChoice = HansSetupInputChoice.NO_HARDWARE_KEY,
                 ).withStatus(step, HansSetupStepStatus.VERIFIED, "hardware_key_skipped")
@@ -475,6 +464,10 @@ class HansSetupRepository(
         token: HansSetupOperationToken,
     ): HansSetupDocument {
         require(token.step in DICTATION_LIVE_TEST_STEPS) { "setup_not_dictation_live_test_step" }
+        val current = read()
+        // A recreated Activity may deliver an old callback after setup migrated forward.
+        // It must neither reopen retired practice nor reset a newer operation.
+        if (token.step in HANS_SETUP_RETIRED_STEPS || !current.matches(token)) return current
         return markOperationAwaiting(token, "dictation_live_test_activity_recreated")
     }
 
@@ -593,41 +586,10 @@ class HansSetupRepository(
         next
     }
 
-    /**
-     * Reconciles an out-of-band Settings change without ever reading credential material.
-     * A present credential proves that the user already chose and completed this local setup;
-     * removal reopens only the credential and dependent speech test.
-     */
+    /** Retired API-key setup observations cannot reopen or modify the key-free voice setup. */
+    @Suppress("UNUSED_PARAMETER")
     @Synchronized
-    fun observeSpeechCredentialAvailability(available: Boolean): HansSetupDocument =
-        mutate { current ->
-            if (available) {
-                current.withStatus(
-                    HansSetupStep.SPEECH_CREDENTIAL_CONSENT,
-                    HansSetupStepStatus.VERIFIED,
-                    "speech_credential_consent_observed",
-                ).withStatus(
-                    HansSetupStep.SPEECH_CREDENTIAL_ACCESS,
-                    HansSetupStepStatus.VERIFIED,
-                    "speech_credential_available",
-                )
-            } else if (
-                current.record(HansSetupStep.SPEECH_CREDENTIAL_ACCESS).status ==
-                HansSetupStepStatus.VERIFIED
-            ) {
-                current.withStatus(
-                    HansSetupStep.SPEECH_CREDENTIAL_ACCESS,
-                    HansSetupStepStatus.AWAITING_USER,
-                    "speech_credential_missing",
-                ).withStatus(
-                    HansSetupStep.VOICE_DICTATION_TEST,
-                    repairStatus(current, HansSetupStep.VOICE_DICTATION_TEST),
-                    "speech_credential_requires_repair",
-                )
-            } else {
-                current
-            }
-        }
+    fun observeSpeechCredentialAvailability(available: Boolean): HansSetupDocument = read()
 
     /**
      * Adopts settings and platform grants that were configured outside the guided conversation.
@@ -648,7 +610,6 @@ class HansSetupRepository(
         verifiedOptionalCapabilities.values.forEach(::requireSetupCode)
         var next = current
         if (inputChoice != null) {
-            val changed = current.inputChoice != inputChoice
             next = next.copy(inputChoice = inputChoice)
                 .withStatus(
                     HansSetupStep.INPUT_CHOICE,
@@ -667,32 +628,11 @@ class HansSetupRepository(
                     HansSetupStepStatus.VERIFIED,
                     "hardware_mapping_present",
                 )
-            val live = next.record(HansSetupStep.HARDWARE_LIVE_TEST)
-            if (changed || live.detailCode in SETUP_PREREQUISITE_SKIP_CODES) {
-                next = next.withStatus(
-                    HansSetupStep.HARDWARE_LIVE_TEST,
-                    HansSetupStepStatus.AWAITING_USER,
-                    "hardware_mapping_requires_live_test",
-                )
-            }
         }
-        if (cameraHoldEnabled) {
-            val changed = current.cameraHoldEnabled != true
-            next = next.copy(cameraHoldEnabled = true).withStatus(
-                HansSetupStep.CAMERA_HOLD_CHOICE,
-                HansSetupStepStatus.VERIFIED,
-                "camera_hold_effective",
-            )
-            val live = next.record(HansSetupStep.CAMERA_HOLD_LIVE_TEST)
-            if (changed || live.detailCode in SETUP_PREREQUISITE_SKIP_CODES) {
-                next = next.withStatus(
-                    HansSetupStep.CAMERA_HOLD_LIVE_TEST,
-                    HansSetupStepStatus.AWAITING_USER,
-                    "camera_hold_requires_live_test",
-                )
-            }
-        }
+        // cameraHoldEnabled is legacy persisted configuration, not a current setup choice.
+        // Never enable, disable or reinterpret it during repair/resume.
         verifiedAccess.forEach { (access, detailCode) ->
+            if (access in HANS_SETUP_RETIRED_STEPS) return@forEach
             val consent = checkNotNull(ACCESS_CONSENT_PAIRS[access])
             if (
                 next.record(consent).status == HansSetupStepStatus.SKIPPED ||
@@ -1023,7 +963,8 @@ class HansSetupRepository(
                     } else current
                     else -> current
                 }
-                HansSetupDictationEvidence.SENT -> when (step) {
+                HansSetupDictationEvidence.SENT,
+                HansSetupDictationEvidence.NATIVE_LIVE_COMPLETED -> when (step) {
                     HansSetupStep.HARDWARE_LIVE_TEST -> if (
                         record.liveStartObserved && record.detailCode in HARDWARE_STOP_COMMAND_CODES
                     ) {
@@ -1057,7 +998,11 @@ class HansSetupRepository(
                         record.liveStartObserved &&
                         record.detailCode == "voice_dictation_listening_observed"
                     ) {
-                        current.withVerifiedLiveTest(step, "voice_preview_and_transcript_sent_verified")
+                        current.withVerifiedLiveTest(step, if (evidence == HansSetupDictationEvidence.SENT) {
+                            "voice_preview_and_transcript_sent_verified"
+                        } else {
+                            "voice_preview_and_native_reply_verified"
+                        })
                     } else current
                     else -> current
                 }
@@ -1158,9 +1103,10 @@ class HansSetupRepository(
     }
 
     private fun mutate(block: (HansSetupDocument) -> HansSetupDocument): HansSetupDocument {
-        val current = normalize(storage.read())
+        val stored = storage.read()
+        val current = normalize(stored)
         val changed = normalize(block(current))
-        if (changed == current) return current
+        if (changed == current && stored == current) return current
         val next = normalize(
             changed.copy(
                 revision = current.revision + 1,
@@ -1184,16 +1130,20 @@ class HansSetupRepository(
                 "key_capture_recreation_recovery",
             )
         }
-        val hardwareProof = next.record(HansSetupStep.HARDWARE_LIVE_TEST)
-        if (
-            hardwareProof.status == HansSetupStepStatus.VERIFIED &&
-            hardwareProof.detailCode != HARDWARE_ACCESSIBILITY_PROOF_CODE
-        ) {
-            next = next.withStatus(
-                HansSetupStep.HARDWARE_LIVE_TEST,
-                HansSetupStepStatus.AWAITING_USER,
-                "hardware_accessibility_reverification_required",
-            )
+        // Leave historical terminal records readable, but revoke pending retired operations.
+        // Actual action-key/camera preferences live elsewhere and are deliberately untouched.
+        HANS_SETUP_RETIRED_STEPS.forEach { step ->
+            val record = next.steps[step] ?: return@forEach
+            if (!record.terminal || record.operationNonce != null) {
+                next = next.withRecord(step, record.copy(
+                    status = HansSetupStepStatus.SKIPPED,
+                    operationNonce = null,
+                    detailCode = "setup_step_retired",
+                    verifiedAtMillis = null,
+                    liveStartObserved = false,
+                    auxiliaryEvidenceObserved = false,
+                ))
+            }
         }
         // Completed setups stay complete when a new optional disclosure is introduced. Settings
         // offers each upgrade explicitly; migration never manufactures consent.
@@ -1386,15 +1336,7 @@ class HansSetupRepository(
     private fun HansSetupDocument.skipStepAndDependents(
         step: HansSetupStep,
     ): HansSetupDocument {
-        var next = if (
-            step == HansSetupStep.MICROPHONE_CONSENT ||
-            step == HansSetupStep.MICROPHONE_ACCESS ||
-            step == HansSetupStep.CAMERA_HOLD_CHOICE
-        ) {
-            copy(cameraHoldEnabled = false)
-        } else {
-            this
-        }.withStatus(
+        var next = withStatus(
             step,
             HansSetupStepStatus.SKIPPED,
             "explicitly_not_now",

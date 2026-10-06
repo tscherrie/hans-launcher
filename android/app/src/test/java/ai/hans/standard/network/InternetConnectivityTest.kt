@@ -1,5 +1,7 @@
 package ai.hans.standard.network
 
+import ai.hans.standard.localization.TestResourceTextResolver
+
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -12,8 +14,8 @@ class InternetConnectivityTest {
         state.seed(null, InternetStatus.OFFLINE)
         assertEquals(InternetStatus.OFFLINE, state.snapshot.status)
         assertFalse(state.snapshot.status.permitsExplicitRequest)
-        assertTrue(state.snapshot.status.notice.contains("Datenroaming"))
-        assertFalse(state.snapshot.status.notice.contains("ist ausgeschaltet"))
+        assertTrue(state.snapshot.status.notice(TestResourceTextResolver(java.util.Locale.GERMAN)).contains("Datenroaming"))
+        assertFalse(state.snapshot.status.notice(TestResourceTextResolver(java.util.Locale.GERMAN)).contains("ist ausgeschaltet"))
     }
 
     @Test
@@ -32,7 +34,7 @@ class InternetConnectivityTest {
         state.available(10)
         state.capabilities(10, internet = true, validated = true, captivePortal = true)
         assertEquals(InternetStatus.CAPTIVE_PORTAL, state.snapshot.status)
-        assertTrue(state.snapshot.status.notice.contains("Anmeldung"))
+        assertTrue(state.snapshot.status.notice(TestResourceTextResolver(java.util.Locale.GERMAN)).contains("Anmeldung"))
     }
 
     @Test
@@ -86,8 +88,8 @@ class InternetConnectivityTest {
     @Test
     fun unknownIsNotInventedOfflineAndPermitsExplicitTransportAttempt() {
         assertTrue(InternetStatus.UNKNOWN.permitsExplicitRequest)
-        assertTrue(internetWorkNotice(InternetStatus.OFFLINE, true).contains("nicht erneut gesendet"))
-        assertEquals("", internetWorkNotice(InternetStatus.ONLINE, true))
+        assertTrue(internetWorkNotice(InternetStatus.OFFLINE, true, text = TestResourceTextResolver(java.util.Locale.GERMAN)).contains("nicht erneut gesendet"))
+        assertEquals("", internetWorkNotice(InternetStatus.ONLINE, true, text = TestResourceTextResolver(java.util.Locale.GERMAN)))
     }
 
     @Test

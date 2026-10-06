@@ -5,6 +5,8 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.FutureTask
 import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 
 /**
  * One sleeping worker owns native media objects. Callback threads enqueue and never wait;
@@ -40,6 +42,26 @@ internal class LiveVoiceTransportControl(
         true
     } catch (_: RejectedExecutionException) {
         false
+    }
+
+    /** Bounded privacy-stop receipt. Timeout never cancels the queued/running cleanup. */
+    fun callBounded(timeoutMillis: Long, block: () -> Boolean): Boolean {
+        require(timeoutMillis >= 0)
+        val task = FutureTask<Boolean> { onWorker(block) }
+        try { executor.execute(task) } catch (_: RejectedExecutionException) { return false }
+        // Never wait for this worker from one of its own callbacks. Cleanup remains queued.
+        if (worker.get() == true) return false
+        return try {
+            task.get(timeoutMillis, TimeUnit.MILLISECONDS)
+        } catch (_: TimeoutException) {
+            false
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            false
+        } catch (error: ExecutionException) {
+            if (error.cause is Error) throw error.cause as Error
+            false
+        }
     }
 
     private fun <T> onWorker(block: () -> T): T {

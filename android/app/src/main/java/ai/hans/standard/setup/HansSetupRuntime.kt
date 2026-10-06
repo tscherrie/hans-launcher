@@ -1,5 +1,8 @@
 package ai.hans.standard.setup
 
+import ai.hans.standard.localization.HansTextResolver
+import ai.hans.standard.localization.AndroidHansTextResolver
+
 import ai.hans.standard.phone.keys.ActionKeyCommand
 import android.Manifest
 import android.app.AlarmManager
@@ -21,6 +24,7 @@ import ai.hans.standard.phone.capabilities.AccessibilityGrantState
 import ai.hans.standard.phone.capabilities.AndroidSpecialAccess
 import ai.hans.standard.phone.keys.ActionKeyMappingPreferencesStore
 import ai.hans.standard.phone.keys.ActionKeyTrigger
+import ai.hans.standard.phone.keys.forTaskVoiceControls
 import ai.hans.standard.phone.keys.AndroidMp01VendorActionRemediation
 import ai.hans.standard.phone.keys.KeySemanticAction
 import ai.hans.standard.phone.keys.Mp01VendorActionConflictKind
@@ -33,10 +37,17 @@ import ai.hans.standard.phone.consent.PersistentAndroidConsentScope
 import ai.hans.standard.settings.SharedPreferencesHansSettingsStore
 import ai.hans.standard.voice.tts.android.AndroidKeystoreSpeechCredentialStore
 import ai.hans.standard.voice.tts.android.SpeechCredentialStatus
+import ai.hans.standard.workspace.HansDesktopProject
 import java.io.Closeable
 import java.util.concurrent.Executor
 
 interface HansSetupFreshProbe {
+    /** Localized current controls, not evidence that the user has tested voice. */
+    fun voiceUsageInstructions(): List<String> = emptyList()
+
+    /** Only a freshly verified, prepared task directory; never remote-connection evidence. */
+    fun desktopProject(): HansSetupDesktopProject? = null
+
     fun probe(step: HansSetupStep, operationNonce: String? = null): HansSetupProbeResult
 
     fun probeOptionalCapability(
@@ -63,6 +74,8 @@ interface HansSetupFreshProbe {
 
     fun armLiveTest(step: HansSetupStep, operationNonce: String): Boolean = true
 
+    fun accessibilityTestCopy(operationNonce: String): AccessibilitySetupTestCopy? = null
+
     fun recordAccessibilityTargetAction(operationNonce: String): Boolean = false
 
     fun recordAccessibilityPostcondition(operationNonce: String): Boolean = false
@@ -79,6 +92,16 @@ class AndroidHansSetupFreshProbe(
     private val accessibilityReceipt = AccessibilitySetupReceiptTracker(appContext.packageName)
     private val speechCredentialStore by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         AndroidKeystoreSpeechCredentialStore(appContext)
+    }
+
+    override fun desktopProject(): HansSetupDesktopProject? {
+        val path = HansDesktopProject.preparedPath(appContext.filesDir) ?: return null
+        val text = AndroidHansTextResolver(appContext)
+        return HansSetupDesktopProject(
+            path = path,
+            instructions = text.text(R.string.setup_desktop_project_instructions, path),
+            permissions = text.text(R.string.setup_desktop_project_permissions),
+        )
     }
 
     override fun probe(step: HansSetupStep, operationNonce: String?): HansSetupProbeResult = when (step) {
@@ -250,8 +273,15 @@ class AndroidHansSetupFreshProbe(
             evidence.conflictKind == Mp01VendorActionConflictKind.STOCK_SYSTEM_POLICY)
     }
 
+    override fun voiceUsageInstructions(): List<String> = listOf(
+        appContext.getString(if (configuredInputChoice() != null) R.string.voice_setup_short_task_hardware
+            else R.string.voice_setup_short_task_screen),
+        appContext.getString(R.string.voice_setup_phone),
+        appContext.getString(R.string.voice_setup_optional_practice),
+    )
+
     override fun configuredInputChoice(): HansSetupInputChoice? {
-        val triggers = ActionKeyMappingPreferencesStore(appContext).read().mappings
+        val triggers = ActionKeyMappingPreferencesStore(appContext).read().forTaskVoiceControls().mappings
             .asSequence()
             .filter { it.action == KeySemanticAction.DICTATION }
             .map { it.trigger }
@@ -283,7 +313,7 @@ class AndroidHansSetupFreshProbe(
             manager.createNotificationChannel(
                 NotificationChannel(
                     NotificationSetupLiveTestReceiptTracker.NOTIFICATION_CHANNEL_ID,
-                    "Hans Einrichtungstest",
+                    appContext.getString(R.string.integration_hans_setup_test_71bd55e),
                     NotificationManager.IMPORTANCE_LOW,
                 ),
             )
@@ -294,8 +324,8 @@ class AndroidHansSetupFreshProbe(
                     NotificationSetupLiveTestReceiptTracker.NOTIFICATION_CHANNEL_ID,
                 )
                     .setSmallIcon(R.drawable.ic_hans)
-                    .setContentTitle("Hans Einrichtungstest")
-                    .setContentText("Benachrichtigungszugriff wird sicher geprüft.")
+                    .setContentTitle(appContext.getString(R.string.integration_hans_setup_test_71bd55e))
+                    .setContentText(appContext.getString(R.string.integration_checking_notification_access_safely_80f47a9))
                     .addExtras(
                         Bundle().apply {
                             putString(
@@ -322,6 +352,7 @@ class AndroidHansSetupFreshProbe(
             nonce = operationNonce,
             sessionId = session?.sessionId,
             baseline = session?.currentSnapshot(),
+            displayCopy = AccessibilitySetupTestCopy.capture(AndroidHansTextResolver(appContext)),
         )
         return true
     }
@@ -339,6 +370,9 @@ class AndroidHansSetupFreshProbe(
         val snapshot = session.currentSnapshot() ?: return false
         return accessibilityReceipt.observePostcondition(operationNonce, session.sessionId, snapshot)
     }
+
+    override fun accessibilityTestCopy(operationNonce: String): AccessibilitySetupTestCopy? =
+        accessibilityReceipt.displayCopy(operationNonce)
 
     private fun probeAccessibilityReceipt(operationNonce: String?): HansSetupProbeResult {
         val grant = capabilities.accessibilityGrantState()
@@ -392,15 +426,9 @@ internal fun everydayAccessSetupProbe(
 }
 
 /** Describes Hans's trusted action policy, never whether Android has granted Accessibility. */
-internal fun setupAccessibilityDescription(actionPolicy: HansPhoneActionPolicy): String = when (actionPolicy) {
-    HansPhoneActionPolicy.CONFIRM_ACTIONS ->
-        "Erlaubt semantisches Lesen und Bedienen sichtbarer Apps auf deinen Auftrag. " +
-            "Zusätzliche Hans-Bestätigungen können erforderlich sein. " +
-            "Android-Berechtigungen und technische Zugriffsgrenzen bleiben bestehen; Hans bleibt rootfrei."
-    HansPhoneActionPolicy.USER_AUTHORIZED_FULL_ACCESS ->
-        "Erlaubt semantisches Lesen und Bedienen sichtbarer Apps auf deinen Auftrag – " +
-            "ohne zusätzliche Hans-Rückfragen. Android-Berechtigungen und technische " +
-            "Zugriffsgrenzen bleiben bestehen; Hans bleibt rootfrei."
+internal fun setupAccessibilityDescription(actionPolicy: HansPhoneActionPolicy, text: HansTextResolver): String = when (actionPolicy) {
+    HansPhoneActionPolicy.CONFIRM_ACTIONS -> text.text(R.string.integration_accessibility_confirm)
+    HansPhoneActionPolicy.USER_AUTHORIZED_FULL_ACCESS -> text.text(R.string.integration_accessibility_full)
 }
 
 /** Setup records consent separately from live command/session readiness. */
@@ -439,10 +467,23 @@ internal fun accessibilitySetupLiveProbe(
     )
 }
 
-internal const val ACCESSIBILITY_SETUP_TARGET_DESCRIPTION =
-    "Hans App-Steuerung jetzt sicher testen"
-internal const val ACCESSIBILITY_SETUP_POSTCONDITION_TEXT =
-    "Hans hat genau diese Testaktion erkannt"
+/** Copy captured with the receipt arm, never re-resolved between offer and click. */
+data class AccessibilitySetupTestCopy(
+    val targetDescription: String,
+    val postconditionText: String,
+) {
+    init {
+        require(targetDescription.isNotBlank() && targetDescription.length <= 200)
+        require(postconditionText.isNotBlank() && postconditionText.length <= 200)
+    }
+
+    companion object {
+        fun capture(text: HansTextResolver): AccessibilitySetupTestCopy = AccessibilitySetupTestCopy(
+            text.text(R.string.integration_accessibility_test_target),
+            text.text(R.string.integration_accessibility_test_postcondition),
+        )
+    }
+}
 
 internal enum class AccessibilitySetupReceiptState {
     NOT_ARMED,
@@ -461,6 +502,7 @@ internal class AccessibilitySetupReceiptTracker(
         nonce: String,
         sessionId: AccessibilitySessionId?,
         baseline: SemanticUiSnapshot?,
+        displayCopy: AccessibilitySetupTestCopy,
     ) {
         requireSetupNonce(nonce)
         arm = Arm(
@@ -468,6 +510,7 @@ internal class AccessibilitySetupReceiptTracker(
             sessionId = sessionId,
             baselineCorrelation = baseline?.correlation,
             baselineCapturedAtElapsedMillis = baseline?.capturedAtElapsedMillis,
+            displayCopy = displayCopy,
         )
     }
 
@@ -481,7 +524,7 @@ internal class AccessibilitySetupReceiptTracker(
         if (!current.accepts(sessionId, snapshot) || current.verified) return false
         val exactTarget = snapshot.nodes.singleOrNull { node ->
             node.packageName?.value == ownPackageName &&
-                node.contentDescription?.value == ACCESSIBILITY_SETUP_TARGET_DESCRIPTION &&
+                node.contentDescription?.value == current.displayCopy.targetDescription &&
                 node.visible && node.enabled && node.clickable &&
                 SemanticUiAction.CLICK in node.actions
         } ?: return false
@@ -501,8 +544,8 @@ internal class AccessibilitySetupReceiptTracker(
         if (snapshot.correlation.snapshotId.value <= action.snapshotId.value) return false
         val exactMarker = snapshot.nodes.any { node ->
             node.packageName?.value == ownPackageName &&
-                (node.text?.value == ACCESSIBILITY_SETUP_POSTCONDITION_TEXT ||
-                    node.contentDescription?.value == ACCESSIBILITY_SETUP_POSTCONDITION_TEXT) &&
+                (node.text?.value == current.displayCopy.postconditionText ||
+                    node.contentDescription?.value == current.displayCopy.postconditionText) &&
                 node.visible
         }
         if (!exactMarker) return false
@@ -522,11 +565,16 @@ internal class AccessibilitySetupReceiptTracker(
         if (arm?.nonce == nonce) arm = null
     }
 
+    @Synchronized
+    fun displayCopy(nonce: String): AccessibilitySetupTestCopy? =
+        arm?.takeIf { it.nonce == nonce }?.displayCopy
+
     private data class Arm(
         val nonce: String,
         val sessionId: AccessibilitySessionId?,
         val baselineCorrelation: UiSnapshotCorrelation?,
         val baselineCapturedAtElapsedMillis: Long?,
+        val displayCopy: AccessibilitySetupTestCopy,
         val actionCorrelation: UiSnapshotCorrelation? = null,
         val verified: Boolean = false,
     ) {
@@ -560,6 +608,12 @@ class HansSetupRuntime(
         actionPolicy,
     ),
 ) {
+    init {
+        // Also provision when setup is opened without constructing the normal chat store.
+        // Failure remains unavailable in the fresh projection; setup must not claim success.
+        runCatching { HansDesktopProject.ensure(context.applicationContext.filesDir) }
+    }
+
     val repository = HansSetupRepository(storage)
     val dynamicTools = HansSetupDynamicToolExecutor(
         repository = repository,
@@ -637,6 +691,9 @@ class HansSetupRuntime(
 
     fun recordAccessibilityTargetAction(operationNonce: String): Boolean =
         probe.recordAccessibilityTargetAction(operationNonce)
+
+    fun accessibilityTestCopy(operationNonce: String): AccessibilitySetupTestCopy? =
+        probe.accessibilityTestCopy(operationNonce)
 
     fun recordAccessibilityPostcondition(operationNonce: String): Boolean =
         probe.recordAccessibilityPostcondition(operationNonce)

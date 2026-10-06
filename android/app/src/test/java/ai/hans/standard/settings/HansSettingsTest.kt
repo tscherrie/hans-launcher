@@ -33,9 +33,24 @@ class HansSettingsTest {
         assertEquals("gpt-6-astra", HansSettings(model = "gpt-6-astra").model)
         assertEquals("gpt-6-astra", HansSettings().model)
         assertEquals(
-            listOf("gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-6-astra"),
+            listOf("gpt-6-luna", "gpt-5.6-terra", "gpt-6.1-sol", "gpt-6-astra", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-6-sol"),
             HansSettings.MODEL_ORDER,
         )
+    }
+
+    @Test
+    fun currentCatalogIdsAndLegacySelectionsPreserveUnrelatedSettingsWithoutMigration() {
+        for (model in HansSettings.MODEL_ORDER) {
+            val settings = HansSettings(model = model, reasoningEffort = "high", serviceTier = HansSettings.FAST_SERVICE_TIER,
+                voice = "nova", speechRate = 1.5f, readAloudMode = ReadAloudMode.FINAL_ONLY,
+                dictationKeyTrigger = ActionKeyTrigger.HOLD_TO_TALK, cameraHoldToTalkEnabled = true)
+            assertEquals(model, settings.model)
+            assertEquals("nova", settings.voice)
+            assertEquals(1.5f, settings.speechRate)
+            assertEquals(ReadAloudMode.FINAL_ONLY, settings.readAloudMode)
+            assertEquals(ActionKeyTrigger.HOLD_TO_TALK, settings.dictationKeyTrigger)
+        }
+        assertFalse("There is no verified GPT-6 Terra model", "gpt-6-terra" in HansSettings.SUPPORTED_MODELS)
     }
 
     @Test

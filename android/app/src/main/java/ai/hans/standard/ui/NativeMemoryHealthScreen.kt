@@ -1,5 +1,11 @@
 package ai.hans.standard.ui
 
+import ai.hans.standard.R
+import ai.hans.standard.localization.HansTextResolver
+import ai.hans.standard.localization.AndroidHansTextResolver
+import ai.hans.standard.localization.rememberHansTextResolver
+import androidx.compose.ui.res.stringResource
+
 import ai.hans.standard.diagnostics.memory.NativeMemoryHealthPresentation
 import ai.hans.standard.diagnostics.memory.NativeMemoryHealthResult
 import ai.hans.standard.diagnostics.memory.NativeMemoryHealthWire
@@ -37,6 +43,7 @@ private val nativeMemoryHealthExecutor = ThreadPoolExecutor(1, 1, 30, TimeUnit.S
 
 @Composable
 internal fun NativeMemoryHealthScreen(onBack: () -> Unit) {
+    val uiText = rememberHansTextResolver()
     val context = LocalContext.current.applicationContext
     var request by remember { mutableIntStateOf(0) }
     var loading by remember { mutableStateOf(true) }
@@ -50,12 +57,12 @@ internal fun NativeMemoryHealthScreen(onBack: () -> Unit) {
     }
     BackHandler(onBack = onBack)
     Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing).testTag("native_memory_health")) {
-        ScreenHeader(title = "Codex-Gedächtnis", onBack = onBack)
+        ScreenHeader(title = uiText.text(R.string.ui_codex_memory_bd7222), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(16.dp)) {
-            Text(NativeMemoryHealthPresentation.DISCLOSURE)
+            Text(NativeMemoryHealthPresentation.disclosure(uiText))
             Spacer(Modifier.height(16.dp))
-            Text(if (loading) "Status wird gelesen …" else result?.let(NativeMemoryHealthPresentation::describe) ?: "Nicht verfügbar")
-            TextButton(onClick = { request++ }, enabled = !loading) { Text("Aktualisieren") }
+            Text(if (loading) uiText.text(R.string.ui_reading_status_4d36fe) else result?.let { NativeMemoryHealthPresentation.describe(it, uiText) } ?: uiText.text(R.string.ui_unavailable_5db96a))
+            TextButton(onClick = { request++ }, enabled = !loading) { Text(stringResource(R.string.ui_refresh_96bf00)) }
         }
     }
 }

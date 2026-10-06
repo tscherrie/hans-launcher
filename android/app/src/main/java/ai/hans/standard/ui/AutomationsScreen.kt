@@ -1,5 +1,11 @@
 package ai.hans.standard.ui
 
+import ai.hans.standard.R
+import ai.hans.standard.localization.HansTextResolver
+import ai.hans.standard.localization.AndroidHansTextResolver
+import ai.hans.standard.localization.rememberHansTextResolver
+import androidx.compose.ui.res.stringResource
+
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -48,6 +54,7 @@ fun AutomationsScreen(
     callbacks: AutomationsUiCallbacks,
     modifier: Modifier = Modifier,
 ) {
+    val uiText = rememberHansTextResolver()
     BackHandler(onBack = callbacks.onBack)
     var pendingDelete by remember { mutableStateOf<AutomationUiModel?>(null) }
     var pendingHistory by remember { mutableStateOf<AutomationUiModel?>(null) }
@@ -59,7 +66,7 @@ fun AutomationsScreen(
             .windowInsetsPadding(WindowInsets.safeDrawing)
             .testTag("automations_screen"),
     ) {
-        ScreenHeader(title = "Automationen", onBack = callbacks.onBack)
+        ScreenHeader(title = uiText.text(R.string.ui_automations_1a2219), onBack = callbacks.onBack)
         HorizontalDivider(color = MaterialTheme.colorScheme.outline)
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
@@ -70,14 +77,14 @@ fun AutomationsScreen(
                 enabled = !state.loading && !operationInProgress,
                 modifier = Modifier.weight(1f).testTag("create_automation_in_chat"),
             ) {
-                Text("Neue Automation")
+                Text(stringResource(R.string.ui_new_automation_40e06b))
             }
             OutlinedButton(
                 onClick = callbacks.onRefresh,
                 enabled = !state.loading && !operationInProgress,
                 modifier = Modifier.weight(1f).testTag("refresh_automations"),
             ) {
-                Text(if (state.loading) "Wird geprüft …" else "Neu prüfen")
+                Text(if (state.loading) uiText.text(R.string.ui_checking_490232) else uiText.text(R.string.ui_check_again_adbde2))
             }
         }
 
@@ -99,7 +106,7 @@ fun AutomationsScreen(
             if (state.items.isEmpty() && !state.loading && state.errorMessage.isBlank()) {
                 item(key = "empty") {
                     AutomationNotice(
-                        text = "Noch keine Automationen eingerichtet. Beschreibe Hans im Chat, was wann geschehen soll.",
+                        text = uiText.text(R.string.ui_no_automations_configured_yet_tell_hans_in_chat__719efe),
                         error = false,
                         testTag = "automations_empty",
                     )
@@ -120,10 +127,10 @@ fun AutomationsScreen(
     pendingDelete?.let { item ->
         AlertDialog(
             onDismissRequest = { pendingDelete = null },
-            title = { Text("Automation löschen?") },
+            title = { Text(stringResource(R.string.ui_delete_automation_fa45b9)) },
             text = {
                 Text(
-                    "„${item.id}“ wird deaktiviert und entfernt. Bereits abgeschlossene Laufnachweise bleiben für Diagnose und Sicherheit erhalten.",
+                    stringResource(R.string.ui_value_will_be_disabled_and_removed_records_of_co_df6feb, item.id),
                 )
             },
             confirmButton = {
@@ -134,10 +141,10 @@ fun AutomationsScreen(
                     },
                     enabled = !operationInProgress,
                     modifier = Modifier.testTag("confirm_delete_automation"),
-                ) { Text("Löschen") }
+                ) { Text(stringResource(R.string.ui_delete_6c2d35)) }
             },
             dismissButton = {
-                TextButton(onClick = { pendingDelete = null }) { Text("Abbrechen") }
+                TextButton(onClick = { pendingDelete = null }) { Text(stringResource(R.string.ui_cancel_f7ff11)) }
             },
         )
     }
@@ -145,7 +152,7 @@ fun AutomationsScreen(
     pendingHistory?.let { item ->
         AlertDialog(
             onDismissRequest = { pendingHistory = null },
-            title = { Text("Laufverlauf") },
+            title = { Text(stringResource(R.string.ui_run_history_8e3c44)) },
             text = {
                 Column(modifier = Modifier.fillMaxWidth()) {
                     Text(
@@ -156,7 +163,7 @@ fun AutomationsScreen(
                     Spacer(Modifier.height(8.dp))
                     if (item.history.isEmpty()) {
                         Text(
-                            text = "Für diese Automation gibt es noch keine gespeicherten Läufe.",
+                            text = stringResource(R.string.ui_no_saved_runs_for_this_automation_yet_d53dcd),
                             modifier = Modifier.testTag("automation_history_empty"),
                             style = MaterialTheme.typography.bodyLarge,
                         )
@@ -197,7 +204,7 @@ fun AutomationsScreen(
                             if (item.historyTruncated) {
                                 item {
                                     Text(
-                                        text = "Es werden die 20 neuesten Läufe angezeigt.",
+                                        text = stringResource(R.string.ui_showing_the_20_most_recent_runs_cc9543),
                                         modifier = Modifier.testTag("automation_history_truncated"),
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         style = MaterialTheme.typography.bodySmall,
@@ -212,7 +219,7 @@ fun AutomationsScreen(
                 TextButton(
                     onClick = { pendingHistory = null },
                     modifier = Modifier.testTag("close_automation_history"),
-                ) { Text("Schließen") }
+                ) { Text(stringResource(R.string.ui_close_b808f6)) }
             },
         )
     }
@@ -226,6 +233,7 @@ private fun AutomationCard(
     onHistoryRequested: () -> Unit,
     onDeleteRequested: () -> Unit,
 ) {
+    val uiText = rememberHansTextResolver()
     Surface(
         modifier = Modifier.fillMaxWidth().testTag("automation_${item.id}"),
         color = MaterialTheme.colorScheme.surfaceVariant,
@@ -249,16 +257,16 @@ private fun AutomationCard(
             }
             Spacer(Modifier.height(8.dp))
             AutomationDetailLine(item.scheduleLabel)
-            AutomationDetailLine(item.missedRunMode.label)
+            AutomationDetailLine(stringResource(item.missedRunMode.labelResource))
             AutomationDetailLine(item.timingLabel)
             AutomationDetailLine(item.nextRunLabel)
-            AutomationDetailLine("Letzter Lauf: ${item.lastRunLabel}")
-            item.lastFailureLabel?.let { AutomationDetailLine("Letzter Hinweis: $it") }
+            AutomationDetailLine(uiText.text(R.string.ui_last_run_value_9bbc36, item.lastRunLabel))
+            item.lastFailureLabel?.let { AutomationDetailLine(uiText.text(R.string.ui_latest_notice_value_caf68b, it)) }
             if (item.pendingCount > 0) {
-                AutomationDetailLine("${item.pendingCount} ausstehende Vorgänge")
+                AutomationDetailLine(uiText.quantity(R.plurals.ui_pending_operations, item.pendingCount, item.pendingCount))
             }
             if (item.requiresUnlockedDevice) {
-                AutomationDetailLine("Für die Ausführung muss das Telefon entsperrt sein.")
+                AutomationDetailLine(uiText.text(R.string.ui_the_phone_must_be_unlocked_to_run_this_1aaa1d))
             }
 
             HorizontalDivider(
@@ -266,8 +274,8 @@ private fun AutomationCard(
                 color = MaterialTheme.colorScheme.outlineVariant,
             )
             AutomationSwitchRow(
-                label = "Aktiv",
-                supporting = if (item.enabled) "Zeitplan eingeschaltet" else "Zeitplan pausiert",
+                label = uiText.text(R.string.ui_active_816345),
+                supporting = if (item.enabled) uiText.text(R.string.ui_schedule_enabled_b5f696) else uiText.text(R.string.ui_schedule_paused_0df1d8),
                 checked = item.enabled,
                 enabled = !operationInProgress,
                 testTag = "automation_enabled_${item.id}",
@@ -276,11 +284,11 @@ private fun AutomationCard(
                 },
             )
             AutomationSwitchRow(
-                label = "Unbeaufsichtigt ausführen",
+                label = uiText.text(R.string.ui_run_unattended_001022),
                 supporting = if (item.unattended) {
-                    "Läuft ohne Bestätigung jedes einzelnen Termins; Telefonwerkzeuge prüfen weiterhin ihre eigenen Zugriffsregeln."
+                    uiText.text(R.string.ui_runs_without_confirmation_for_each_scheduled_occ_23cc31)
                 } else {
-                    "Vor jedem Termin ist eine ausdrückliche Bestätigung erforderlich."
+                    uiText.text(R.string.ui_explicit_confirmation_is_required_before_each_sc_e0ad88)
                 },
                 checked = item.unattended,
                 enabled = !operationInProgress,
@@ -297,12 +305,12 @@ private fun AutomationCard(
                     onClick = { callbacks.onEditInChat(item.id, item.revision) },
                     enabled = !operationInProgress,
                     modifier = Modifier.weight(1f).testTag("edit_automation_${item.id}"),
-                ) { Text("Bearbeiten") }
+                ) { Text(stringResource(R.string.ui_edit_84e45e)) }
                 OutlinedButton(
                     onClick = onHistoryRequested,
                     enabled = !operationInProgress,
                     modifier = Modifier.weight(1f).testTag("history_automation_${item.id}"),
-                ) { Text("Verlauf") }
+                ) { Text(stringResource(R.string.ui_history_5fd703)) }
             }
             Row(
                 modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
@@ -313,12 +321,12 @@ private fun AutomationCard(
                     onClick = { callbacks.onRunNow(item.id, item.revision) },
                     enabled = item.enabled && !operationInProgress,
                     modifier = Modifier.weight(1f).testTag("run_automation_${item.id}"),
-                ) { Text("Jetzt ausführen") }
+                ) { Text(stringResource(R.string.ui_run_now_119b40)) }
                 TextButton(
                     onClick = onDeleteRequested,
                     enabled = !operationInProgress,
                     modifier = Modifier.testTag("delete_automation_${item.id}"),
-                ) { Text("Löschen") }
+                ) { Text(stringResource(R.string.ui_delete_6c2d35)) }
             }
         }
     }
@@ -333,6 +341,7 @@ private fun AutomationSwitchRow(
     testTag: String,
     onCheckedChange: (Boolean) -> Unit,
 ) {
+    val uiText = rememberHansTextResolver()
     Row(
         modifier = Modifier.fillMaxWidth().padding(vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -356,6 +365,7 @@ private fun AutomationSwitchRow(
 
 @Composable
 private fun AutomationDetailLine(text: String) {
+    val uiText = rememberHansTextResolver()
     Text(
         text = text,
         modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp),
@@ -366,6 +376,7 @@ private fun AutomationDetailLine(text: String) {
 
 @Composable
 private fun AutomationNotice(text: String, error: Boolean, testTag: String) {
+    val uiText = rememberHansTextResolver()
     Text(
         text = text,
         modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 12.dp).testTag(testTag),

@@ -14,18 +14,23 @@ class LiveVoicePreferenceWiringTest {
             .substringBefore("internal const val ACTION_START")
 
         assertTrue(createSession.contains("voiceSelectionProvider = LiveVoiceVoiceSelectionProvider {"))
-        assertTrue(createSession.contains("LiveVoiceApiVoiceResolver.resolve(settings.read().liveVoice)"))
+        assertTrue(createSession.contains("CodexLiveVoiceVoiceResolver.resolve(settings.read().codexLiveVoice)"))
+        assertTrue(createSession.contains("CodexLiveVoiceSession("))
+        assertFalse(createSession.contains("OpenAiLiveSessionProvider("))
+        assertFalse(createSession.contains("loadBearerToken"))
+        assertFalse(createSession.contains("taskExecutor ="))
         assertFalse(createSession.contains("settings.read().voice"))
         assertFalse(createSession.contains("LiveVoiceRealtimeVoiceMapper"))
     }
 
     @Test
-    fun liveRuntimeDefaultIsRippleWithoutChangingTheLegacyRealtimeConfigDefault() {
+    fun liveRuntimeDefaultIsNativeCoveWithoutChangingLegacyApiDefaults() {
         val defaults = runtimeSource().readText()
             .substringAfter("data class LiveVoiceRuntimeDependencies(")
             .substringBefore("fun interface LiveVoiceCaptureStartBarrier")
 
-        assertTrue(defaults.contains("voice = LiveVoiceApiVoiceResolver.DEFAULT_VOICE"))
+        assertTrue(defaults.contains("voice = CodexLiveVoiceVoiceResolver.DEFAULT_VOICE"))
+        assertTrue(defaults.contains("model = CodexLiveVoiceSession.MODEL"))
     }
 
     private fun runtimeSource(): File = sequenceOf(

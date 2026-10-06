@@ -1,5 +1,8 @@
 package ai.hans.standard.ui
 
+import ai.hans.standard.localization.TestResourceTextResolver
+import java.util.Locale
+
 import ai.hans.standard.artifacts.ArtifactHandle
 import ai.hans.standard.artifacts.ArtifactMetadata
 import ai.hans.standard.artifacts.ArtifactOrigin
@@ -16,6 +19,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class WorkbenchProjectionTest {
+    private val localizationText by lazy { TestResourceTextResolver(Locale.GERMAN) }
+
     @Test
     fun projectionIsBoundedAndContainsOnlyOpaqueVerifiedMetadata() {
         val workspace = WorkspaceSnapshot(
@@ -39,8 +44,7 @@ class WorkbenchProjectionTest {
             workspaces = listOf(workspace, workspace),
             artifacts = listOf(artifact, artifact.copy(handle = ArtifactHandle("art_${"e".repeat(64)}"))),
             python = null,
-            limit = 1,
-        )
+            limit = 1, text = localizationText)
 
         assertEquals(listOf(workspace.handle.value), state.workspaces.map { it.handle })
         assertEquals(1, state.workspaces.single().fileCount)
@@ -69,8 +73,7 @@ class WorkbenchProjectionTest {
                     detail = secret,
                 ),
                 detail = secret,
-            ),
-        )
+            ), text = localizationText)
 
         assertTrue(state.python.initialized)
         assertEquals("Eingeschränkt", state.python.phaseLabel)
@@ -88,8 +91,7 @@ class WorkbenchProjectionTest {
                 phase = PythonRuntimePhase.STOPPED,
                 generation = 3,
                 runtimePid = 0,
-            ),
-        )
+            ), text = localizationText)
 
         assertTrue(state.python.initialized)
         assertEquals("Bereit bei Bedarf", state.python.phaseLabel)
@@ -99,8 +101,8 @@ class WorkbenchProjectionTest {
 
     @Test
     fun byteFormattingIsStableAndHumanReadable() {
-        assertEquals("0 B", formatWorkbenchBytes(0))
-        assertEquals("1,0 KB", formatWorkbenchBytes(1_024))
-        assertEquals("2,0 MB", formatWorkbenchBytes(2L * 1_024 * 1_024))
+        assertEquals("0 B", formatWorkbenchBytes(0, Locale.GERMANY))
+        assertEquals("1,0 KB", formatWorkbenchBytes(1_024, Locale.GERMANY))
+        assertEquals("2,0 MB", formatWorkbenchBytes(2L * 1_024 * 1_024, Locale.GERMANY))
     }
 }

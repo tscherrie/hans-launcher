@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="setup_desktop_project_instructions">Nach dem Koppeln am Desktop in Codex oder ChatGPT Work eine Aufgabe starten, dieses Telefon wählen und %1$s als Projektordner verwenden. Der Pfad ist unter Fernzugriff durch ChatGPT Desktop kopierbar.</string>
+    <string name="setup_desktop_project_permissions">Der Projektordner erteilt keine Berechtigungen. Hans nutzt die auf diesem Telefon erlaubten Zugriffe und den bestehenden Freigabemodus.</string>
+</resources>

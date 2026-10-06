@@ -58,6 +58,22 @@ class ActiveNotificationReplyRegistry private constructor(
 
     fun isAvailable(): Boolean = listenerConnected
 
+    /** Resolve only the exact enrolled source; never match a display title or prefix. */
+    internal fun replyTargetForAgentRequest(
+        receipt: ai.hans.standard.notifications.agentchannel.AgentChannelRequestReceipt,
+    ): ReplyableNotification? {
+        if (!listenerConnected) return null
+        val entry = synchronized(active) { active[receipt.notificationKey] } ?: return null
+        if (entry.notification.packageName != "com.whatsapp") return null
+        val source = runCatching {
+            ai.hans.standard.phone.notifications.AndroidNotificationExtractor.upsert(
+                entry.notification, System.currentTimeMillis(),
+            ).snapshot.agentChannelSource
+        }.getOrNull() ?: return null
+        if (source.identity() != receipt.sourceIdentity) return null
+        return runCatching { project(entry) }.getOrNull()
+    }
+
     fun list(limit: Int): PublicPhonePlatformResult<List<ReplyableNotification>> {
         if (!listenerConnected) {
             return PublicPhonePlatformResult.Failure("notification_listener_not_connected")

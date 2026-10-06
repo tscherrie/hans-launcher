@@ -1,5 +1,7 @@
 package ai.hans.standard.voice.tts
 
+import ai.hans.standard.localization.TestResourceTextResolver
+
 import ai.hans.standard.codex.AgentMessagePhase
 import ai.hans.standard.codex.CodexSessionReducer
 import ai.hans.standard.codex.ReasoningEffort
@@ -17,7 +19,7 @@ import org.junit.Test
 class CodexTimelineSpeechProjectorTest {
     @Test
     fun recoveredHistoryFormsABaselineAndIsNeverReadAloud() {
-        val projector = CodexTimelineSpeechProjector()
+        val projector = CodexTimelineSpeechProjector(text = TestResourceTextResolver(java.util.Locale.GERMAN))
         val existing = hans("old", 4, "Earlier answer", complete = true)
 
         assertTrue(projector.accept(snapshot(ClientSessionPhase.RECOVERING_THREAD, existing), true).isEmpty())
@@ -27,7 +29,7 @@ class CodexTimelineSpeechProjectorTest {
 
     @Test
     fun laterRuntimeRecoveryIsAbsorbedEvenAfterSpeechBaselineAlreadyExists() {
-        val projector = CodexTimelineSpeechProjector()
+        val projector = CodexTimelineSpeechProjector(text = TestResourceTextResolver(java.util.Locale.GERMAN))
         projector.accept(snapshot(ClientSessionPhase.READY), enabled = true)
         val recovered = hans("recovered-later", 1, "Nicht erneut vorlesen", complete = true)
 
@@ -52,7 +54,7 @@ class CodexTimelineSpeechProjectorTest {
 
     @Test
     fun streamedRevisionsAreMonotonicAndKeepTheServerMessagePhase() {
-        val projector = CodexTimelineSpeechProjector()
+        val projector = CodexTimelineSpeechProjector(text = TestResourceTextResolver(java.util.Locale.GERMAN))
         projector.accept(snapshot(ClientSessionPhase.READY), enabled = true)
 
         val first = projector.accept(
@@ -106,7 +108,7 @@ class CodexTimelineSpeechProjectorTest {
 
     @Test
     fun revisionsSeenWithoutCredentialAreNotReplayedWhenSpeechBecomesAvailable() {
-        val projector = CodexTimelineSpeechProjector()
+        val projector = CodexTimelineSpeechProjector(text = TestResourceTextResolver(java.util.Locale.GERMAN))
         projector.accept(snapshot(ClientSessionPhase.READY), enabled = false)
         val answer = hans("silent", 1, "Do not replay", complete = true)
 
@@ -125,7 +127,7 @@ class CodexTimelineSpeechProjectorTest {
 
     @Test
     fun userAndToolItemsNeverEnterSpeechProjection() {
-        val projector = CodexTimelineSpeechProjector()
+        val projector = CodexTimelineSpeechProjector(text = TestResourceTextResolver(java.util.Locale.GERMAN))
         projector.accept(snapshot(ClientSessionPhase.READY), enabled = true)
         val result = projector.accept(
             snapshot(
@@ -156,7 +158,7 @@ class CodexTimelineSpeechProjectorTest {
 
     @Test
     fun dispatchBoundarySuppressesOlderTurnRevisionsWithoutReplayingThem() {
-        val projector = CodexTimelineSpeechProjector()
+        val projector = CodexTimelineSpeechProjector(text = TestResourceTextResolver(java.util.Locale.GERMAN))
         projector.accept(snapshot(ClientSessionPhase.READY), enabled = true)
         val old = hans("old", 1, "Old turn", complete = false).copy(order = 4)
         val current = hans("current", 1, "Current turn", complete = true).copy(order = 6)
@@ -186,7 +188,7 @@ class CodexTimelineSpeechProjectorTest {
 
     @Test
     fun activeSetupSpeechNeverReceivesRawImplementationValues() {
-        val projector = CodexTimelineSpeechProjector()
+        val projector = CodexTimelineSpeechProjector(text = TestResourceTextResolver(java.util.Locale.GERMAN))
         projector.accept(snapshot(ClientSessionPhase.READY), enabled = true)
 
         val spoken = projector.accept(
@@ -212,7 +214,7 @@ class CodexTimelineSpeechProjectorTest {
 
     @Test
     fun nonSetupSpeechKeepsCodeContentWithoutSpeakingBacktickMarkers() {
-        val projector = CodexTimelineSpeechProjector()
+        val projector = CodexTimelineSpeechProjector(text = TestResourceTextResolver(java.util.Locale.GERMAN))
         projector.accept(snapshot(ClientSessionPhase.READY), enabled = true)
         val original = "In der Dokumentation heißt das Beispiel `intro`."
 
@@ -226,7 +228,7 @@ class CodexTimelineSpeechProjectorTest {
 
     @Test
     fun assistantUrlProjectionDoesNotMutateTheSourceTimeline() {
-        val projector = CodexTimelineSpeechProjector()
+        val projector = CodexTimelineSpeechProjector(text = TestResourceTextResolver(java.util.Locale.GERMAN))
         projector.accept(snapshot(ClientSessionPhase.READY), enabled = true)
         val raw = hans("web-answer", 1, "Hier ist [die Route](https://maps.example/route).", complete = true)
         val source = snapshot(ClientSessionPhase.READY, raw)
@@ -240,7 +242,7 @@ class CodexTimelineSpeechProjectorTest {
 
     @Test
     fun emptyFinalProjectionIsStillDeliveredSoItCanReleaseTheSpeechQueue() {
-        val projector = CodexTimelineSpeechProjector()
+        val projector = CodexTimelineSpeechProjector(text = TestResourceTextResolver(java.util.Locale.GERMAN))
         projector.accept(snapshot(ClientSessionPhase.READY), enabled = true)
         val raw = hans("empty-answer", 1, "", complete = false)
         val streaming = projector.accept(snapshot(ClientSessionPhase.BUSY, raw), enabled = true).single()
@@ -258,7 +260,7 @@ class CodexTimelineSpeechProjectorTest {
 
     @Test
     fun namedLinksAndMarkdownHaveOneReadableSpokenProjection() {
-        val projector = CodexTimelineSpeechProjector()
+        val projector = CodexTimelineSpeechProjector(text = TestResourceTextResolver(java.util.Locale.GERMAN))
         projector.accept(snapshot(ClientSessionPhase.READY), enabled = true)
         val source = hans(
             "formatted-answer", 1,
@@ -276,7 +278,7 @@ class CodexTimelineSpeechProjectorTest {
 
     @Test
     fun bareWebAddressSpeaksOnlyItsHonestSiteNameWhenItFinishes() {
-        val projector = CodexTimelineSpeechProjector()
+        val projector = CodexTimelineSpeechProjector(text = TestResourceTextResolver(java.util.Locale.GERMAN))
         projector.accept(snapshot(ClientSessionPhase.READY), enabled = true)
         val source = hans("web-site", 1, "https://example.org/private?q=value", complete = false)
 

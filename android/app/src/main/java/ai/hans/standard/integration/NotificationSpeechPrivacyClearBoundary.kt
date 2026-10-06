@@ -5,6 +5,7 @@ internal data class NotificationSpeechAttempt(
     val announcementId: String,
     val playbackId: String,
     val gateEpoch: Long,
+    val deliveryEpoch: Long = gateEpoch,
 )
 
 internal data class NotificationSpeechFailureRetryTicket(
@@ -38,6 +39,7 @@ internal class NotificationSpeechHostState {
     private val scheduledFailureRetries =
         mutableMapOf<String, NotificationSpeechFailureRetryTicket>()
     private var physicalStopRequired: Boolean = false
+    private var lastResumedGateEpoch: Long = -1L
 
     fun nextAttemptSequence(): Long {
         attemptSequence += 1
@@ -112,22 +114,35 @@ internal class NotificationSpeechHostState {
 
     /** Explicit recovery signals start a new bounded retry generation. */
     fun resumeDeferred() {
+        lastResumedGateEpoch = gateEpoch
         failureRetrySequence += 1L
         scheduledFailureRetries.clear()
         automaticFailureCounts.clear()
         deferredAnnouncementIds.clear()
     }
 
+    /** A queued stop receipt cannot re-defer work after its interaction already resumed. */
+    fun dropPlayback(attempt: NotificationSpeechAttempt): Boolean {
+        if (inFlight != attempt) return false
+        inFlight = null
+        if (attempt.gateEpoch < lastResumedGateEpoch) {
+            deferredAnnouncementIds -= attempt.announcementId
+        } else {
+            deferredAnnouncementIds += attempt.announcementId
+        }
+        return true
+    }
+
     /**
      * Returns true until every playback that existed at a privacy boundary has a physical stop
      * acknowledgement. Clearing the correlation alone is deliberately not treated as proof.
      */
-    fun cancelAllForPrivacyPurge(): Boolean {
+    fun cancelAllForPrivacyPurge(physicalOutputActive: Boolean = false): Boolean {
         advanceGate()
         deferredAnnouncementIds.clear()
         scheduledFailureRetries.clear()
         automaticFailureCounts.clear()
-        physicalStopRequired = physicalStopRequired || inFlight != null
+        physicalStopRequired = physicalStopRequired || inFlight != null || physicalOutputActive
         inFlight = null
         return physicalStopRequired
     }
@@ -137,12 +152,12 @@ internal class NotificationSpeechHostState {
      * separately suppresses speech (without deleting notification context or facts).
      * Physical stop remains sticky until the player acknowledges it.
      */
-    fun pauseForInaudiblePolicy(): Boolean {
+    fun pauseForInaudiblePolicy(physicalOutputActive: Boolean = false): Boolean {
         advanceGate()
         deferredAnnouncementIds.clear()
         scheduledFailureRetries.clear()
         automaticFailureCounts.clear()
-        physicalStopRequired = physicalStopRequired || inFlight != null
+        physicalStopRequired = physicalStopRequired || inFlight != null || physicalOutputActive
         inFlight = null
         return physicalStopRequired
     }

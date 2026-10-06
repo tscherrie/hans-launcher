@@ -33,7 +33,7 @@ class ChatTimelineRestorationTest {
                 composer = ComposerUiState(enabled = false),
             ),
         )
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 ChatScreen(state = state.value, callbacks = callbacks())
             }
@@ -65,6 +65,7 @@ class ChatTimelineRestorationTest {
                 ),
                 local = HansLocalUiState(),
                 settings = HansSettings(),
+                text = ai.hans.standard.localization.AndroidHansTextResolver(germanUiTestContext()),
             ).chat
         }
 
@@ -77,7 +78,7 @@ class ChatTimelineRestorationTest {
 
     @Test
     fun restoredUserAndHansItemsWithTheSameProtocolIdRemainDistinct() {
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 ChatScreen(
                     state = HansClientUiProjector.project(
@@ -103,6 +104,7 @@ class ChatTimelineRestorationTest {
                         ),
                         local = HansLocalUiState(),
                         settings = HansSettings(),
+                text = ai.hans.standard.localization.AndroidHansTextResolver(germanUiTestContext()),
                     ).chat,
                     callbacks = callbacks(),
                 )

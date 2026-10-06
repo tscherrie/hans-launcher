@@ -11,6 +11,21 @@ import org.junit.Test
 
 class RetainedAccessibilityFrameStoreTest {
     @Test
+    fun crossTurnInvalidationDropsBothAuthorityCachesWithoutLosingCurrentDisplay() {
+        val store = RetainedAccessibilityFrameStore(elapsedRealtimeMillis = { 1_000L })
+        val value = frame(1)
+        store.publish(value)
+        assertTrue(store.retainCurrentForCommand(value.correlation))
+        assertTrue(store.retainCurrentForReceipt(value.correlation))
+        store.clearRetainedEvidence()
+        assertNotNull(store.currentFrame())
+        assertNull(store.commandFrame(value.correlation))
+        assertNull(store.receiptFrame(value.correlation))
+        assertFalse(store.promoteReceiptForCommands(value.correlation))
+        assertFalse(store.extendCommandFrameForConfirmation(value.correlation))
+    }
+
+    @Test
     fun commandFramesAreBoundedAccessOrderedAndExpireWithoutPolling() {
         var now = 1_000L
         val store = RetainedAccessibilityFrameStore(

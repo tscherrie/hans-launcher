@@ -1,5 +1,10 @@
 package ai.hans.standard
 
+import ai.hans.standard.localization.AndroidHansTextResolver
+import ai.hans.standard.localization.HansTextResolver
+import ai.hans.standard.localization.rememberHansTextResolver
+import ai.hans.standard.localization.HansLocaleAwareActivity
+
 import android.annotation.SuppressLint
 import android.app.StatusBarManager
 import android.app.AlarmManager
@@ -125,6 +130,7 @@ import ai.hans.standard.phone.keys.ActionKeyDispatcher
 import ai.hans.standard.phone.keys.ActionKeyIgnoreReason
 import ai.hans.standard.phone.keys.ActionKeyMapping
 import ai.hans.standard.phone.keys.ActionKeyMappingPreferencesStore
+import ai.hans.standard.phone.keys.forTaskVoiceControls
 import ai.hans.standard.phone.keys.ActionKeyMappingSet
 import ai.hans.standard.phone.keys.ActionKeyTrigger
 import ai.hans.standard.phone.keys.AndroidMp01VendorActionRemediation
@@ -172,8 +178,6 @@ import ai.hans.standard.setup.HansSetupHandoffEnvironment
 import ai.hans.standard.setup.HansSetupHandoffOutboundStatus
 import ai.hans.standard.setup.HansSetupHandoffRecord
 import ai.hans.standard.setup.HansSetupHandoffSignalCenter
-import ai.hans.standard.setup.ACCESSIBILITY_SETUP_POSTCONDITION_TEXT
-import ai.hans.standard.setup.ACCESSIBILITY_SETUP_TARGET_DESCRIPTION
 import ai.hans.standard.setup.SetupUiCommand
 import ai.hans.standard.setup.SetupUiCommandHandler
 import ai.hans.standard.setup.SetupUiCommandLease
@@ -205,6 +209,7 @@ import ai.hans.standard.ui.HansPendingAttachment
 import ai.hans.standard.ui.HansTheme
 import ai.hans.standard.ui.HansUiCallbacks
 import ai.hans.standard.ui.LiveVoiceUiStatus
+import ai.hans.standard.ui.afterDictationPublication
 import ai.hans.standard.ui.Mp01VendorActionConflictUiState
 import ai.hans.standard.ui.validatedHttpsPluginLinkOrNull
 import ai.hans.standard.ui.Mp01VendorActionConflictUiKind
@@ -229,6 +234,8 @@ import ai.hans.standard.ui.AndroidSpeechCredentialDialog
 import ai.hans.standard.ui.authoritativeIdleMediaThreadIds
 import ai.hans.standard.ui.SpeechCredentialDialogOutcome
 import ai.hans.standard.ui.DictationUiStatus
+import ai.hans.standard.ui.VoiceInputTransitionPolicy
+import ai.hans.standard.ui.VoiceInputCommandAction
 import ai.hans.standard.ui.ComposerDispatchReconciliation
 import ai.hans.standard.ui.ComposerDraftSnapshot
 import ai.hans.standard.ui.reconcileComposerDispatch
@@ -273,7 +280,10 @@ import java.util.UUID
  * Hans screen. The Activity owns only UI drafts and visible
  * confirmations; the process-wide [AndroidCodexSessionHost] owns Codex.
  */
-class LauncherActivity : ComponentActivity() {
+class LauncherActivity : HansLocaleAwareActivity() {
+    private fun tr(resourceId: Int, vararg args: Any): String =
+        AndroidHansTextResolver(this).text(resourceId, *args)
+
     override fun dump(
         prefix: String,
         fd: java.io.FileDescriptor?,
@@ -281,6 +291,37 @@ class LauncherActivity : ComponentActivity() {
         args: Array<out String>?,
     ) {
         val command = args?.singleOrNull()
+        if (command == "--hans-notification-hooks") {
+            // Content-free, passive DUMP probe: no host bootstrap, history request or retry.
+            val status = (application as? HansApplication)?.passiveNotificationEventStatus()
+            val payload = org.json.JSONObject()
+                .put("initialized", status != null)
+                .put("available", status?.available ?: false)
+                .put("activated", status?.activated ?: false)
+                .put("readyCount", status?.readyCount ?: 0)
+                .put("unsettledCount", status?.unsettledCount ?: 0)
+                .put("uncertainCount", status?.uncertainCount ?: 0)
+                .put("technicalUpdateCount", status?.technicalUpdateCount ?: 0)
+                .put("waitReason", status?.waitReason ?: org.json.JSONObject.NULL)
+                .put("failureCode", status?.failureCode ?: org.json.JSONObject.NULL)
+                .put("outcomes", status?.outcomes?.let {
+                    ai.hans.standard.notifications.hooks.notificationHookOutcomeDiagnosticJson(it)
+                } ?: org.json.JSONObject.NULL)
+            writer.println(prefix + "HANS_NOTIFICATION_HOOKS " + payload)
+            return
+        }
+        if (command == "--hans-voice") {
+            // Existing DUMP-authorized, on-demand read only. No transcript, thread identity,
+            // account data, SDP, audio, polling, store initialization or runtime action.
+            val realtime = if (::sessionHost.isInitialized) sessionHost.realtimeDiagnostics() else null
+            writer.println(prefix + "HANS_VOICE " + encodeHansVoiceDiagnostics(
+                realtime = realtime,
+                dictationPhase = HansDictationRuntime.snapshotUi().phase,
+                livePhase = AndroidLiveVoiceRuntime.snapshot().phase,
+                captureRequestedOrActive = AndroidLiveVoiceRuntime.isCaptureRequestedOrActive(),
+            ))
+            return
+        }
         if (command == "--hans-remote-control") {
             val snapshot = if (::sessionHost.isInitialized) sessionHost.snapshot() else null
             writer.println(prefix + "HANS_REMOTE_CONTROL " +
@@ -293,6 +334,13 @@ class LauncherActivity : ComponentActivity() {
             val snapshot = if (::sessionHost.isInitialized) sessionHost.snapshot() else null
             writer.println(prefix + "HANS_MODELS " +
                 ai.hans.standard.diagnostics.ModelSelectionDiagnostics.encode(snapshot))
+            return
+        }
+        if (command == "--hans-tool-failures") {
+            // Passive loaded event metadata only: no history fetch, model turn, or tool replay.
+            val snapshot = if (::sessionHost.isInitialized) sessionHost.snapshot() else null
+            writer.println(prefix + "HANS_TOOL_FAILURES " +
+                ai.hans.standard.diagnostics.ToolHistoryDiagnostics.encode(snapshot?.session))
             return
         }
         if (command == "--hans-model-key") {
@@ -393,6 +441,12 @@ class LauncherActivity : ComponentActivity() {
         ai.hans.standard.ui.NotificationFactArchiveStatus(),
     )
     private val notificationFactStatusGeneration = ai.hans.standard.ui.NotificationFactStatusGeneration()
+    private var whatsAppAgentChannelState by androidx.compose.runtime.mutableStateOf(
+        ai.hans.standard.ui.WhatsAppAgentChannelUiState(),
+    )
+    private var whatsAppAgentChannelSubscription: Closeable? = null
+    private var whatsAppAgentChannelDialog: AlertDialog? = null
+    private var whatsAppAgentChannelDialogGeneration = 0L
 
     private var settings by androidx.compose.runtime.mutableStateOf(HansSettings())
     private var displayMotionMode by androidx.compose.runtime.mutableStateOf(DisplayMotionMode.AUTOMATIC)
@@ -459,10 +513,12 @@ class LauncherActivity : ComponentActivity() {
     private var dictationObserver: DictationRuntimeObserver? = null
     private var speechServiceFailureObserver: SpeechServiceFailureObserver? = null
     private var liveVoiceObserver: LiveVoiceCancellation? = null
+    private var liveVoiceCaptureObserver: LiveVoiceCancellation? = null
     private var speechAudioRouteSubscription: AutoCloseable? = null
     private var internetSubscription: Closeable? = null
     private var pendingDictationSubscription: Closeable? = null
     private var notificationAnnouncementObserver: ValidatedNotificationAnnouncementObserver? = null
+    private var notificationReportSubscription: java.io.Closeable? = null
     private var activeLiveUserMessageId: String? = null
     private var activeLiveHansMessageId: String? = null
     private var nextLiveVoiceMessageId = 0L
@@ -492,7 +548,7 @@ class LauncherActivity : ComponentActivity() {
                     ),
                 )
                 if (captured) {
-                    showShortMessage("Das Testfoto enthielt keine neue Aufnahme.")
+                    showShortMessage(tr(R.string.integration_the_test_photo_did_not_contain_a_new_capture_23580a3))
                 }
             } else {
                 cameraCaptureCoordinator.completeImport(photo)
@@ -514,7 +570,7 @@ class LauncherActivity : ComponentActivity() {
                     }
                 importCapturedPhoto(photo)
             }
-            captured -> showShortMessage("Das Foto konnte nicht sicher übernommen werden.")
+            captured -> showShortMessage(tr(R.string.integration_the_photo_could_not_be_imported_safely_fab9423))
         }
     }
 
@@ -527,7 +583,7 @@ class LauncherActivity : ComponentActivity() {
         val video = cameraCaptureCoordinator.acceptVideoResult(captured)
         when {
             video != null -> importCapturedVideo(video)
-            captured -> showShortMessage("Das Video konnte nicht sicher übernommen werden.")
+            captured -> showShortMessage(tr(R.string.integration_the_video_could_not_be_imported_safely_aee3f43))
         }
     }
 
@@ -556,10 +612,10 @@ class LauncherActivity : ComponentActivity() {
             )
         }
         if (!granted && !setupHandled) {
-            showShortMessage("Für Sprache braucht Hans Zugriff auf das Mikrofon.")
-        } else if (softwareGesture == null && command != null) {
+            showShortMessage(tr(R.string.integration_hans_needs_microphone_access_for_voice_features_7deb99b))
+        } else if (granted && softwareGesture == null && command != null) {
             executeGrantedDictationCommand(command)
-        } else if (softwareGesture == null && startLive) {
+        } else if (granted && softwareGesture == null && startLive) {
             startLiveVoiceAfterDictationStops()
         }
     }
@@ -575,7 +631,7 @@ class LauncherActivity : ComponentActivity() {
         )
         if (!granted && !setupHandled) {
             showShortMessage(
-                "Ohne Hans-Benachrichtigungen sind laufende Sprach- und Agentenaufgaben außerhalb des Launchers weniger sichtbar.",
+                tr(R.string.integration_without_hans_notifications_ongoing_voice_and_agent_task_7ac563d),
             )
         }
     }
@@ -599,7 +655,7 @@ class LauncherActivity : ComponentActivity() {
             ?: false
         if (!setupHandled && grants.isNotEmpty() && grants.values.none { it }) {
             showShortMessage(
-                "Der Telefonzugriff wurde nicht freigegeben. Du kannst ihn später erneut einrichten.",
+                tr(R.string.integration_phone_access_was_not_granted_you_can_set_it_up_again_la_2945b3d),
             )
         }
     }
@@ -741,18 +797,8 @@ class LauncherActivity : ComponentActivity() {
         mp01VendorActionRemediation = AndroidMp01VendorActionRemediation(this)
         mp01VendorActionConfirmation = Mp01VendorActionOverrideConfirmationStore(this)
         val actionMappings = actionKeyStore.read()
-        actionMappings.mappings
-            .firstOrNull { it.mappingId == PRIMARY_DICTATION_MAPPING_ID }
-            ?.trigger
-            ?.takeIf { it != settings.dictationKeyTrigger }
-            ?.let { storedTrigger ->
-                settings = runCatching {
-                    settingsStore.saveInputControls(
-                        dictationKeyTrigger = storedTrigger,
-                        cameraHoldToTalkEnabled = settings.cameraHoldToTalkEnabled,
-                    )
-                }.getOrDefault(settings.copy(dictationKeyTrigger = storedTrigger))
-            }
+        // Legacy input preferences are retained on disk. Runtime projection uses
+        // press-to-start/mute and a camera-only button without rewriting them.
         // Stored MP01 mappings remain visible in Settings, but are not handed
         // to either dispatcher until the user confirms Minimal's parallel
         // action was neutralized on this exact device/vendor build.
@@ -814,7 +860,7 @@ class LauncherActivity : ComponentActivity() {
             runOnUiThread {
                 if (!isFinishing && !isDestroyed && route != localUi.speechAudioRoute) {
                     if (route.failure != null && route.failure != localUi.speechAudioRoute.failure) {
-                        showShortMessage("Die gewünschte Tonausgabe konnte nicht bestätigt werden.")
+                        showShortMessage(tr(R.string.integration_the_requested_audio_output_could_not_be_confirmed_90f71d9))
                     }
                     localUi = localUi.copy(speechAudioRoute = route, revision = localUi.revision + 1)
                 }
@@ -828,6 +874,11 @@ class LauncherActivity : ComponentActivity() {
         }
         notificationAnnouncementObserver = announcementObserver
         hansApplication.notificationAnnouncementCenter.addObserver(announcementObserver)
+        notificationReportSubscription = sessionHost.observeNotificationReports { reports ->
+            runOnUiThread {
+                if (!isFinishing && !isDestroyed) acceptNotificationReports(reports)
+            }
+        }
 
         val voiceObserver = DictationRuntimeObserver { snapshot ->
             runOnUiThread {
@@ -835,32 +886,34 @@ class LauncherActivity : ComponentActivity() {
                     acceptDictationSnapshot(snapshot)
                     when (snapshot.failure) {
                         RecordingFailure.NETWORK_UNAVAILABLE -> showOfflineSubmissionNotice(
-                            "Die Sprachaufnahme benötigt Internet und wurde nicht gestartet.",
+                            tr(R.string.integration_voice_recording_requires_an_internet_connection_and_was_09d6bbb),
                         )
                         RecordingFailure.TRANSCRIPTION_FAILED -> showConnectionFailure(
-                            "Transkription unterbrochen. Prüfe die Internetverbindung und die ungesendeten Entwürfe. Nur dort angezeigte Textteile sind gespeichert; alles andere muss erneut eingesprochen werden.",
+                            tr(R.string.integration_transcription_interrupted_check_your_internet_connectio_78cdc85),
                         )
                         RecordingFailure.TRANSCRIPTION_CONFIGURATION_UNCONFIRMED -> showConnectionFailure(
-                            "OpenAI hat die gewünschte Transkriptionslatenz nicht bestätigt. Über diese unbestätigte Verbindung wurde kein Aufnahme-Audio gesendet. Prüfe die Spracheingabe-Einstellung und versuche es erneut.",
+                            tr(R.string.integration_openai_did_not_confirm_the_requested_transcription_late_81e3c7c),
                         )
                         RecordingFailure.SPEECH_CREDENTIAL_MISSING -> showConnectionFailure(
-                            openAiSpeechFailureMessage("credential_unavailable"),
+                            openAiSpeechFailureMessage("credential_unavailable", AndroidHansTextResolver(this)),
                         )
                         RecordingFailure.SPEECH_CREDENTIAL_TEMPORARILY_UNAVAILABLE ->
                             showConnectionFailure(
-                                "Der OpenAI-Sprachzugang ist vorhanden, aber im gesperrten Android Keystore gerade nicht verfügbar. Entsperre das Telefon und versuche es erneut.",
+                                tr(R.string.integration_the_openai_voice_credential_exists_but_is_currently_una_e07fdec),
                             )
                         RecordingFailure.OPENAI_AUTHENTICATION_FAILED -> showConnectionFailure(
-                            openAiSpeechFailureMessage("authentication_failed"),
+                            openAiSpeechFailureMessage("authentication_failed", AndroidHansTextResolver(this)),
                         )
                         RecordingFailure.OPENAI_PERMISSION_DENIED -> showConnectionFailure(
-                            openAiSpeechFailureMessage("permission_denied"),
+                            openAiSpeechFailureMessage("permission_denied", AndroidHansTextResolver(this)),
                         )
-                        RecordingFailure.OPENAI_QUOTA_EXHAUSTED -> showConnectionFailure(
-                            openAiSpeechFailureMessage("quota_exhausted"),
-                        )
+                        // Published once by the provider-owning service, including before any
+                        // audio callback. Replaying this snapshot must not undo an explicit dismiss.
+                        RecordingFailure.OPENAI_QUOTA_EXHAUSTED,
+                        RecordingFailure.OPENAI_SPENDING_LIMIT_REACHED,
+                        RecordingFailure.OPENAI_PROJECT_SPENDING_LIMIT_REACHED -> Unit
                         RecordingFailure.OPENAI_RATE_LIMITED -> showConnectionFailure(
-                            openAiSpeechFailureMessage("rate_limited"),
+                            openAiSpeechFailureMessage("rate_limited", AndroidHansTextResolver(this)),
                         )
                         else -> Unit
                     }
@@ -871,11 +924,9 @@ class LauncherActivity : ComponentActivity() {
         HansDictationRuntime.addObserver(voiceObserver)
 
         val speechFailureObserver = SpeechServiceFailureObserver { failure ->
-            failure.code?.let { code ->
-                runOnUiThread {
-                    if (!isFinishing && !isDestroyed) {
-                        showConnectionFailure(openAiSpeechFailureMessage(code))
-                    }
+            runOnUiThread {
+                if (!isFinishing && !isDestroyed && failure.revision >= localUi.speechFailure.revision) {
+                    localUi = localUi.copy(speechFailure = failure, revision = localUi.revision + 1)
                 }
             }
         }
@@ -906,30 +957,53 @@ class LauncherActivity : ComponentActivity() {
                     }
                 }
 
-                override fun onFailure(failure: LiveVoiceFailure) {
+                override fun onTranscriptRevision(event: ai.hans.standard.voice.realtime.LiveVoiceTranscriptRevision) {
                     runOnUiThread {
                         if (!isFinishing && !isDestroyed) {
-                            showConnectionFailure(
-                                if (failure.code == "realtime_network_unavailable") {
-                                    "Live Voice wurde wegen fehlender Internetverbindung beendet. Starte es nach dem Verbinden erneut. Bereits gestartete Aufträge werden nicht nochmals gesendet."
-                                } else {
-                                    openAiSpeechFailureMessage(failure.code)
-                                },
-                            )
+                            val author = when (event.author) {
+                                ai.hans.standard.voice.realtime.LiveVoiceTranscriptAuthor.USER -> ChatMessageAuthor.USER
+                                ai.hans.standard.voice.realtime.LiveVoiceTranscriptAuthor.HANS -> ChatMessageAuthor.HANS
+                            }
+                            acceptLiveVoiceTranscript(author, event.text, event.isFinal, event)
                         }
                     }
                 }
+
+                override fun onFailure(failure: LiveVoiceFailure) {
+                    // The process-owned runtime reports failures even when no Activity exists.
+                    // Its replayable speechFailureObserver above owns the visible notice.
+                }
             },
         )
+        liveVoiceCaptureObserver = AndroidLiveVoiceRuntime.addCaptureActivityObserver { active ->
+            if (!active) runOnUiThread {
+                if (!isFinishing && !isDestroyed) drainPendingDictationAfterLiveVoice()
+            }
+        }
+
+        whatsAppAgentChannelSubscription = hansApplication.whatsAppAgentChannel.observeStatus { status ->
+            runOnUiThread {
+                if (!isFinishing && !isDestroyed) {
+                    whatsAppAgentChannelState = ai.hans.standard.ui.WhatsAppAgentChannelUiState(
+                        available = status.available,
+                        enabled = status.binding != null,
+                        pendingCount = status.readyCount,
+                        uncertainCount = status.uncertainCount,
+                        lookupRequiredCount = status.lookupRequiredCount,
+                    )
+                }
+            }
+        }
 
         setContent {
             HansTheme {
                 HansApp(
-                    state = HansClientUiProjector.project(clientSnapshot, localUi, settings).let { projected ->
+                    state = HansClientUiProjector.project(clientSnapshot, localUi, settings, text = rememberHansTextResolver()).let { projected ->
                         projected.copy(
                             settings = projected.settings.copy(
                                 displayMotionMode = displayMotionMode,
                                 notificationFactArchive = notificationFactArchiveStatus,
+                                whatsAppAgentChannel = whatsAppAgentChannelState,
                                 phoneActionPolicy = ai.hans.standard.phone.consent.HansPhoneActionPolicy.USER_AUTHORIZED_FULL_ACCESS,
                             ),
                         )
@@ -977,13 +1051,62 @@ class LauncherActivity : ComponentActivity() {
         }
     }
 
+    private fun configureWhatsAppAgentChannel() {
+        val generation = ++whatsAppAgentChannelDialogGeneration
+        val coordinator = (application as HansApplication).whatsAppAgentChannel
+        appCatalogExecutor.execute {
+            val candidates = coordinator.channel.listEnrollmentCandidates()
+            runOnUiThread {
+                if (isFinishing || isDestroyed || generation != whatsAppAgentChannelDialogGeneration ||
+                    !lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)
+                ) return@runOnUiThread
+                whatsAppAgentChannelDialog?.dismiss()
+                val builder = AlertDialog.Builder(this)
+                    .setTitle(tr(R.string.agent_channel_title))
+                    .setNegativeButton(tr(R.string.agent_channel_cancel), null)
+                if (candidates.isEmpty()) {
+                    builder.setMessage(tr(R.string.agent_channel_no_candidates))
+                } else {
+                    builder.setTitle(tr(R.string.agent_channel_configure))
+                        .setItems(candidates.map {
+                            it.source.displayTitle.ifBlank { tr(R.string.agent_channel_unknown_title) }
+                        }.toTypedArray()) { _, which ->
+                            val candidate = candidates.getOrNull(which) ?: return@setItems
+                            val title = candidate.source.displayTitle.ifBlank {
+                                tr(R.string.agent_channel_unknown_title)
+                            }
+                            whatsAppAgentChannelDialog = AlertDialog.Builder(this)
+                                .setTitle(tr(R.string.agent_channel_confirm_title))
+                                .setMessage(tr(R.string.agent_channel_confirm_body, title))
+                                .setNegativeButton(tr(R.string.agent_channel_cancel), null)
+                                .setPositiveButton(tr(R.string.agent_channel_confirm)) { _, _ ->
+                                    appCatalogExecutor.execute {
+                                        val permitted = getSystemService(android.app.KeyguardManager::class.java)
+                                            ?.isDeviceLocked == false &&
+                                            ai.hans.standard.phone.notifications.NotificationPrivacyRepository(applicationContext)
+                                                .captureDecision("com.whatsapp") ==
+                                                ai.hans.standard.phone.notifications.NotificationCaptureDecision.Allowed
+                                        val confirmed = permitted && coordinator.channel.confirmSelfChat(candidate.id)
+                                        coordinator.requestDrain()
+                                        if (!confirmed) runOnUiThread {
+                                            if (!isFinishing && !isDestroyed) showShortMessage(tr(R.string.agent_channel_confirm_failed))
+                                        }
+                                    }
+                                }.show()
+                        }
+                }
+                whatsAppAgentChannelDialog = builder.show()
+            }
+        }
+    }
+
     private fun refreshConfirmedSttGlossary(notice: String = "") {
         val terms = runCatching(confirmedSttGlossaryStore::readConfirmedTerms)
             .getOrElse {
                 localUi = localUi.copy(
                     confirmedSttGlossary = localUi.confirmedSttGlossary.copy(
                         notice = notice.ifBlank {
-                            "Die bestätigten Begriffe konnten nicht sicher gelesen werden."
+                            tr(R.string.integration_the_confirmed_terms_could_not_be_read_safely_08ce4b0)
                         },
                     ),
                     revision = localUi.revision + 1,
@@ -1012,7 +1135,7 @@ class LauncherActivity : ComponentActivity() {
             confirmedSttGlossaryStore.readConfirmedTerms()
         }.getOrElse {
             refreshConfirmedSttGlossary(
-                "Die Begriffe konnten nicht sicher gespeichert werden. Der bisherige Stand bleibt erhalten.",
+                tr(R.string.integration_the_terms_could_not_be_saved_safely_the_previous_versio_917b4ab),
             )
             return
         }
@@ -1021,13 +1144,31 @@ class LauncherActivity : ComponentActivity() {
             confirmedSttGlossary = ConfirmedSttGlossaryUiState(
                 terms = saved,
                 notice = if (wasNormalized) {
-                    "Gespeichert. Leerzeichen, Doppelungen und Grenzen wurden sicher bereinigt."
+                    tr(R.string.integration_saved_whitespace_duplicates_and_limits_were_safely_norm_9e35860)
                 } else {
-                    "Gespeichert. Die Begriffe gelten ab der nächsten Aufnahme."
+                    tr(R.string.integration_saved_the_terms_apply_from_the_next_recording_b9b143d)
                 },
             ),
             revision = localUi.revision + 1,
         )
+    }
+
+    override fun refreshLocalizedPresentation(newConfig: android.content.res.Configuration) {
+        if (backupRecoveryOnlyUi || !::sessionHost.isInitialized) return
+        // Locale/layout-direction changes stay in this Activity: preserve the complete current
+        // composer, attachment handles, pending send/steer state and active voice/session owners.
+        // Compose receives Android's configuration event; only cached presentation is refreshed.
+        localUi = localUi.copy(revision = localUi.revision + 1)
+        refreshCapabilityAccess()
+        refreshPersistentAndroidConsents()
+        refreshPrivateSpaceState()
+        when (localUi.requestedDestination) {
+            HansDestination.APPS -> refreshAppDrawer()
+            HansDestination.AUTOMATIONS -> refreshAutomations()
+            HansDestination.WORKBENCH -> refreshWorkbench()
+            HansDestination.SETTINGS -> refreshNotificationFactArchiveStatus()
+            else -> Unit
+        }
     }
 
     override fun onResume() {
@@ -1056,6 +1197,7 @@ class LauncherActivity : ComponentActivity() {
         sessionHost.retryDeferredAnnouncements()
         if (localUi.requestedDestination == HansDestination.APPS) refreshAppDrawer()
         if (localUi.requestedDestination == HansDestination.AUTOMATIONS) refreshAutomations()
+        if (localUi.requestedDestination == HansDestination.WORKBENCH) refreshWorkbench()
         if (localUi.requestedDestination == HansDestination.SETTINGS) refreshNotificationFactArchiveStatus()
     }
 
@@ -1109,6 +1251,9 @@ class LauncherActivity : ComponentActivity() {
     }
 
     override fun onStop() {
+        whatsAppAgentChannelDialogGeneration += 1
+        whatsAppAgentChannelDialog?.dismiss()
+        whatsAppAgentChannelDialog = null
         notificationFactStatusGeneration.invalidate()
         if (backupRecoveryOnlyUi) {
             super.onStop()
@@ -1291,6 +1436,10 @@ class LauncherActivity : ComponentActivity() {
         speechServiceFailureObserver = null
         liveVoiceObserver?.cancel()
         liveVoiceObserver = null
+        liveVoiceCaptureObserver?.cancel()
+        liveVoiceCaptureObserver = null
+        pendingDictationAfterLiveVoice = null
+        pendingLiveVoiceStart = false
         speechAudioRouteSubscription?.close()
         speechAudioRouteSubscription = null
         internetSubscription?.close()
@@ -1301,6 +1450,13 @@ class LauncherActivity : ComponentActivity() {
             (application as HansApplication).notificationAnnouncementCenter.removeObserver(it)
         }
         notificationAnnouncementObserver = null
+        notificationReportSubscription?.close()
+        notificationReportSubscription = null
+        whatsAppAgentChannelSubscription?.close()
+        whatsAppAgentChannelSubscription = null
+        whatsAppAgentChannelDialogGeneration += 1
+        whatsAppAgentChannelDialog?.dismiss()
+        whatsAppAgentChannelDialog = null
         dynamicToolConfirmationRegistration?.close()
         dynamicToolConfirmationRegistration = null
         dynamicToolConfirmation.close()
@@ -1426,7 +1582,7 @@ class LauncherActivity : ComponentActivity() {
     }
 
     private fun showOfflineSubmissionNotice(
-        message: String = "Nicht gesendet. Dein Text und deine Anhänge bleiben im Eingabefeld erhalten.",
+        message: String = tr(R.string.integration_not_sent_your_text_and_attachments_remain_in_the_messag_4bd0977),
     ): Boolean {
         val current = (application as HansApplication).internetConnectivity.snapshot()
         acceptInternetSnapshot(current)
@@ -1440,6 +1596,7 @@ class LauncherActivity : ComponentActivity() {
         val setupEvidence = when (phase) {
             DictationUiPhase.LISTENING -> HansSetupDictationEvidence.LISTENING
             DictationUiPhase.SENT -> HansSetupDictationEvidence.SENT
+            DictationUiPhase.NATIVE_COMPLETED -> HansSetupDictationEvidence.NATIVE_LIVE_COMPLETED
             DictationUiPhase.FAILED -> HansSetupDictationEvidence.FAILED
             else -> null
         }
@@ -1456,6 +1613,7 @@ class LauncherActivity : ComponentActivity() {
                 setupEvidence in setOf(
                     HansSetupDictationEvidence.LISTENING,
                     HansSetupDictationEvidence.SENT,
+                    HansSetupDictationEvidence.NATIVE_LIVE_COMPLETED,
                     HansSetupDictationEvidence.FAILED,
                 )
             ) {
@@ -1468,12 +1626,13 @@ class LauncherActivity : ComponentActivity() {
         ) {
             offerSetupDictationStop()
         }
-        // SENT is intentionally not rendered. Its only purpose is to confirm
-        // that App Server acknowledged the exact transcript/turn; the chat
-        // itself then shows the normal user message.
+        // Both terminal success states are intentionally not rendered. SENT confirms the
+        // legacy transcript dispatch; NATIVE_COMPLETED only proves a correlated Voice reply.
+        // Actual Codex work is represented by its own authoritative chat timeline.
         val nextStatus = when (phase) {
             DictationUiPhase.IDLE,
             DictationUiPhase.SENT,
+            DictationUiPhase.NATIVE_COMPLETED,
             -> null
             DictationUiPhase.PREPARING -> DictationUiStatus.PREPARING
             DictationUiPhase.LISTENING -> DictationUiStatus.LISTENING
@@ -1481,44 +1640,50 @@ class LauncherActivity : ComponentActivity() {
             DictationUiPhase.WAITING_TO_SEND -> DictationUiStatus.WAITING_TO_SEND
             DictationUiPhase.FAILED -> DictationUiStatus.FAILED
         }
+        val nextLiveStatus = localUi.liveVoiceStatus.afterDictationPublication(nextStatus)
         if (localUi.dictationStatus != nextStatus ||
+            localUi.liveVoiceStatus != nextLiveStatus ||
+            localUi.dictationInputMuted != snapshot.inputMuted ||
             localUi.dictationPreview != snapshot.provisionalTranscript ||
+            localUi.dictationAwaitingFirstTranscript != snapshot.awaitingFirstUserTranscript ||
             localUi.sttLatency.confirmedActive != snapshot.confirmedTranscriptionDelay
         ) {
             localUi = localUi.copy(
                 dictationStatus = nextStatus,
+                liveVoiceStatus = nextLiveStatus,
+                dictationInputMuted = snapshot.inputMuted,
                 dictationPreview = snapshot.provisionalTranscript,
+                dictationAwaitingFirstTranscript = snapshot.awaitingFirstUserTranscript,
                 sttLatency = localUi.sttLatency.copy(confirmedActive = snapshot.confirmedTranscriptionDelay),
                 revision = localUi.revision + 1,
             )
         }
-        if (
-            phase in setOf(
-                DictationUiPhase.IDLE,
-                DictationUiPhase.FINALIZING,
-                DictationUiPhase.WAITING_TO_SEND,
-                DictationUiPhase.SENT,
-                DictationUiPhase.FAILED,
-            )
-        ) {
+        // FINALIZING still owns the native Voice connection and buffered input. Neither
+        // a gesture release nor a request to start regular Live may treat it as terminal.
+        val released = !VoiceInputTransitionPolicy.dictationOwnsVoice(phase) &&
+            !VoiceInputTransitionPolicy.dictationOwnsVoice(HansDictationRuntime.snapshotUi().phase)
+        if (released) {
             softwareHoldToTalk.onOwnedRecordingEnded()
         }
-        if (
-            pendingLiveVoiceStart &&
-            phase in setOf(
-                DictationUiPhase.IDLE,
-                DictationUiPhase.FINALIZING,
-                DictationUiPhase.WAITING_TO_SEND,
-                DictationUiPhase.SENT,
-                DictationUiPhase.FAILED,
-            )
-        ) {
+        if (pendingLiveVoiceStart && released) {
             pendingLiveVoiceStart = false
             startLiveVoiceNow()
         }
     }
 
     private fun acceptLiveVoiceSnapshot(snapshot: LiveVoiceSnapshot) {
+        if (snapshot.phase in setOf(LiveVoicePhase.CONNECTING, LiveVoicePhase.STOPPED, LiveVoicePhase.FAILED)) {
+            // A missing transcript-final must not let the next session overwrite an old bubble.
+            activeLiveUserMessageId = null
+            activeLiveHansMessageId = null
+        }
+        if (snapshot.entryPoint == ai.hans.standard.voice.realtime.LiveVoiceEntryPoint.DICTATION) {
+            // Shared media never opens the telephone presentation for dictation.
+            if (localUi.liveVoiceStatus != null) {
+                localUi = localUi.copy(liveVoiceStatus = null, revision = localUi.revision + 1)
+            }
+            return
+        }
         val nextStatus = when (snapshot.phase) {
             LiveVoicePhase.IDLE,
             LiveVoicePhase.STOPPED,
@@ -1531,7 +1696,9 @@ class LauncherActivity : ComponentActivity() {
             LiveVoicePhase.HANS_SPEAKING -> LiveVoiceUiStatus.HANS_SPEAKING
             LiveVoicePhase.WAITING_FOR_TASK -> LiveVoiceUiStatus.WAITING_FOR_TASK
             LiveVoicePhase.RECONNECTING -> LiveVoiceUiStatus.RECONNECTING
-            LiveVoicePhase.FAILED -> LiveVoiceUiStatus.FAILED
+            // Observer registration can replay a dead PHONE snapshot after the current
+            // dictation's AwaitingAudioFocus. It must not restore the obsolete call surface.
+            LiveVoicePhase.FAILED -> LiveVoiceUiStatus.FAILED.afterDictationPublication(localUi.dictationStatus)
         }
         if (
             localUi.liveVoiceStatus != nextStatus ||
@@ -1545,18 +1712,14 @@ class LauncherActivity : ComponentActivity() {
                 revision = localUi.revision + 1,
             )
         }
-        if (snapshot.phase in setOf(LiveVoicePhase.IDLE, LiveVoicePhase.STOPPED, LiveVoicePhase.FAILED)) {
-            pendingDictationAfterLiveVoice?.let { command ->
-                pendingDictationAfterLiveVoice = null
-                executeGrantedDictationCommand(command)
-            }
-        }
+        drainPendingDictationAfterLiveVoice()
     }
 
     private fun acceptLiveVoiceTranscript(
         author: ChatMessageAuthor,
         rawText: String,
         isFinal: Boolean,
+        identity: ai.hans.standard.voice.realtime.LiveVoiceTranscriptRevision? = null,
     ) {
         // The native assistant renderer owns Markdown and link labels. Keep the destination
         // in this UI-only transcript instead of removing it before the user can tap the link.
@@ -1568,10 +1731,17 @@ class LauncherActivity : ComponentActivity() {
             ChatMessageAuthor.SYSTEM -> null
         }
         if (text.isBlank()) {
-            if (isFinal) setActiveLiveMessageId(author, null)
+            if (isFinal) {
+                val discarded = ai.hans.standard.ui.LiveVoiceTranscriptUiUpdates.discardIncomplete(
+                    localUi.liveVoiceMessages, identity?.displayId ?: existingId, author)
+                if (discarded != localUi.liveVoiceMessages) {
+                    localUi = localUi.copy(liveVoiceMessages = discarded, revision = localUi.revision + 1)
+                }
+                setActiveLiveMessageId(author, null)
+            }
             return
         }
-        val id = existingId ?: "live-${++nextLiveVoiceMessageId}-${author.name.lowercase()}"
+        val id = identity?.displayId ?: existingId ?: "live-${++nextLiveVoiceMessageId}-${author.name.lowercase()}"
         val existing = localUi.liveVoiceMessages.firstOrNull { it.id == id }
         val message = ChatMessageUiModel(
             id = id,
@@ -1582,6 +1752,7 @@ class LauncherActivity : ComponentActivity() {
                 ?: clientSnapshot?.timeline?.latestVisibleChatTimelineId(),
             localArrivalOrder = existing?.localArrivalOrder ?: nextLocalTimelineArrivalOrder(),
             complete = isFinal,
+            liveVoiceTranscript = identity,
         )
         val updated = localUi.liveVoiceMessages
             .filterNot { it.id == id }
@@ -1618,6 +1789,21 @@ class LauncherActivity : ComponentActivity() {
         }
     }
 
+    private fun acceptNotificationReports(reports: List<ai.hans.standard.integration.NativeNotificationReportCard>) {
+        val existing = localUi.notificationReportMessages.associateBy(ChatMessageUiModel::id)
+        val projected = reports.map { report -> ChatMessageUiModel(
+            id = report.id, author = ChatMessageAuthor.HANS,
+            text = ai.hans.standard.integration.AssistantOutputSanitizer.sanitize(report.text),
+            revision = 0, complete = true, localTimelineAnchorId = report.timelineAnchorId,
+            localArrivalOrder = existing[report.id]?.localArrivalOrder ?: nextLocalTimelineArrivalOrder(),
+        ) }
+        val threadId = reports.firstOrNull()?.threadId
+        if (projected != localUi.notificationReportMessages || threadId != localUi.notificationReportThreadId) {
+            localUi = localUi.copy(notificationReportMessages = projected, notificationReportThreadId = threadId,
+                revision = localUi.revision + 1)
+        }
+    }
+
     private fun setActiveLiveMessageId(author: ChatMessageAuthor, id: String?) {
         when (author) {
             ChatMessageAuthor.USER -> activeLiveUserMessageId = id
@@ -1632,8 +1818,11 @@ class LauncherActivity : ComponentActivity() {
     }
 
     private fun toggleLiveVoice() {
-        if (isLiveVoiceActive()) {
+        if (pendingLiveVoiceStart && !isLiveVoiceActive()) {
             pendingLiveVoiceStart = false
+        } else if (isLiveVoiceActive()) {
+            pendingLiveVoiceStart = false
+            pendingDictationAfterLiveVoice = null
             AndroidLiveVoiceRuntime.stop(this)
         } else if (
             ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
@@ -1647,13 +1836,12 @@ class LauncherActivity : ComponentActivity() {
     }
 
     private fun startLiveVoiceAfterDictationStops() {
-        val dictationActive = HansDictationRuntime.snapshotUi().phase in setOf(
-            DictationUiPhase.PREPARING,
-            DictationUiPhase.LISTENING,
-        )
-        if (dictationActive) {
+        val phase = HansDictationRuntime.snapshotUi().phase
+        if (VoiceInputTransitionPolicy.dictationOwnsVoice(phase)) {
             pendingLiveVoiceStart = true
-            HansDictationService.stop(this)
+            if (VoiceInputTransitionPolicy.dictationCanStopCapture(phase)) {
+                HansDictationService.stop(this)
+            } else showDictationProcessingNotice()
         } else {
             startLiveVoiceNow()
         }
@@ -1663,18 +1851,18 @@ class LauncherActivity : ComponentActivity() {
         when (AndroidLiveVoiceRuntime.start(this)) {
             LiveVoiceServiceCommandResult.REQUESTED -> Unit
             LiveVoiceServiceCommandResult.NETWORK_UNAVAILABLE -> showConnectionFailure(
-                "Live Voice benötigt eine Internetverbindung. Prüfe die Verbindung und starte es erneut.",
+                tr(R.string.integration_live_voice_requires_an_internet_connection_check_your_c_b342afc),
             )
             LiveVoiceServiceCommandResult.MICROPHONE_PERMISSION_MISSING -> {
                 pendingLiveVoiceStart = true
                 microphonePermission.launch(Manifest.permission.RECORD_AUDIO)
             }
             LiveVoiceServiceCommandResult.NOT_CONFIGURED ->
-                showShortMessage("Live Voice wird noch vorbereitet.")
+                showShortMessage(tr(R.string.integration_live_voice_is_still_being_prepared_5485290))
             LiveVoiceServiceCommandResult.AUDIO_OUTPUT_NOT_STOPPED,
             LiveVoiceServiceCommandResult.START_NOT_ALLOWED,
             LiveVoiceServiceCommandResult.SECURITY_FAILURE,
-            -> showShortMessage("Live Voice konnte nicht gestartet werden.")
+            -> showShortMessage(tr(R.string.integration_live_voice_could_not_be_started_2b104f9))
         }
     }
 
@@ -1701,12 +1889,7 @@ class LauncherActivity : ComponentActivity() {
                 sessionId = sessionId,
                 mappingId = mappingId,
                 action = action,
-                trigger = if (action == KeySemanticAction.DICTATION) {
-                    settings.dictationKeyTrigger
-                } else {
-                    // The model preset is always a completed-press gesture.
-                    ActionKeyTrigger.PRESS
-                },
+                trigger = ActionKeyTrigger.PRESS,
                 startedAtMillis = now,
                 expiresAtMillis = now + ACTION_KEY_CAPTURE_WINDOW_MILLIS,
             ),
@@ -1726,7 +1909,7 @@ class LauncherActivity : ComponentActivity() {
             localUi = localUi.copy(
                 actionKeyCapturing = false,
                 capturingModelToggleKey = false,
-                actionKeyNotice = "Eine andere Tasteneinrichtung ist noch aktiv.",
+                actionKeyNotice = tr(R.string.integration_another_key_setup_is_still_active_6ddace5),
                 revision = localUi.revision + 1,
             )
             return
@@ -1742,7 +1925,7 @@ class LauncherActivity : ComponentActivity() {
                 localUi = localUi.copy(
                     actionKeyCapturing = false,
                     capturingModelToggleKey = false,
-                    actionKeyNotice = "Die Einrichtung ist abgelaufen.",
+                    actionKeyNotice = tr(R.string.integration_setup_timed_out_63b25b0),
                     revision = localUi.revision + 1,
                 )
                 acceptActiveSetupKeyCapture(
@@ -1757,7 +1940,7 @@ class LauncherActivity : ComponentActivity() {
         localUi = localUi.copy(
             actionKeyCapturing = action == KeySemanticAction.DICTATION,
             capturingModelToggleKey = action == KeySemanticAction.TOGGLE_LUNA_MAX_SOL_ULTRA,
-            actionKeyNotice = "Warte auf eine Taste …",
+            actionKeyNotice = tr(R.string.integration_waiting_for_a_key_1d70d03),
             revision = localUi.revision + 1,
         )
     }
@@ -1771,7 +1954,7 @@ class LauncherActivity : ComponentActivity() {
         localUi = localUi.copy(
             actionKeyCapturing = false,
             capturingModelToggleKey = false,
-            actionKeyNotice = "Einrichtung abgebrochen.",
+            actionKeyNotice = tr(R.string.integration_setup_cancelled_4d9b02b),
             revision = localUi.revision + 1,
         )
         acceptActiveSetupKeyCapture(
@@ -1797,7 +1980,7 @@ class LauncherActivity : ComponentActivity() {
         refreshMp01VendorActionConflict(mappings)
         localUi = localUi.copy(
             actionKeyCapturing = false,
-            actionKeyNotice = "Aktionstaste entfernt.",
+            actionKeyNotice = tr(R.string.integration_action_key_removed_7951221),
             revision = localUi.revision + 1,
         )
     }
@@ -1808,12 +1991,14 @@ class LauncherActivity : ComponentActivity() {
         refreshMp01VendorActionConflict(mappings)
         localUi = localUi.copy(
             capturingModelToggleKey = false,
-            actionKeyNotice = "Wechseltaste entfernt.",
+            actionKeyNotice = tr(R.string.integration_toggle_key_removed_78b38bd),
             revision = localUi.revision + 1,
         )
     }
 
     private fun selectDictationKeyTrigger(trigger: ActionKeyTrigger) {
+        // Old persisted enum values remain decodable, but cannot reactivate hold-to-stop.
+        if (trigger != ActionKeyTrigger.PRESS) return
         if (activeActionKeyCapture != null) cancelActionKeySetup()
         val before = actionKeyStore.read()
         val existing = before.mappings.firstOrNull {
@@ -1833,9 +2018,9 @@ class LauncherActivity : ComponentActivity() {
             localUi = localUi.copy(
                 actionKeyNotice = when (trigger) {
                     ActionKeyTrigger.PRESS ->
-                        "Umschalter gewählt: einmal drücken startet, nochmals drücken sendet."
+                        tr(R.string.integration_toggle_selected_press_once_to_start_then_again_to_send_a048224)
                     ActionKeyTrigger.HOLD_TO_TALK ->
-                        "Halten gewählt. Auf Stock-MP01 kann diese Geste durch das System blockiert sein."
+                        tr(R.string.integration_hold_selected_the_stock_mp01_system_may_block_this_gest_d2a0f36)
                 },
                 revision = localUi.revision + 1,
             )
@@ -1844,7 +2029,7 @@ class LauncherActivity : ComponentActivity() {
                 runCatching { actionKeyStore.save(existing) }
             }
             refreshMp01VendorActionConflict(actionKeyStore.read())
-            showShortMessage("Die Diktattasten-Geste konnte nicht gespeichert werden.")
+            showShortMessage(tr(R.string.integration_the_dictation_key_gesture_could_not_be_saved_41cece3))
         }
     }
 
@@ -1859,7 +2044,7 @@ class LauncherActivity : ComponentActivity() {
                 cameraHoldToTalkEnabled = enabled,
             )
         }.getOrElse {
-            showShortMessage("Die Kamera-Diktatgeste konnte nicht gespeichert werden.")
+            showShortMessage(tr(R.string.integration_the_camera_dictation_gesture_could_not_be_saved_34ca0f5))
             settings
         }
     }
@@ -1868,7 +2053,7 @@ class LauncherActivity : ComponentActivity() {
         displayMotionMode = runCatching {
             displayMotionStore.save(mode)
         }.getOrElse {
-            showShortMessage("Die Display-Darstellung konnte nicht gespeichert werden.")
+            showShortMessage(tr(R.string.integration_the_display_setting_could_not_be_saved_bc9c5c5))
             displayMotionMode
         }
     }
@@ -1877,8 +2062,9 @@ class LauncherActivity : ComponentActivity() {
         mappings: ActionKeyMappingSet,
     ): Mp01VendorActionGateResult {
         val evidence = mp01VendorActionRemediation.probe()
+        val voiceMappings = mappings.forTaskVoiceControls()
         var gate = Mp01VendorActionConflictResolver.gate(
-            mappings = mappings,
+            mappings = voiceMappings,
             vendorEvidence = evidence,
             confirmation = mp01VendorActionConfirmation.confirmation(),
         )
@@ -1890,7 +2076,7 @@ class LauncherActivity : ComponentActivity() {
         }
             .onSuccess {
                 gate = Mp01VendorActionConflictResolver.gate(
-                    mappings = mappings,
+                    mappings = voiceMappings,
                     vendorEvidence = evidence,
                     confirmation = mp01VendorActionConfirmation.confirmation(),
                 )
@@ -1901,6 +2087,7 @@ class LauncherActivity : ComponentActivity() {
             Mp01ActionMappingSetFingerprint::of,
         )
         localUi = localUi.copy(
+            actionKeyAssigned = mappings.hasAction(KeySemanticAction.DICTATION),
             actionKeyConfigured = gate.effectiveMappings.hasAction(KeySemanticAction.DICTATION),
             modelToggleKeyConfigured = gate.effectiveMappings.hasAction(
                 KeySemanticAction.TOGGLE_LUNA_MAX_SOL_ULTRA,
@@ -1933,7 +2120,7 @@ class LauncherActivity : ComponentActivity() {
 
     private fun openMp01VendorSettings() {
         if (!mp01VendorActionRemediation.openSettings()) {
-            showShortMessage("Die originale Minimal-Tasteneinstellung ist nicht verfügbar.")
+            showShortMessage(tr(R.string.integration_the_original_minimal_key_setting_is_unavailable_46bb2b0))
         }
     }
 
@@ -1941,7 +2128,7 @@ class LauncherActivity : ComponentActivity() {
         val mappings = actionKeyStore.read()
         val evidence = mp01VendorActionRemediation.probe()
         val conflict = Mp01VendorActionConflictResolver.resolve(
-            mappings = mappings,
+            mappings = mappings.forTaskVoiceControls(),
             vendorEvidence = evidence,
             confirmation = mp01VendorActionConfirmation.confirmation(),
         )
@@ -1950,13 +2137,13 @@ class LauncherActivity : ComponentActivity() {
             conflict == null ||
             conflictFingerprint != currentMp01VendorConflictMappingSetFingerprint
         ) {
-            showShortMessage("Für diese Aktionstaste ist keine Minimal-Kollision erkannt.")
+            showShortMessage(tr(R.string.integration_no_minimal_key_conflict_was_detected_for_this_action_ke_39c9b8b))
             refreshMp01VendorActionConflict(mappings)
             return
         }
         if (!conflict.userConfirmationAllowed) {
             showShortMessage(
-                "Diese Stock-Systembelegung kann nicht bestätigt werden. Nutze die Taste kurz als Toggle.",
+                tr(R.string.integration_this_stock_system_key_mapping_cannot_be_confirmed_use_a_1ad064f),
             )
             refreshMp01VendorActionConflict(mappings)
             return
@@ -1964,10 +2151,10 @@ class LauncherActivity : ComponentActivity() {
         runCatching { mp01VendorActionConfirmation.confirm(conflict.mappings, evidence) }
             .onSuccess {
                 refreshMp01VendorActionConflict(mappings)
-                showShortMessage("Minimal-Belegung als deaktiviert bestätigt.")
+                showShortMessage(tr(R.string.integration_the_minimal_key_mapping_is_confirmed_as_disabled_9e6f42a))
             }
             .onFailure {
-                showShortMessage("Die Bestätigung konnte nicht gespeichert werden.")
+                showShortMessage(tr(R.string.integration_the_confirmation_could_not_be_saved_fea7881))
             }
     }
 
@@ -2001,15 +2188,15 @@ class LauncherActivity : ComponentActivity() {
                             blockedByVendor &&
                                 gate.conflict?.kind ==
                                 Mp01VendorActionConflictKind.STOCK_SYSTEM_POLICY ->
-                                "Taste gespeichert, aber Halten ist auf Stock-MP01 reserviert. Richte einen kurzen Toggle ein."
+                                tr(R.string.integration_key_saved_but_holding_is_reserved_on_stock_mp01_configu_84877bb)
                             blockedByVendor ->
-                                "Taste gespeichert, aber bis zur bestätigten Minimal-Neutralisierung blockiert."
+                                tr(R.string.integration_key_saved_but_blocked_until_the_minimal_mapping_is_conf_94421a6)
                             gate.conflict?.stockPressToggleCompatible == true &&
                                 mapping.action == KeySemanticAction.DICTATION ->
-                                "MP01-Toggle eingerichtet: einmal kurz drücken startet, nochmals kurz drücken beendet und sendet."
+                                tr(R.string.integration_mp01_toggle_configured_press_briefly_to_start_then_pres_cc7d6ac)
                             mapping.action == KeySemanticAction.DICTATION ->
-                                "Aktionstaste eingerichtet."
-                            else -> "Wechseltaste eingerichtet."
+                                tr(R.string.integration_action_key_configured_b04a61c)
+                            else -> tr(R.string.integration_toggle_key_configured_34f7cb4)
                         },
                         revision = localUi.revision + 1,
                     )
@@ -2028,7 +2215,7 @@ class LauncherActivity : ComponentActivity() {
                     localUi = localUi.copy(
                         actionKeyCapturing = false,
                         capturingModelToggleKey = false,
-                        actionKeyNotice = "Die Aktionstaste konnte nicht gespeichert werden.",
+                        actionKeyNotice = tr(R.string.integration_the_action_key_could_not_be_saved_6da3714),
                         revision = localUi.revision + 1,
                     )
                     if (mapping.action == KeySemanticAction.DICTATION) {
@@ -2048,7 +2235,7 @@ class LauncherActivity : ComponentActivity() {
                 localUi = localUi.copy(
                     actionKeyCapturing = false,
                     capturingModelToggleKey = false,
-                    actionKeyNotice = "Diese Taste kann Hans nicht als Aktionstaste verwenden.",
+                    actionKeyNotice = tr(R.string.integration_hans_cannot_use_this_key_as_an_action_key_63c6efc),
                     revision = localUi.revision + 1,
                 )
                 acceptActiveSetupKeyCapture(
@@ -2063,7 +2250,7 @@ class LauncherActivity : ComponentActivity() {
                 localUi = localUi.copy(
                     actionKeyCapturing = false,
                     capturingModelToggleKey = false,
-                    actionKeyNotice = "Die Einrichtung ist abgelaufen.",
+                    actionKeyNotice = tr(R.string.integration_setup_timed_out_63b25b0),
                     revision = localUi.revision + 1,
                 )
                 acceptActiveSetupKeyCapture(
@@ -2093,24 +2280,7 @@ class LauncherActivity : ComponentActivity() {
     }
 
     private fun executeActionKeyCommand(command: ActionKeyCommand) {
-        when (command) {
-            ActionKeyCommand.ToggleLunaMaxSolUltra -> toggleModelPreset()
-            ActionKeyCommand.StopDictation -> HansDictationService.stop(this)
-            ActionKeyCommand.StartDictation,
-            ActionKeyCommand.ToggleDictation,
-            -> {
-                val recordingActive = HansDictationRuntime.snapshotUi().phase in setOf(
-                    DictationUiPhase.PREPARING,
-                    DictationUiPhase.LISTENING,
-                    DictationUiPhase.FINALIZING,
-                )
-                if (command == ActionKeyCommand.ToggleDictation && recordingActive) {
-                    HansDictationService.stop(this)
-                } else {
-                    requestMicrophoneThen(command)
-                }
-            }
-        }
+        if (!handleNonStartingVoiceCommand(command)) requestMicrophoneThen(ActionKeyCommand.StartDictation)
     }
 
     private fun replaceActionKeyMappings(mappings: ActionKeyMappingSet) {
@@ -2203,11 +2373,7 @@ class LauncherActivity : ComponentActivity() {
     }
 
     private fun isDictationRecordingActive(): Boolean =
-        HansDictationRuntime.snapshotUi().phase in setOf(
-            DictationUiPhase.PREPARING,
-            DictationUiPhase.LISTENING,
-            DictationUiPhase.FINALIZING,
-        )
+        VoiceInputTransitionPolicy.dictationOwnsVoice(HansDictationRuntime.snapshotUi().phase)
 
     private fun requestMicrophoneThen(command: ActionKeyCommand) {
         if (
@@ -2222,28 +2388,56 @@ class LauncherActivity : ComponentActivity() {
     }
 
     private fun executeGrantedDictationCommand(command: ActionKeyCommand) {
-        when (command) {
-            ActionKeyCommand.StartDictation,
-            ActionKeyCommand.ToggleDictation,
-            -> {
-                if (isLiveVoiceActive()) {
-                    pendingDictationAfterLiveVoice = command
-                    AndroidLiveVoiceRuntime.stop(this)
-                } else if (command == ActionKeyCommand.StartDictation) {
-                    HansDictationService.start(this)
-                } else {
-                    HansDictationService.toggle(this)
-                }
-            }
-            ActionKeyCommand.StopDictation -> HansDictationService.stop(this)
-            ActionKeyCommand.ToggleLunaMaxSolUltra -> toggleModelPreset()
+        if (handleNonStartingVoiceCommand(command)) return
+        pendingLiveVoiceStart = false
+        if (isLiveVoiceActive()) {
+            // Store an explicit START, never a deferred toggle which could stop a newer owner.
+            pendingDictationAfterLiveVoice = ActionKeyCommand.StartDictation
+            AndroidLiveVoiceRuntime.stop(this)
+            drainPendingDictationAfterLiveVoice()
+        } else {
+            HansDictationService.start(this)
         }
     }
 
-    private fun isLiveVoiceActive(): Boolean = AndroidLiveVoiceRuntime.snapshot().phase !in setOf(
-        LiveVoicePhase.IDLE,
-        LiveVoicePhase.STOPPED,
-        LiveVoicePhase.FAILED,
+    private fun drainPendingDictationAfterLiveVoice() {
+        if (isLiveVoiceActive()) return
+        val command = pendingDictationAfterLiveVoice ?: return
+        pendingDictationAfterLiveVoice = null
+        executeGrantedDictationCommand(command)
+    }
+
+    /** Returns false only for a new start that still needs the permission/effective-owner gates. */
+    private fun handleNonStartingVoiceCommand(command: ActionKeyCommand): Boolean {
+        when (VoiceInputTransitionPolicy.command(command, HansDictationRuntime.snapshotUi().phase,
+            pendingDictationAfterLiveVoice != null || pendingMicrophoneCommand != null,
+            ai.hans.standard.voice.android.CodexDictationIntegration.continuousDictation)) {
+            VoiceInputCommandAction.REQUEST_START -> return false
+            VoiceInputCommandAction.STOP_CAPTURE -> HansDictationService.stop(this)
+            VoiceInputCommandAction.TOGGLE_INPUT_MUTED -> {
+                if (!AndroidLiveVoiceRuntime.toggleDictationInputMuted()) {
+                    showShortMessage(tr(R.string.integration_the_microphone_could_not_be_switched_c024fee))
+                }
+            }
+            VoiceInputCommandAction.SHOW_PROCESSING -> showDictationProcessingNotice()
+            VoiceInputCommandAction.CANCEL_PENDING_START -> {
+                pendingDictationAfterLiveVoice = null
+                pendingMicrophoneCommand = null
+            }
+            VoiceInputCommandAction.TOGGLE_MODEL -> toggleModelPreset()
+            VoiceInputCommandAction.NONE -> Unit
+        }
+        return true
+    }
+
+    private fun showDictationProcessingNotice() {
+        showShortMessage(tr(R.string.integration_dictation_still_processing))
+    }
+
+    private fun isLiveVoiceActive(): Boolean = AndroidLiveVoiceRuntime.entryPoint() ==
+        ai.hans.standard.voice.realtime.LiveVoiceEntryPoint.PHONE && VoiceInputTransitionPolicy.liveOwnsVoice(
+        AndroidLiveVoiceRuntime.snapshot().phase,
+        AndroidLiveVoiceRuntime.isCaptureRequestedOrActive(),
     )
 
     private fun resolveSelection(
@@ -2300,7 +2494,7 @@ class LauncherActivity : ComponentActivity() {
 
     private fun toggleModelPreset() {
         val currentSelection = selectionForSettingsChange() ?: run {
-            showShortMessage("Die verfügbaren Modelle sind noch nicht geladen.")
+            showShortMessage(tr(R.string.integration_available_models_have_not_loaded_yet_eb9f090))
             return
         }
         val current = if (
@@ -2312,11 +2506,13 @@ class LauncherActivity : ComponentActivity() {
             HansModelPreset.LUNA_MAX
         }
         val next = HansModelPresetToggle.next(current)
-        if (!requestSelection(next.model, next.effort, currentSelection.serviceTier)) {
-            showShortMessage("${next.name.replace('_', ' ')} ist gerade nicht verfügbar.")
+        val target = ai.hans.standard.ui.resolveModelShortcutPreset(next, clientSnapshot?.models.orEmpty())
+        if (target == null || !requestSelection(target.model, target.effort, currentSelection.serviceTier,
+                requireExactEffort = true)) {
+            showShortMessage(tr(R.string.integration_1_is_currently_unavailable_3baca69, next.name.replace('_', ' ')))
             return
         }
-        showShortMessage("Modellwechsel angefragt.")
+        showShortMessage(tr(R.string.integration_model_change_requested_3ddd47a))
     }
 
     /**
@@ -2361,7 +2557,7 @@ class LauncherActivity : ComponentActivity() {
                 loaded = true,
                 status = RemoteWorkerSettingsUiStatus.STORAGE_CORRUPT,
                 notice = notice.ifBlank {
-                    "Die lokale Konfiguration konnte nicht sicher gelesen werden."
+                    tr(R.string.integration_the_local_configuration_could_not_be_read_safely_35294cb)
                 },
             )
         }
@@ -2393,7 +2589,7 @@ class LauncherActivity : ComponentActivity() {
             )
         }.getOrElse {
             refreshRemoteWorkerSettings(
-                "Die Konfiguration ist ungültig. Prüfe Adresse, Pin sowie Adapter-ID und Version.",
+                tr(R.string.integration_the_configuration_is_invalid_check_the_address_pin_adap_68323e7),
             )
             return
         }
@@ -2434,7 +2630,7 @@ class LauncherActivity : ComponentActivity() {
         localUi = localUi.copy(
             remoteWorker = current.copy(
                 operationInProgress = true,
-                notice = "Verbindung wird ausdrücklich geprüft …",
+                notice = tr(R.string.integration_checking_the_connection_7121601),
             ),
             revision = localUi.revision + 1,
         )
@@ -2456,26 +2652,26 @@ class LauncherActivity : ComponentActivity() {
         val notice = when (result) {
             is RemoteWorkerRuntimeUpdateResult.Saved -> when (action) {
                 RemoteWorkerUpdateAction.SAVE -> if (result.state.requestedEnabled) {
-                    "Gespeichert. Die Verbindung ist noch nicht wirksam; prüfe und aktiviere sie separat."
+                    tr(R.string.integration_saved_the_connection_is_not_active_yet_verify_and_enabl_0d6b77e)
                 } else {
-                    "Gespeichert. Fernarbeit ist ausgeschaltet."
+                    tr(R.string.integration_saved_remote_work_is_off_7a4ce34)
                 }
                 RemoteWorkerUpdateAction.ACTIVATE -> if (result.state.effective) {
-                    "Verbindung geprüft. Der Arbeitsrechner ist jetzt für Codex wirksam."
+                    tr(R.string.integration_connection_verified_the_work_computer_is_now_active_for_28f46ef)
                 } else {
-                    "Die Verbindung wurde nicht als wirksam bestätigt."
+                    tr(R.string.integration_the_connection_was_not_confirmed_as_active_0f3e6e3)
                 }
             }
             RemoteWorkerRuntimeUpdateResult.RevisionMismatch ->
-                "Die Konfiguration wurde inzwischen geändert. Der aktuelle Stand wurde neu geladen."
+                tr(R.string.integration_the_configuration_changed_in_the_meantime_the_current_v_4b814b0)
             RemoteWorkerRuntimeUpdateResult.Corrupt ->
-                "Die lokale Konfiguration konnte nicht sicher gelesen oder geändert werden."
+                tr(R.string.integration_the_local_configuration_could_not_be_read_or_changed_sa_256dfbf)
             RemoteWorkerRuntimeUpdateResult.PersistenceFailed ->
-                "Die Konfiguration konnte nicht sicher gespeichert werden. Der vorherige Stand bleibt maßgeblich."
+                tr(R.string.integration_the_configuration_could_not_be_saved_safely_the_previou_47df4f1)
             RemoteWorkerRuntimeUpdateResult.ActivationFailed ->
-                "Die Verbindung konnte nicht geprüft werden. Es wurde nichts aktiviert."
+                tr(R.string.integration_the_connection_could_not_be_verified_nothing_was_enable_e4ca838)
             RemoteWorkerRuntimeUpdateResult.PublicationFailed ->
-                "Codex konnte den Arbeitsrechner nicht wirksam übernehmen. Der bestätigte Stand bleibt maßgeblich."
+                tr(R.string.integration_codex_could_not_activate_the_work_computer_the_confirme_5a8e9f2)
         }
         refreshRemoteWorkerSettings(notice)
     }
@@ -2499,15 +2695,20 @@ class LauncherActivity : ComponentActivity() {
     private fun callbacks(): HansUiCallbacks = HansUiCallbacks(
         authGate = AuthGateUiCallbacks(
             onStartChatGptLogin = {
-                if (!showOfflineSubmissionNotice("Für die ChatGPT-Anmeldung wird Internet benötigt.") && !sessionHost.loginWithDeviceCode()) {
-                    showShortMessage("Die Codex-Runtime ist noch nicht bereit.")
+                if (!showOfflineSubmissionNotice(tr(R.string.integration_signing_in_to_chatgpt_requires_an_internet_connection_b8bf282)) && !sessionHost.loginWithDeviceCode()) {
+                    showShortMessage(tr(R.string.integration_the_codex_runtime_is_not_ready_yet_91f881e))
                 }
             },
             onOpenVerificationPage = ::openVerificationPage,
             onCopyUserCode = ::copyUserCode,
             onCancel = { sessionHost.restart() },
+            onStartNewConversation = {
+                if (!sessionHost.startNewConversationAfterRecoveryFailure()) {
+                    showShortMessage(tr(R.string.recovery_new_conversation_unavailable))
+                }
+            },
             onRetry = {
-                if (!showOfflineSubmissionNotice("Zum erneuten Verbinden wird Internet benötigt.")) {
+                if (!showOfflineSubmissionNotice(tr(R.string.integration_reconnecting_requires_an_internet_connection_25d6af1))) {
                     AuthGateRecoveryPolicy.retry(
                         client = sessionHost.snapshot(),
                         loginWithDeviceCode = sessionHost::loginWithDeviceCode,
@@ -2523,6 +2724,7 @@ class LauncherActivity : ComponentActivity() {
                 }
             },
             onSend = ::sendComposer,
+            onInterruptWork = sessionHost::interrupt,
             readComposerDraft = {
                 ComposerDraftSnapshot(
                     text = localUi.text,
@@ -2571,6 +2773,7 @@ class LauncherActivity : ComponentActivity() {
                 refreshWorkbench()
             },
             onToggleLiveVoice = ::toggleLiveVoice,
+            onToggleDictation = { executeActionKeyCommand(ActionKeyCommand.ToggleDictation) },
             onStartLiveVoice = { if (!isLiveVoiceActive()) toggleLiveVoice() },
             onStopLiveVoice = {
                 pendingLiveVoiceStart = false
@@ -2578,16 +2781,16 @@ class LauncherActivity : ComponentActivity() {
             },
             onLiveVoiceInputMutedChanged = { muted ->
                 if (!AndroidLiveVoiceRuntime.setInputMuted(muted)) {
-                    showShortMessage("Das Mikrofon konnte nicht umgeschaltet werden.")
+                    showShortMessage(tr(R.string.integration_the_microphone_could_not_be_switched_c024fee))
                 }
             },
             onReadAssistantMessageAloud = { text ->
                 if (!sessionHost.replayVisibleAssistantMessage(text)) {
                     showShortMessage(
-                        if (sessionHost.hasSpeechCredential()) {
-                            "Vorlesen ist während einer Aufnahme oder für diese Antwort gerade nicht verfügbar."
+                        if (sessionHost.hasCodexSpeechAccess()) {
+                            tr(R.string.integration_read_aloud_is_unavailable_during_recording_or_for_this__d1c49a0)
                         } else {
-                            "Hinterlege zuerst deinen OpenAI-Sprachschlüssel in den Einstellungen."
+                            tr(R.string.codex_live_sign_in_required)
                         },
                     )
                 }
@@ -2595,21 +2798,19 @@ class LauncherActivity : ComponentActivity() {
             onSpeechAudioRouteRequested = { route ->
                 (application as HansApplication).speechAudioRoutes.request(route)
             },
-            onCameraGestureDown = ::onCameraGestureDown,
-            onCameraGestureLongPress = ::onCameraGestureLongPress,
-            onCameraGestureUp = ::onCameraGestureUp,
-            onCameraGestureCancel = ::onCameraGestureCancel,
+            onOpenSpeechFailureHelp = { target -> openFixedOpenAiPage(target.url) },
+            onDismissSpeechFailure = { revision -> HansSpeechFailureRuntime.dismiss(revision) },
             onOpenInternetSettings = {
                 runCatching {
                     startActivity(Intent(android.provider.Settings.Panel.ACTION_INTERNET_CONNECTIVITY))
                 }.onFailure {
                     runCatching { startActivity(Intent(android.provider.Settings.ACTION_WIRELESS_SETTINGS)) }
-                        .onFailure { showShortMessage("Interneteinstellungen konnten nicht geöffnet werden.") }
+                        .onFailure { showShortMessage(tr(R.string.integration_internet_settings_could_not_be_opened_12c8e76)) }
                 }
             },
             onRetryPendingDictation = { id ->
-                if (!showOfflineSubmissionNotice("Nicht gesendet. Der Sprachtext bleibt als Entwurf gespeichert.") && !sessionHost.retryPendingDictation(id)) {
-                    showConnectionFailure("Sprachtext noch nicht gesendet. Der Entwurf bleibt gespeichert; Hans muss zuerst wieder bereit sein.")
+                if (!showOfflineSubmissionNotice(tr(R.string.integration_not_sent_the_dictated_text_remains_saved_as_a_draft_f41370f)) && !sessionHost.retryPendingDictation(id)) {
+                    showConnectionFailure(tr(R.string.integration_dictated_text_has_not_been_sent_yet_the_draft_is_saved__2e01682))
                 }
             },
             onDiscardPendingDictation = sessionHost::discardPendingDictation,
@@ -2642,7 +2843,7 @@ class LauncherActivity : ComponentActivity() {
             onOpenInstalled = { rawHandle ->
                 val handle = rawHandle.toPluginHandleOrNull()
                 if (handle == null || sessionHost.readPlugin(handle) == null) {
-                    showShortMessage("Die Plugin-Details konnten nicht geladen werden.")
+                    showShortMessage(tr(R.string.integration_plugin_details_could_not_be_loaded_36460f3))
                 } else {
                     localUi = localUi.copy(
                         selectedPluginHandle = handle,
@@ -2653,7 +2854,7 @@ class LauncherActivity : ComponentActivity() {
             onInstallAvailable = { rawHandle ->
                 val handle = rawHandle.toPluginHandleOrNull()
                 if (handle == null || sessionHost.installPlugin(handle) == null) {
-                    showShortMessage("Das Plugin konnte noch nicht installiert werden.")
+                    showShortMessage(tr(R.string.integration_the_plugin_could_not_be_installed_yet_a5d9e5d))
                 }
             },
             onCloseDetails = {
@@ -2670,12 +2871,12 @@ class LauncherActivity : ComponentActivity() {
                     handle != localUi.selectedPluginHandle ||
                     sessionHost.configurePluginSkill(handle, skillName, enabled) == null
                 ) {
-                    showShortMessage("Die Skill-Änderung konnte nicht gestartet werden.")
+                    showShortMessage(tr(R.string.integration_the_skill_change_could_not_be_started_cc2d4a1))
                 }
             },
             onRefreshMarketplaces = {
                 if (sessionHost.refreshMarketplaces() == null) {
-                    showShortMessage("Die Marketplaces konnten nicht aktualisiert werden.")
+                    showShortMessage(tr(R.string.integration_marketplaces_could_not_be_refreshed_831e673))
                 }
             },
             onUninstallPlugin = { rawHandle ->
@@ -2685,7 +2886,7 @@ class LauncherActivity : ComponentActivity() {
                     handle != localUi.selectedPluginHandle ||
                     sessionHost.uninstallPlugin(handle) == null
                 ) {
-                    showShortMessage("Die Deinstallation konnte nicht gestartet werden.")
+                    showShortMessage(tr(R.string.integration_uninstallation_could_not_be_started_3f63d34))
                 }
             },
             onConnectRemoteMcp = ::startRemoteMcpOAuth,
@@ -2693,7 +2894,7 @@ class LauncherActivity : ComponentActivity() {
             onRetryRemoteMcpInstall = { pluginId, serverId ->
                 if (sessionHost.retryRemoteMcpPluginInstall(pluginId, serverId) == null) {
                     showShortMessage(
-                        "Die Plugin-Installation konnte nicht erneut gestartet werden.",
+                        tr(R.string.integration_plugin_installation_could_not_be_restarted_fee7df2),
                     )
                 }
             },
@@ -2715,14 +2916,20 @@ class LauncherActivity : ComponentActivity() {
                 refreshWorkbench()
             },
             onRefreshNotificationFactArchive = ::refreshNotificationFactArchiveStatus,
+            onConfigureWhatsAppAgentChannel = ::configureWhatsAppAgentChannel,
+            onDisableWhatsAppAgentChannel = {
+                appCatalogExecutor.execute {
+                    (application as HansApplication).whatsAppAgentChannel.revoke()
+                }
+            },
             onConfirmedSttGlossarySaved = ::saveConfirmedSttGlossary,
             onSttLatencyChanged = { delay ->
                 val saved = runCatching { sttLatencyPreferenceStore.save(delay) }.getOrNull()
                 localUi = localUi.copy(
                     sttLatency = localUi.sttLatency.copy(
                         preferred = saved ?: localUi.sttLatency.preferred,
-                        notice = if (saved != null) "Gespeichert für die nächste Aufnahme; die laufende Aufnahme bleibt unverändert."
-                            else "Nicht gespeichert. Die bisherige Auswahl bleibt erhalten.",
+                        notice = if (saved != null) tr(R.string.integration_saved_for_the_next_recording_the_current_recording_is_u_1fe9734)
+                            else tr(R.string.integration_not_saved_the_previous_selection_is_preserved_217bb0a),
                     ),
                     revision = localUi.revision + 1,
                 )
@@ -2732,7 +2939,7 @@ class LauncherActivity : ComponentActivity() {
             onRemoteControlSettingsOpened = { sessionHost.remoteControlSettingsOpened() },
             onRemoteControlEnable = {
                 if (!sessionHost.remoteControlEnable(this@LauncherActivity)) {
-                    showShortMessage("Fernzugriff konnte nicht gestartet werden. Bitte den Status prüfen.")
+                    showShortMessage(tr(R.string.integration_remote_access_could_not_be_started_please_check_its_sta_ae9521a))
                 }
             },
             onRemoteControlDisable = { sessionHost.remoteControlDisable() },
@@ -2755,7 +2962,7 @@ class LauncherActivity : ComponentActivity() {
                         current == null ||
                         !requestSelection(model, current.effort.wireValue, current.serviceTier)
                     ) {
-                        showShortMessage("Dieses Modell ist gerade nicht verfügbar.")
+                        showShortMessage(tr(R.string.integration_this_model_is_currently_unavailable_3c141fa))
                     }
                 }
             },
@@ -2771,7 +2978,7 @@ class LauncherActivity : ComponentActivity() {
                             requireExactEffort = true,
                         )
                     ) {
-                        showShortMessage("Dieser Denkaufwand wird vom Modell nicht unterstützt.")
+                        showShortMessage(tr(R.string.integration_this_reasoning_effort_is_not_supported_by_the_model_a0d5f7b))
                     }
                 }
             },
@@ -2792,7 +2999,7 @@ class LauncherActivity : ComponentActivity() {
                         requireExactServiceTier = true,
                     )
                 ) {
-                    showShortMessage("Fast ist für dieses Modell gerade nicht verfügbar.")
+                    showShortMessage(tr(R.string.integration_fast_mode_is_currently_unavailable_for_this_model_eac0de8))
                 }
             },
             onVoiceSelected = { voice -> saveVoice(voice = voice) },
@@ -2810,13 +3017,10 @@ class LauncherActivity : ComponentActivity() {
             onPreviewVoice = {
                 if (!sessionHost.previewSpeech()) {
                     showShortMessage(
-                        if (
-                            localUi.speechCredentialStatus ==
-                            SpeechCredentialUiStatus.TEMPORARILY_UNAVAILABLE
-                        ) {
-                            "Entsperre das Telefon, damit die Sprachausgabe wieder verfügbar ist."
+                        if (sessionHost.hasCodexSpeechAccess()) {
+                            tr(R.string.integration_read_aloud_is_unavailable_during_recording_or_for_this__d1c49a0)
                         } else {
-                            "Der OpenAI-Sprachzugang ist noch nicht eingerichtet."
+                            tr(R.string.codex_live_sign_in_required)
                         },
                     )
                 }
@@ -2833,9 +3037,9 @@ class LauncherActivity : ComponentActivity() {
                 showEverydayAccessConfirmation { active ->
                     showShortMessage(
                         if (active) {
-                            "Alltagszugriff ist aktiv."
+                            tr(R.string.integration_everyday_access_is_active_bc0daba)
                         } else {
-                            "Alltagszugriff wurde nicht aktiviert."
+                            tr(R.string.integration_everyday_access_was_not_enabled_12429a6)
                         },
                     )
                 }
@@ -2848,7 +3052,6 @@ class LauncherActivity : ComponentActivity() {
             onPrivateSpaceLockChanged = ::requestPrivateSpaceLocked,
             onOpenPrivateSpaceSettings = ::openPrivateSpaceSettings,
             onDictationTriggerSelected = ::selectDictationKeyTrigger,
-            onCameraHoldToTalkChanged = ::setCameraHoldToTalkEnabled,
             onDisplayMotionModeSelected = ::selectDisplayMotionMode,
             onConfigureSpeechCredential = { showSpeechCredentialEntry() },
             onRemoveSpeechCredential = ::confirmSpeechCredentialRemoval,
@@ -2894,13 +3097,13 @@ class LauncherActivity : ComponentActivity() {
                     showShortMessage(
                         when (result) {
                             PluginRemoteMcpPolicyReviewResult.APPROVED_RETRY_REQUIRED ->
-                                "Zugriffe gespeichert. Starte die Installation jetzt separat erneut."
+                                tr(R.string.integration_access_settings_saved_restart_installation_separately_n_5f56a80)
                             PluginRemoteMcpPolicyReviewResult.STALE_REVIEW ->
-                                "Die Werkzeugliste hat sich geändert. Bitte prüfe sie erneut."
+                                tr(R.string.integration_the_tool_list_has_changed_please_review_it_again_ec55705)
                             PluginRemoteMcpPolicyReviewResult.INVALID_DECISIONS ->
-                                "Die Auswahl war nicht vollständig oder nicht mehr gültig."
+                                tr(R.string.integration_the_selection_was_incomplete_or_no_longer_valid_ca0fb2d)
                             PluginRemoteMcpPolicyReviewResult.UNAVAILABLE ->
-                                "Die Werkzeugzugriffe konnten gerade nicht sicher geprüft werden."
+                                tr(R.string.integration_tool_access_could_not_be_checked_safely_right_now_d60cc42)
                         },
                     )
                 }
@@ -2911,7 +3114,7 @@ class LauncherActivity : ComponentActivity() {
                 remoteMcpPolicyReviewPending = false,
                 revision = localUi.revision + 1,
             )
-            showShortMessage("Die Werkzeugprüfung konnte nicht gestartet werden.")
+            showShortMessage(tr(R.string.integration_the_tool_access_check_could_not_be_started_de34098))
         }
     }
 
@@ -2930,7 +3133,7 @@ class LauncherActivity : ComponentActivity() {
                                 recreate()
                             } else {
                                 button.isEnabled = true
-                                showShortMessage("Die Wiederherstellung ist noch nicht sicher möglich. Nichts wurde verworfen.")
+                                showShortMessage(tr(R.string.integration_recovery_cannot_be_performed_safely_yet_nothing_was_dis_e3230a6))
                             }
                         }
                     }
@@ -2959,7 +3162,7 @@ class LauncherActivity : ComponentActivity() {
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 if (outcome.isSuccess) {
-                    showShortMessage("Sicherung wurde gespeichert.")
+                    showShortMessage(tr(R.string.integration_backup_saved_f8494b5))
                 } else {
                     showShortMessage(backupFailureMessage(outcome.exceptionOrNull()))
                 }
@@ -2991,30 +3194,30 @@ class LauncherActivity : ComponentActivity() {
 
     private fun showBackupImportPreview(preview: HansBackupImportPreview) {
         val details = buildList {
-            add(if (preview.settingsChanged) "Einstellungen werden geändert." else "Einstellungen sind identisch.")
+            add(if (preview.settingsChanged) tr(R.string.integration_settings_will_change_6063d9d) else tr(R.string.integration_settings_are_unchanged_930bd64))
             add(
                 if (preview.confirmedProfileWillChange) {
-                    "Das bestätigte persönliche Profil wird ersetzt."
+                    tr(R.string.integration_the_confirmed_personal_profile_will_be_replaced_845defb)
                 } else {
-                    "Das bestätigte persönliche Profil bleibt gleich."
+                    tr(R.string.integration_the_confirmed_personal_profile_is_unchanged_aceeef0)
                 },
             )
             add(
-                "Automationen: ${preview.automationsAdded} neu, " +
-                    "${preview.automationsReplaced} ersetzt, ${preview.automationsRemoved} entfernt. " +
-                    "Laufhistorie und Freigabebelege werden nicht importiert; die vorhandene Laufhistorie bleibt erhalten.",
+                tr(R.string.integration_automations_1_new_2961e70, preview.automationsAdded) +
+                    tr(R.string.integration_1_replaced_2_removed_006b2d9, preview.automationsReplaced, preview.automationsRemoved) +
+                    tr(R.string.integration_run_history_and_approval_receipts_are_not_imported_exis_7290225),
             )
             add(
-                "Plugin-Referenzen: ${preview.pluginReferencesRequested}; " +
-                    "Skill-Auswahlen: ${preview.skillChoicesRequested}.",
+                tr(R.string.integration_plugin_references_1_71cabbb, preview.pluginReferencesRequested) +
+                    tr(R.string.integration_skill_selections_1_66bf005, preview.skillChoicesRequested),
             )
-            addAll(preview.warnings)
+            addAll(preview.warnings.map { it.render(AndroidHansTextResolver(this@LauncherActivity)) })
         }.joinToString("\n\n")
         val dialog = AlertDialog.Builder(this)
-            .setTitle("Sicherung importieren?")
+            .setTitle(tr(R.string.integration_import_backup_a2b829b))
             .setMessage(details)
-            .setNegativeButton("Abbrechen") { _, _ -> backupCoordinator.cancelImport() }
-            .setPositiveButton("Importieren") { _, _ ->
+            .setNegativeButton(tr(R.string.integration_cancel_f7ff117)) { _, _ -> backupCoordinator.cancelImport() }
+            .setPositiveButton(tr(R.string.integration_import_b0b045d)) { _, _ ->
                 confirmBackupImport(preview)
             }
             .create()
@@ -3052,7 +3255,7 @@ class LauncherActivity : ComponentActivity() {
                         } else {
                             true
                         }
-                        showShortMessage(backupImportResultMessage(result, staged))
+                        showShortMessage(backupImportResultMessage(result, staged, AndroidHansTextResolver(this)))
                     },
                     onFailure = { failure ->
                         showShortMessage(backupFailureMessage(failure))
@@ -3066,40 +3269,40 @@ class LauncherActivity : ComponentActivity() {
     private fun backupFailureMessage(failure: Throwable?): String = when (
         (failure as? HansBackupException)?.errorCode
     ) {
-        "backup_document_oversize" -> "Die Sicherungsdatei ist zu groß."
-        "backup_integrity_mismatch" -> "Die Sicherungsdatei wurde verändert oder ist beschädigt."
-        "backup_version" -> "Diese Sicherungsversion wird noch nicht unterstützt."
+        "backup_document_oversize" -> tr(R.string.integration_the_backup_file_is_too_large_827457f)
+        "backup_integrity_mismatch" -> tr(R.string.integration_the_backup_file_was_changed_or_is_damaged_f6fcd46)
+        "backup_version" -> tr(R.string.integration_this_backup_version_is_not_supported_yet_071d897)
         "backup_plugin_catalog_unavailable" ->
-            "Der Plugin-Katalog wird noch geladen. Bitte versuche es gleich noch einmal."
+            tr(R.string.integration_the_plugin_catalog_is_still_loading_please_try_again_sh_05fa036)
         "backup_confirmation_stale",
         "backup_state_changed",
-        -> "Hans hat sich inzwischen geändert. Bitte wähle die Sicherung erneut aus."
+        -> tr(R.string.integration_hans_changed_in_the_meantime_please_select_the_backup_a_d3362fc)
         "backup_forbidden_material" ->
-            "Die Sicherung enthält Anmeldedaten oder einen privaten Gerätepfad und wurde abgelehnt."
+            tr(R.string.integration_the_backup_contains_sign_in_credentials_or_a_private_de_39bb6dd)
         "backup_runtime_busy",
         "backup_automation_work_unsettled",
-        -> "Es gibt noch laufende, ausstehende oder ungeklärte Automationen. Bitte schließe sie vor dem Import ab."
+        -> tr(R.string.integration_some_automations_are_still_running_pending_or_unresolve_6e789be)
         "backup_import_rollback_pending" ->
-            "Die Wiederherstellung ist noch offen. Automationen bleiben gesperrt; der bisherige Stand wird nicht verworfen."
-        else -> "Die Sicherung konnte nicht verarbeitet werden."
+            tr(R.string.integration_recovery_is_still_pending_automations_remain_blocked_th_d7fa48f)
+        else -> tr(R.string.integration_the_backup_could_not_be_processed_6479e7f)
     }
 
     private fun startGettingToKnowInterview() {
         val selection = selectionForNextDispatch() ?: run {
-            showShortMessage("Diese Modellkonfiguration ist nicht verfügbar.")
+            showShortMessage(tr(R.string.integration_this_model_configuration_is_unavailable_84bea70))
             return
         }
         val accepted = sessionHost.dispatch(
             input = listOf(
                 CodexInput.Text(
-                    "Ich möchte jetzt mein Kennenlerngespräch mit dir beginnen oder ein begonnenes Gespräch fortsetzen. Bitte führe es turn-basiert und stelle mir jetzt genau eine erste beziehungsweise nächste Frage.",
+                    tr(R.string.integration_i_would_like_to_start_my_getting_to_know_you_conversati_9377324),
                 ),
             ),
             selection = selection,
             readResponseAloud = true,
         )
         if (accepted == null) {
-            showShortMessage("Das Kennenlerngespräch kann gerade noch nicht starten.")
+            showShortMessage(tr(R.string.integration_the_getting_to_know_you_conversation_cannot_start_yet_4d06cc6))
             return
         }
         localUi = localUi.copy(
@@ -3160,7 +3363,7 @@ class LauncherActivity : ComponentActivity() {
                 when (action) {
                     HansSetupHandoffAction.None -> Unit
                     is HansSetupHandoffAction.Dispatch -> {
-                        val prompt = SetupConversationPrompt.forState(setupState.complete)
+                        val prompt = SetupConversationPrompt.forState(setupState.complete, AndroidHansTextResolver(this))
                         val attempt = runCatching {
                             if (selection == null || setupSkill == null) {
                                 CodexDispatchAttemptResult.RejectedBeforeTransport
@@ -3236,7 +3439,7 @@ class LauncherActivity : ComponentActivity() {
     private fun surfaceSetupHandoffRecovery(record: HansSetupHandoffRecord) {
         if (!surfacedSetupHandoffRecoveries.add(record.command.handoffId)) return
         showShortMessage(
-            "Die automatische Einrichtung braucht eine Reparatur über den Installer.",
+            tr(R.string.integration_automatic_setup_needs_repair_through_the_installer_7d3cb8b),
         )
     }
 
@@ -3250,45 +3453,45 @@ class LauncherActivity : ComponentActivity() {
 
     private fun startOrResumeSetupConversation() {
         if (pendingSetupConversationMessageId != null) {
-            showShortMessage("Die Einrichtung wird bereits gestartet.")
+            showShortMessage(tr(R.string.integration_setup_is_already_starting_bbfa8ec))
             return
         }
         // Reading the state is intentionally non-mutating. A failed App Server dispatch must not
         // make setup look started when no setup conversation was actually created.
         val state = runCatching { setupRuntime.snapshot() }.getOrElse {
-            showShortMessage("Die Einrichtung konnte nicht geladen werden.")
+            showShortMessage(tr(R.string.integration_setup_could_not_be_loaded_f684c84))
             return
         }
         when ((sessionHost.snapshot() ?: clientSnapshot)?.bundledSetupBootstrapStatus) {
             BundledSetupBootstrapStatus.READY -> Unit
             BundledSetupBootstrapStatus.PREPARING -> {
-                showShortMessage("Die Einrichtung wird noch vorbereitet. Versuch es gleich erneut.")
+                showShortMessage(tr(R.string.integration_setup_is_still_being_prepared_try_again_shortly_2b7aa7c))
                 return
             }
             BundledSetupBootstrapStatus.FAILED -> {
                 if (sessionHost.retryBundledSetupBootstrap()) {
-                    showShortMessage("Das Setup-Plugin wird erneut vorbereitet. Versuch es gleich noch einmal.")
+                    showShortMessage(tr(R.string.integration_the_setup_plugin_is_being_prepared_again_try_again_shor_52b9e22))
                 } else {
-                    showShortMessage("Das Setup-Plugin konnte noch nicht neu vorbereitet werden.")
+                    showShortMessage(tr(R.string.integration_the_setup_plugin_could_not_be_prepared_again_yet_b7a6ba3))
                 }
                 return
             }
             BundledSetupBootstrapStatus.DISABLED,
             null,
             -> {
-                showShortMessage("Das gebündelte Setup-Plugin ist nicht verfügbar.")
+                showShortMessage(tr(R.string.integration_the_bundled_setup_plugin_is_unavailable_e9e4daf))
                 return
             }
         }
         val selection = selectionForNextDispatch() ?: run {
-            showShortMessage("Diese Modellkonfiguration ist nicht verfügbar.")
+            showShortMessage(tr(R.string.integration_this_model_configuration_is_unavailable_84bea70))
             return
         }
         val setupSkill = sessionHost.bundledSetupSkillInput() ?: run {
-            showShortMessage("Der Setup-Skill ist noch nicht wirksam verfügbar.")
+            showShortMessage(tr(R.string.integration_the_setup_skill_is_not_effectively_available_yet_e9be0c6))
             return
         }
-        val prompt = SetupConversationPrompt.forState(state.complete)
+        val prompt = SetupConversationPrompt.forState(state.complete, AndroidHansTextResolver(this))
         val accepted = sessionHost.dispatch(
             input = prompt.toCodexInput(setupSkill),
             selection = selection,
@@ -3296,7 +3499,7 @@ class LauncherActivity : ComponentActivity() {
             clientUserMessageId = "hans-setup-${UUID.randomUUID()}",
         )
         if (accepted == null) {
-            showShortMessage("Die Einrichtung kann gerade noch nicht starten.")
+            showShortMessage(tr(R.string.integration_setup_cannot_start_yet_5299c8f))
             return
         }
         pendingSetupConversationMessageId = accepted
@@ -3320,10 +3523,10 @@ class LauncherActivity : ComponentActivity() {
         when (outcome) {
             SetupConversationReceiptOutcome.WAITING -> Unit
             SetupConversationReceiptOutcome.REJECTED -> {
-                showShortMessage("Die Einrichtung konnte serverseitig nicht gestartet werden.")
+                showShortMessage(tr(R.string.integration_setup_could_not_be_started_on_the_server_1659461))
             }
             SetupConversationReceiptOutcome.PERSIST_FAILED -> showShortMessage(
-                "Das Gespräch wurde gestartet, aber der Einrichtungsstand konnte noch nicht gespeichert werden.",
+                tr(R.string.integration_the_conversation_started_but_setup_progress_could_not_b_9100410),
             )
             SetupConversationReceiptOutcome.PERSISTED -> {
                 // An already-running Realtime session must see this proven workflow before the
@@ -3344,11 +3547,15 @@ class LauncherActivity : ComponentActivity() {
                 completion(SetupUiCommandResult.UserInteractionRequired)
                 return@runOnUiThread
             }
-            if (
-                command is SetupUiCommand.ArmLiveTest &&
-                command.token.step == HansSetupStep.VOICE_DICTATION_TEST
+            // Reject retired operations even if an older agent context still has a token.
+            // Optional practice uses the ordinary user-initiated voice controls instead.
+            if (command is SetupUiCommand.ArmLiveTest && command.token.step in setOf(
+                    HansSetupStep.VOICE_DICTATION_TEST,
+                    HansSetupStep.HARDWARE_LIVE_TEST,
+                    HansSetupStep.CAMERA_HOLD_LIVE_TEST,
+                )
             ) {
-                beginSetupVoiceAndDictationTest(command.token, lease, completion)
+                completion(SetupUiCommandResult.Rejected("setup_voice_test_retired"))
                 return@runOnUiThread
             }
             if (
@@ -3360,7 +3567,7 @@ class LauncherActivity : ComponentActivity() {
             }
             if (command is SetupUiCommand.OpenSettings) {
                 if (command.token.step == HansSetupStep.SPEECH_CREDENTIAL_ACCESS) {
-                    showSpeechCredentialEntry(command.token, completion)
+                    completion(SetupUiCommandResult.Rejected("setup_api_key_step_retired"))
                     return@runOnUiThread
                 }
                 if (
@@ -3414,7 +3621,9 @@ class LauncherActivity : ComponentActivity() {
                             HansSetupInputChoice.HARDWARE_TOGGLE ->
                                 selectDictationKeyTrigger(ActionKeyTrigger.PRESS)
                             HansSetupInputChoice.HARDWARE_HOLD ->
-                                selectDictationKeyTrigger(ActionKeyTrigger.HOLD_TO_TALK)
+                                return@runCatching SetupUiCommandResult.Rejected(
+                                    "setup_hold_gesture_retired",
+                                )
                             HansSetupInputChoice.NO_HARDWARE_KEY ->
                                 return@runCatching SetupUiCommandResult.Rejected(
                                     "setup_hardware_key_skipped",
@@ -3430,12 +3639,7 @@ class LauncherActivity : ComponentActivity() {
                         }
                     }
                     is SetupUiCommand.ApplyCameraHoldChoice -> {
-                        setCameraHoldToTalkEnabled(command.enabled)
-                        if (settings.cameraHoldToTalkEnabled == command.enabled) {
-                            SetupUiCommandResult.Accepted()
-                        } else {
-                            SetupUiCommandResult.Rejected("camera_choice_not_effective")
-                        }
+                        SetupUiCommandResult.Rejected("setup_camera_hold_retired")
                     }
                     is SetupUiCommand.ApplyModelSelection -> {
                         if (
@@ -3540,7 +3744,7 @@ class LauncherActivity : ComponentActivity() {
             } else {
                 activeSetupDictationTestToken = command.token
                 showShortMessage(
-                    "Betätige jetzt die eingerichtete Taste so, wie du sie später verwendest.",
+                    tr(R.string.integration_use_the_configured_key_now_as_you_intend_to_use_it_late_fa39eb6),
                 )
                 SetupUiCommandResult.Accepted()
             }
@@ -3572,7 +3776,7 @@ class LauncherActivity : ComponentActivity() {
                     SetupUiCommandResult.Rejected("app_notification_permission_missing")
                 } else if (setupRuntime.postNotificationLiveTest(command.token.nonce)) {
                     showShortMessage(
-                        "Hans hat eine harmlose Testbenachrichtigung gesendet und prüft ihren Eingang.",
+                        tr(R.string.integration_hans_sent_a_harmless_test_notification_and_is_checking__d076cd6),
                     )
                     SetupUiCommandResult.Accepted()
                 } else {
@@ -3635,7 +3839,7 @@ class LauncherActivity : ComponentActivity() {
         val state = setupRuntime.snapshot()
         val record = state.record(HansSetupStep.CAMERA_HOLD_LIVE_TEST)
         if (record.terminal || state.currentStep != HansSetupStep.CAMERA_HOLD_LIVE_TEST) return
-        showShortMessage(SetupLiveTestCopy.cameraAction(record))
+        showShortMessage(SetupLiveTestCopy.cameraAction(record, AndroidHansTextResolver(this)))
     }
 
     private fun beginSetupAccessibilityLiveTest(
@@ -3647,11 +3851,13 @@ class LauncherActivity : ComponentActivity() {
         if (!setupRuntime.armLiveTest(token.step, token.nonce)) {
             return SetupUiCommandResult.Rejected("accessibility_test_arm_failed")
         }
+        val receiptCopy = setupRuntime.accessibilityTestCopy(token.nonce)
+            ?: return SetupUiCommandResult.Rejected("accessibility_test_copy_unavailable")
         val dialog = AlertDialog.Builder(this)
-            .setTitle("App-Steuerung testen")
-            .setMessage("Tippe jetzt einmal auf „Testfläche prüfen“.")
-            .setPositiveButton("Testfläche prüfen", null)
-            .setNegativeButton("Später") { current, _ -> current.dismiss() }
+            .setTitle(tr(R.string.integration_test_app_control_d029d32))
+            .setMessage(tr(R.string.integration_tap_check_test_area_once_now_bb57b4a))
+            .setPositiveButton(tr(R.string.integration_check_test_area_c84182e), null)
+            .setNegativeButton(tr(R.string.integration_later_c47401b)) { current, _ -> current.dismiss() }
             .create()
         setupAccessibilityTestDialog = dialog
         dialog.setCanceledOnTouchOutside(false)
@@ -3662,16 +3868,16 @@ class LauncherActivity : ComponentActivity() {
         }
         dialog.setOnShowListener {
             val button = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
-            button.contentDescription = ACCESSIBILITY_SETUP_TARGET_DESCRIPTION
+            button.contentDescription = receiptCopy.targetDescription
             button.setOnClickListener {
                 if (!setupRuntime.recordAccessibilityTargetAction(token.nonce)) {
                     dialog.setMessage(
-                        "Hans konnte diese Testfläche noch nicht eindeutig lesen. " +
-                            "Warte kurz und tippe dann noch einmal auf „Testfläche prüfen“.",
+                        tr(R.string.integration_hans_could_not_read_this_test_area_unambiguously_yet_7bc338b) +
+                            tr(R.string.integration_wait_briefly_then_tap_check_test_area_again_f4a5895),
                     )
                     return@setOnClickListener
                 }
-                dialog.setMessage(ACCESSIBILITY_SETUP_POSTCONDITION_TEXT)
+                dialog.setMessage(receiptCopy.postconditionText)
                 button.isEnabled = false
                 scheduleAccessibilityPostconditionCheck(dialog, token, attempt = 0)
             }
@@ -3690,14 +3896,14 @@ class LauncherActivity : ComponentActivity() {
             setupAccessibilityPostconditionCheck = null
             if (setupAccessibilityTestDialog !== dialog || !dialog.isShowing) return@Runnable
             if (setupRuntime.recordAccessibilityPostcondition(token.nonce)) {
-                showShortMessage("Die App-Steuerung hat die genaue Testaktion erkannt.")
+                showShortMessage(tr(R.string.integration_app_control_detected_the_exact_test_action_f4588b2))
                 dialog.dismiss()
             } else if (attempt + 1 < ACCESSIBILITY_POSTCONDITION_MAX_ATTEMPTS) {
                 scheduleAccessibilityPostconditionCheck(dialog, token, attempt + 1)
             } else {
                 dialog.setMessage(
-                    "Der Nachweis war noch nicht eindeutig. " +
-                        "Tippe bitte noch einmal auf „Testfläche prüfen“.",
+                    tr(R.string.integration_the_evidence_was_not_unambiguous_yet_a80ac58) +
+                        tr(R.string.integration_please_tap_check_test_area_again_42309f9),
                 )
                 dialog.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled = true
             }
@@ -3730,12 +3936,12 @@ class LauncherActivity : ComponentActivity() {
         }
         if (!lease.isActive()) return
         val dialog = AlertDialog.Builder(this)
-            .setTitle("Sprachausgabe testen")
-            .setMessage(SetupLiveTestCopy.VOICE_PREVIEW_ACTION)
-            .setNegativeButton("Später") { _, _ ->
+            .setTitle(tr(R.string.integration_test_speech_output_815e01f))
+            .setMessage(SetupLiveTestCopy.voicePreviewAction(AndroidHansTextResolver(this)))
+            .setNegativeButton(tr(R.string.integration_later_c47401b)) { _, _ ->
                 completion(SetupUiCommandResult.Rejected("voice_test_deferred"))
             }
-            .setPositiveButton("Weiter") { _, _ ->
+            .setPositiveButton(tr(R.string.integration_continue_1e14bdf)) { _, _ ->
                 if (!lease.tryComplete(
                         SetupUiCommandResult.Accepted(liveVerificationAccepted = true),
                     )
@@ -3764,9 +3970,9 @@ class LauncherActivity : ComponentActivity() {
     private fun offerSetupDictationStop() {
         if (setupVoiceStopDialog?.isShowing == true) return
         setupVoiceStopDialog = AlertDialog.Builder(this)
-            .setTitle("Hans hört zu")
-            .setMessage(SetupLiveTestCopy.VOICE_DICTATION_ACTION)
-            .setPositiveButton("Fertig gesprochen") { _, _ ->
+            .setTitle(tr(R.string.integration_hans_is_listening_3d4eedb))
+            .setMessage(SetupLiveTestCopy.voiceDictationAction(AndroidHansTextResolver(this)))
+            .setPositiveButton(tr(R.string.integration_done_speaking_a0f923f)) { _, _ ->
                 HansDictationService.stop(this)
             }
             .create()
@@ -3783,7 +3989,7 @@ class LauncherActivity : ComponentActivity() {
         if (snapshot?.pendingSettingsSelection != null && snapshot.sessionPhase != ClientSessionPhase.BUSY) {
             // Nothing was transmitted: keep typing possible and retain the draft, without
             // turning a short settings handshake into an ambiguous-delivery warning.
-            showShortMessage("Die Modellauswahl wird noch bestätigt. Bitte gleich erneut senden.")
+            showShortMessage(tr(R.string.integration_the_model_selection_is_still_being_confirmed_please_sen_663a0ad))
             return
         }
         val attachments = localUi.attachments
@@ -3802,7 +4008,7 @@ class LauncherActivity : ComponentActivity() {
         if (input.isEmpty()) return
 
         val selection = selectionForNextDispatch() ?: run {
-            showShortMessage("Diese Modellkonfiguration ist nicht verfügbar.")
+            showShortMessage(tr(R.string.integration_this_model_configuration_is_unavailable_84bea70))
             return
         }
         val messageId = "composer-${UUID.randomUUID()}"
@@ -3827,7 +4033,7 @@ class LauncherActivity : ComponentActivity() {
             pendingComposerDispatch = null
             localUi = localUi.copy(
                 pendingComposerMessageId = null,
-                connectionFailureMessage = "Die Nachricht konnte nicht bestätigt werden. Der Entwurf bleibt erhalten. Prüfe den Chat, bevor du erneut sendest.",
+                connectionFailureMessage = tr(R.string.integration_the_message_could_not_be_confirmed_the_draft_is_preserv_873e84b),
                 revision = localUi.revision + 1,
             )
             return
@@ -3958,7 +4164,7 @@ class LauncherActivity : ComponentActivity() {
                                 privateSpaceUiState(
                                     snapshot = snapshot,
                                     containerVisible = privateSpaceVisibilityStore.isVisible(),
-                                    notice = "Der private Bereich konnte nicht geprüft werden.",
+                                    notice = tr(R.string.integration_private_space_could_not_be_checked_cdc9db8),
                                 )
                             },
                             revision = localUi.revision + 1,
@@ -3973,7 +4179,7 @@ class LauncherActivity : ComponentActivity() {
 
     private fun setPrivateSpaceContainerVisible(visible: Boolean) {
         if (!privateSpaceVisibilityStore.setVisible(visible)) {
-            showShortMessage("Die Einstellung für den privaten Bereich wurde nicht gespeichert.")
+            showShortMessage(tr(R.string.integration_the_private_space_setting_was_not_saved_bfaa305))
             return
         }
         localUi = localUi.copy(
@@ -3985,7 +4191,7 @@ class LauncherActivity : ComponentActivity() {
         )
         if (!visible) {
             purgePrivateAppInventory()
-            showShortMessage("Der private Bereich ist ausgeblendet. Du findest ihn in Einstellungen.")
+            showShortMessage(tr(R.string.integration_private_space_is_hidden_you_can_find_it_in_settings_0d2eccc))
         } else {
             refreshPrivateSpaceState()
             if (localUi.requestedDestination == HansDestination.APPS) refreshAppDrawer()
@@ -3997,7 +4203,7 @@ class LauncherActivity : ComponentActivity() {
             localUi.privateSpace.profileId != profileId ||
             !localUi.privateSpace.canChangeLock
         ) {
-            showShortMessage("Der private Bereich ist nicht mehr in diesem Zustand verfügbar.")
+            showShortMessage(tr(R.string.integration_private_space_is_no_longer_available_in_this_state_2da743e))
             refreshPrivateSpaceState()
             return
         }
@@ -4022,11 +4228,11 @@ class LauncherActivity : ComponentActivity() {
                         val notice = when (outcome) {
                             PrivateSpaceQuietModeOutcome.CONFIRMED -> ""
                             PrivateSpaceQuietModeOutcome.PENDING ->
-                                "Android aktualisiert den privaten Bereich."
+                                tr(R.string.integration_android_is_updating_private_space_96d7bdd)
                             PrivateSpaceQuietModeOutcome.AUTHENTICATION_REQUIRED ->
-                                "Bestätige die Entsperrung im Android-Dialog."
+                                tr(R.string.integration_confirm_unlocking_in_the_android_dialog_be5d25e)
                             PrivateSpaceQuietModeOutcome.REJECTED ->
-                                "Android hat die Änderung nicht übernommen."
+                                tr(R.string.integration_android_did_not_apply_the_change_c2a1797)
                         }
                         localUi = localUi.copy(
                             privateSpace = privateSpaceUiState(
@@ -4044,7 +4250,7 @@ class LauncherActivity : ComponentActivity() {
                         localUi = localUi.copy(
                             privateSpace = localUi.privateSpace.copy(
                                 operationInProgress = false,
-                                notice = "Android konnte den privaten Bereich nicht ändern.",
+                                notice = tr(R.string.integration_android_could_not_change_private_space_fe32111),
                             ),
                             revision = localUi.revision + 1,
                         )
@@ -4059,7 +4265,7 @@ class LauncherActivity : ComponentActivity() {
         when (publicCapabilityAdapter.openPrivateSpaceSettings()) {
             is AndroidAdapterResult.Success -> Unit
             is AndroidAdapterResult.Failure ->
-                showShortMessage("Die Android-Einstellungen für den privaten Bereich sind nicht verfügbar.")
+                showShortMessage(tr(R.string.integration_android_settings_for_private_space_are_unavailable_423d0cd))
         }
     }
 
@@ -4101,6 +4307,7 @@ class LauncherActivity : ComponentActivity() {
                     projectAutomations(
                         snapshot = automationRuntime.storage.snapshot(),
                         systemZone = java.time.ZoneId.systemDefault(),
+                        text = AndroidHansTextResolver(this),
                     )
                 }
                 runOnUiThread {
@@ -4121,7 +4328,7 @@ class LauncherActivity : ComponentActivity() {
                             onFailure = {
                                 localUi.automations.copy(
                                     loading = false,
-                                    errorMessage = "Die Automationen konnten nicht sicher gelesen werden.",
+                                    errorMessage = tr(R.string.integration_automations_could_not_be_read_safely_3324cfb),
                                 )
                             },
                         ),
@@ -4134,7 +4341,7 @@ class LauncherActivity : ComponentActivity() {
             localUi = localUi.copy(
                 automations = localUi.automations.copy(
                     loading = false,
-                    errorMessage = "Die Automationen konnten gerade nicht geprüft werden.",
+                    errorMessage = tr(R.string.integration_automations_could_not_be_checked_right_now_d68d08c),
                 ),
                 revision = localUi.revision + 1,
             )
@@ -4145,11 +4352,11 @@ class LauncherActivity : ComponentActivity() {
         val existingDraft = localUi.text
         localUi = localUi.copy(
             requestedDestination = HansDestination.CHAT,
-            text = existingDraft.ifBlank { "Erstelle eine neue Automation: " },
+            text = existingDraft.ifBlank { tr(R.string.integration_create_a_new_automation_a6313f9) },
             revision = localUi.revision + 1,
         )
         if (existingDraft.isNotBlank()) {
-            showShortMessage("Dein vorhandener Entwurf bleibt erhalten.")
+            showShortMessage(tr(R.string.integration_your_existing_draft_is_preserved_eb46331))
         }
     }
 
@@ -4158,20 +4365,20 @@ class LauncherActivity : ComponentActivity() {
             it.id == rawId && it.revision == revision
         }
         if (projected == null) {
-            refreshAutomations(errorMessage = "Die Automation wurde inzwischen geändert. Der aktuelle Stand wurde neu geladen.")
+            refreshAutomations(errorMessage = tr(R.string.integration_the_automation_changed_in_the_meantime_the_current_vers_d5cd63a))
             return
         }
         val existingDraft = localUi.text
         val editPrompt =
-            "Ändere die bestehende Automation „${projected.id}“ " +
-                "(aktuelle Revision ${projected.revision}). Gewünschte Änderung: "
+            tr(R.string.integration_change_the_existing_automation_1_e45bc0d, projected.id) +
+                tr(R.string.integration_current_revision_1_requested_change_8b74b81, projected.revision)
         localUi = localUi.copy(
             requestedDestination = HansDestination.CHAT,
             text = existingDraft.ifBlank { editPrompt },
             revision = localUi.revision + 1,
         )
         if (existingDraft.isNotBlank()) {
-            showShortMessage("Dein vorhandener Entwurf bleibt erhalten.")
+            showShortMessage(tr(R.string.integration_your_existing_draft_is_preserved_eb46331))
         }
     }
 
@@ -4180,16 +4387,16 @@ class LauncherActivity : ComponentActivity() {
             val id = AutomationId(rawId)
             val current = automationRuntime.storage.definition(id)
                 ?: return@runAutomationUiMutation AutomationUiOperationResult.error(
-                    "Diese Automation existiert nicht mehr.",
+                    tr(R.string.integration_this_automation_no_longer_exists_229c630),
                 )
             if (current.revision != revision) {
                 return@runAutomationUiMutation AutomationUiOperationResult.error(
-                    "Die Automation wurde inzwischen geändert. Der aktuelle Stand wurde neu geladen.",
+                    tr(R.string.integration_the_automation_changed_in_the_meantime_the_current_vers_d5cd63a),
                 )
             }
             if (current.enabled == enabled) {
                 return@runAutomationUiMutation AutomationUiOperationResult.success(
-                    if (enabled) "Automation ist aktiv." else "Automation ist pausiert.",
+                    if (enabled) tr(R.string.integration_automation_is_active_6f37060) else tr(R.string.integration_automation_is_paused_df4ac3a),
                 )
             }
             val applied = if (enabled) {
@@ -4203,13 +4410,13 @@ class LauncherActivity : ComponentActivity() {
                     AutomationCancellationResult.Cancelled
             }
             if (!applied) {
-                AutomationUiOperationResult.error("Die Änderung wurde nicht gespeichert.")
+                AutomationUiOperationResult.error(tr(R.string.integration_the_change_was_not_saved_ab3f8a2))
             } else {
                 automationScheduleMutationResult(
                     acceptedMessage = if (enabled) {
-                        "Automation aktiviert."
+                        tr(R.string.integration_automation_enabled_23bd25f)
                     } else {
-                        "Automation pausiert."
+                        tr(R.string.integration_automation_paused_a34143d)
                     },
                 )
             }
@@ -4221,11 +4428,11 @@ class LauncherActivity : ComponentActivity() {
             val id = AutomationId(rawId)
             val current = automationRuntime.storage.definition(id)
                 ?: return@runAutomationUiMutation AutomationUiOperationResult.error(
-                    "Diese Automation existiert nicht mehr.",
+                    tr(R.string.integration_this_automation_no_longer_exists_229c630),
                 )
             if (current.revision != revision) {
                 return@runAutomationUiMutation AutomationUiOperationResult.error(
-                    "Die Automation wurde inzwischen geändert. Der aktuelle Stand wurde neu geladen.",
+                    tr(R.string.integration_the_automation_changed_in_the_meantime_the_current_vers_d5cd63a),
                 )
             }
             val policy = if (unattended) {
@@ -4235,8 +4442,8 @@ class LauncherActivity : ComponentActivity() {
             }
             if (current.requirements.confirmationPolicy == policy) {
                 return@runAutomationUiMutation AutomationUiOperationResult.success(
-                    if (unattended) "Unbeaufsichtigte Ausführung ist aktiv."
-                    else "Jeder Lauf benötigt eine Bestätigung.",
+                    if (unattended) tr(R.string.integration_unattended_execution_is_enabled_ca82236)
+                    else tr(R.string.integration_every_run_requires_confirmation_d86a0e3),
                 )
             }
             val result = automationRuntime.definitions.replace(
@@ -4247,13 +4454,13 @@ class LauncherActivity : ComponentActivity() {
                 ),
             )
             if (result !is AutomationDefinitionMutationResult.Applied) {
-                AutomationUiOperationResult.error("Die Ausführungsregel wurde nicht gespeichert.")
+                AutomationUiOperationResult.error(tr(R.string.integration_the_execution_rule_was_not_saved_d8d6f70))
             } else {
                 automationScheduleMutationResult(
                     acceptedMessage = if (unattended) {
-                        "Unbeaufsichtigte Ausführung aktiviert. Telefonwerkzeuge behalten ihre eigenen Zugriffsregeln."
+                        tr(R.string.integration_unattended_execution_enabled_phone_tools_retain_their_o_b2f95f7)
                     } else {
-                        "Bestätigung vor jedem Lauf aktiviert."
+                        tr(R.string.integration_confirmation_before_every_run_enabled_d032c00)
                     },
                 )
             }
@@ -4278,25 +4485,25 @@ class LauncherActivity : ComponentActivity() {
                 )
             ) {
                 is AutomationManualEnqueueResult.Enqueued -> AutomationUiOperationResult.success(
-                    "Ausführung ist vorgemerkt.",
+                    tr(R.string.integration_execution_is_scheduled_43e1baa),
                 )
                 is AutomationManualEnqueueResult.Duplicate -> AutomationUiOperationResult.success(
-                    "Diese Ausführung war bereits vorgemerkt.",
+                    tr(R.string.integration_this_execution_was_already_scheduled_5bdeb25),
                 )
                 is AutomationManualEnqueueResult.DispatchRejected -> AutomationUiOperationResult.error(
-                    "Die Ausführung ist gespeichert, konnte aber noch nicht gestartet werden.",
+                    tr(R.string.integration_the_execution_is_saved_but_could_not_be_started_yet_d30bf04),
                 )
                 AutomationManualEnqueueResult.DefinitionDisabled -> AutomationUiOperationResult.error(
-                    "Aktiviere die Automation zuerst.",
+                    tr(R.string.integration_enable_the_automation_first_a20ed23),
                 )
                 AutomationManualEnqueueResult.DefinitionNotFound -> AutomationUiOperationResult.error(
-                    "Diese Automation existiert nicht mehr.",
+                    tr(R.string.integration_this_automation_no_longer_exists_229c630),
                 )
                 AutomationManualEnqueueResult.RevisionConflict -> AutomationUiOperationResult.error(
-                    "Die Automation wurde inzwischen geändert. Der aktuelle Stand wurde neu geladen.",
+                    tr(R.string.integration_the_automation_changed_in_the_meantime_the_current_vers_d5cd63a),
                 )
                 AutomationManualEnqueueResult.RequestConflict -> AutomationUiOperationResult.error(
-                    "Die Ausführung konnte nicht eindeutig vorgemerkt werden.",
+                    tr(R.string.integration_execution_could_not_be_scheduled_unambiguously_bb9c4bc),
                 )
             }
         }
@@ -4309,9 +4516,9 @@ class LauncherActivity : ComponentActivity() {
             AutomationUiOperationResult.success(acceptedMessage)
         is ai.hans.standard.automations.AutomationAdapterResult.Rejected ->
             AutomationUiOperationResult(
-                successMessage = "Änderung gespeichert.",
+                successMessage = tr(R.string.integration_change_saved_5cb1866),
                 errorMessage =
-                    "Android konnte die Neuplanung noch nicht vormerken. Hans versucht es beim nächsten Start oder validierten Netzwechsel erneut. Entsperren wird direkt erkannt, wenn Hans oder seine Bedienungshilfe aktiv ist; andernfalls greift der zeitversetzte Android-Catch-up.",
+                    tr(R.string.integration_android_could_not_schedule_the_retry_yet_hans_will_try__1fc0932),
             )
     }
 
@@ -4320,18 +4527,18 @@ class LauncherActivity : ComponentActivity() {
             val id = AutomationId(rawId)
             val current = automationRuntime.storage.definition(id)
                 ?: return@runAutomationUiMutation AutomationUiOperationResult.error(
-                    "Diese Automation existiert nicht mehr.",
+                    tr(R.string.integration_this_automation_no_longer_exists_229c630),
                 )
             if (current.revision != revision) {
                 return@runAutomationUiMutation AutomationUiOperationResult.error(
-                    "Die Automation wurde inzwischen geändert. Der aktuelle Stand wurde neu geladen.",
+                    tr(R.string.integration_the_automation_changed_in_the_meantime_the_current_vers_d5cd63a),
                 )
             }
             val revisionToDelete = if (current.enabled) {
                 when (val cancelled = automationRuntime.definitions.cancel(id, revision)) {
                     is AutomationCancellationResult.Cancelled -> cancelled.newRevision
                     else -> return@runAutomationUiMutation AutomationUiOperationResult.error(
-                        "Die Automation konnte nicht sicher deaktiviert werden.",
+                        tr(R.string.integration_the_automation_could_not_be_disabled_safely_b1a4e84),
                     )
                 }
             } else {
@@ -4339,11 +4546,11 @@ class LauncherActivity : ComponentActivity() {
             }
             if (!automationRuntime.storage.removeDefinition(id, revisionToDelete)) {
                 AutomationUiOperationResult.error(
-                    "Die Automation hat noch einen laufenden Vorgang und konnte nicht entfernt werden.",
+                    tr(R.string.integration_the_automation_still_has_an_active_operation_and_could__dd76bfa),
                 )
             } else {
                 automationRuntime.scheduleChanged()
-                AutomationUiOperationResult.success("Automation gelöscht.")
+                AutomationUiOperationResult.success(tr(R.string.integration_automation_deleted_9a53dcc))
             }
         }
     }
@@ -4364,7 +4571,7 @@ class LauncherActivity : ComponentActivity() {
         val accepted = runCatching {
             automationUiExecutor.execute {
                 val result = runCatching(operation).getOrElse {
-                    AutomationUiOperationResult.error("Die Änderung konnte nicht sicher ausgeführt werden.")
+                    AutomationUiOperationResult.error(tr(R.string.integration_the_change_could_not_be_performed_safely_edfefc7))
                 }
                 runOnUiThread {
                     if (isDestroyed) return@runOnUiThread
@@ -4383,7 +4590,7 @@ class LauncherActivity : ComponentActivity() {
             localUi = localUi.copy(
                 automations = localUi.automations.copy(
                     operationAutomationId = null,
-                    errorMessage = "Die Änderung konnte gerade nicht gestartet werden.",
+                    errorMessage = tr(R.string.integration_the_change_could_not_be_started_right_now_2a49164),
                 ),
                 revision = localUi.revision + 1,
             )
@@ -4437,6 +4644,7 @@ class LauncherActivity : ComponentActivity() {
                             limit = WORKBENCH_INVENTORY_LIMIT + 1,
                         ),
                         python = hansApplication.passiveInitializedPythonRuntimeSnapshot(),
+                        text = AndroidHansTextResolver(this),
                     )
                 }
                 runOnUiThread {
@@ -4452,7 +4660,7 @@ class LauncherActivity : ComponentActivity() {
                             localUi.workbench.copy(
                                 loading = false,
                                 errorMessage =
-                                    "Die lokalen Arbeitsstände konnten nicht vollständig geprüft werden.",
+                                    tr(R.string.integration_local_workspaces_could_not_be_checked_completely_20f740e),
                             )
                         }.copy(loading = false),
                         revision = localUi.revision + 1,
@@ -4464,7 +4672,7 @@ class LauncherActivity : ComponentActivity() {
             localUi = localUi.copy(
                 workbench = localUi.workbench.copy(
                     loading = false,
-                    errorMessage = "Die Werkbank kann gerade nicht aktualisiert werden.",
+                    errorMessage = tr(R.string.integration_the_workbench_cannot_be_refreshed_right_now_9ea698b),
                 ),
                 revision = localUi.revision + 1,
             )
@@ -4524,7 +4732,7 @@ class LauncherActivity : ComponentActivity() {
                     )
                     is AndroidAdapterResult.Failure -> localUi.copy(
                         appsLoading = false,
-                        appsErrorMessage = "Die App-Liste konnte nicht geladen werden.",
+                        appsErrorMessage = tr(R.string.integration_the_app_list_could_not_be_loaded_893b944),
                         revision = localUi.revision + 1,
                     )
                 }
@@ -4547,7 +4755,7 @@ class LauncherActivity : ComponentActivity() {
             if (result is AndroidAdapterResult.Failure) {
                 runOnUiThread {
                     if (!isFinishing && !isDestroyed) {
-                        showShortMessage("Die App konnte nicht geöffnet werden.")
+                        showShortMessage(tr(R.string.integration_the_app_could_not_be_opened_2bac6c6))
                     }
                 }
             }
@@ -4589,55 +4797,55 @@ class LauncherActivity : ComponentActivity() {
     private fun openVerificationPage(rawUrl: String) {
         val uri = runCatching { Uri.parse(rawUrl) }.getOrNull()
         if (uri?.scheme != "https" || uri.host.isNullOrBlank()) {
-            showShortMessage("Die ChatGPT-Anmeldeseite ist ungültig.")
+            showShortMessage(tr(R.string.integration_the_chatgpt_sign_in_page_is_invalid_e4a66b0))
             return
         }
         val opened = runCatching {
             startActivity(Intent(Intent.ACTION_VIEW, uri))
         }.isSuccess
-        if (!opened) showShortMessage("Es ist kein Browser verfügbar.")
+        if (!opened) showShortMessage(tr(R.string.integration_no_browser_is_available_8a69d0e))
     }
 
     private fun openPluginLink(rawUrl: String) {
         val safeUrl = validatedHttpsPluginLinkOrNull(rawUrl)
         if (safeUrl == null) {
-            showShortMessage("Der Plugin-Link ist ungültig.")
+            showShortMessage(tr(R.string.integration_the_plugin_link_is_invalid_2dc8ebf))
             return
         }
         val opened = runCatching {
             startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(safeUrl)))
         }.isSuccess
-        if (!opened) showShortMessage("Es ist kein Browser verfügbar.")
+        if (!opened) showShortMessage(tr(R.string.integration_no_browser_is_available_8a69d0e))
     }
 
     private fun openFixedOpenAiPage(rawUrl: String) {
         val uri = Uri.parse(rawUrl)
         val valid = uri.scheme == "https" && uri.host == "platform.openai.com"
         if (!valid) {
-            showShortMessage("Die fest hinterlegte OpenAI-Adresse ist ungültig.")
+            showShortMessage(tr(R.string.integration_the_configured_openai_address_is_invalid_7e7cb27))
             return
         }
         val opened = runCatching {
             startActivity(Intent(Intent.ACTION_VIEW, uri))
         }.isSuccess
-        if (!opened) showShortMessage("Es ist kein Browser verfügbar.")
+        if (!opened) showShortMessage(tr(R.string.integration_no_browser_is_available_8a69d0e))
     }
 
     private fun openCodexUpdate() {
         val result = CodexUpdateLauncher(this, BuildConfig.HANS_UPDATE_URL).launch()
         val message = when (result) {
             CodexUpdateLaunchResult.BUNDLED_WITH_HANS ->
-                "Codex ist Teil von Hans und wird mit einer signierten Hans-Aktualisierung aktualisiert. Für diesen internen Build ist noch keine Aktualisierungsseite hinterlegt."
+                tr(R.string.integration_codex_is_part_of_hans_and_is_updated_with_a_signed_hans_dd5b3d7)
             CodexUpdateLaunchResult.INVALID_CONFIGURATION ->
-                "Die fest hinterlegte Aktualisierungsadresse ist ungültig."
+                tr(R.string.integration_the_configured_update_address_is_invalid_9de8374)
             CodexUpdateLaunchResult.OFFLINE ->
-                "Für die Aktualisierungsseite braucht Hans eine Internetverbindung."
+                tr(R.string.integration_hans_needs_an_internet_connection_to_open_the_update_pa_2fb00a9)
             CodexUpdateLaunchResult.NO_BROWSER ->
-                "Es ist kein Browser für die Aktualisierungsseite verfügbar."
+                tr(R.string.integration_no_browser_is_available_for_the_update_page_83e916f)
             CodexUpdateLaunchResult.OPENED ->
-                "Die Hans-Aktualisierungsseite wurde geöffnet."
+                tr(R.string.integration_the_hans_update_page_was_opened_d4cb068)
             CodexUpdateLaunchResult.OPEN_FAILED ->
-                "Die Hans-Aktualisierungsseite konnte nicht geöffnet werden."
+                tr(R.string.integration_the_hans_update_page_could_not_be_opened_e6ca80a)
         }
         showShortMessage(message)
     }
@@ -4689,7 +4897,7 @@ class LauncherActivity : ComponentActivity() {
             }
         }.isSuccess
         if (!scheduled) {
-            showShortMessage("Die Verbindung konnte gerade nicht gestartet werden.")
+            showShortMessage(tr(R.string.integration_the_connection_could_not_be_started_right_now_867dcb9))
         }
     }
 
@@ -4727,13 +4935,13 @@ class LauncherActivity : ComponentActivity() {
     private fun remoteMcpOAuthFailureMessage(failure: RemoteMcpOAuthConnectionFailure): String =
         when (failure) {
             RemoteMcpOAuthConnectionFailure.CONNECTION_ALREADY_ACTIVE ->
-                "Die Verbindung wird bereits in einem Browser abgeschlossen."
+                tr(R.string.integration_the_connection_is_already_being_completed_in_a_browser_acb8913)
             RemoteMcpOAuthConnectionFailure.CREDENTIAL_STORE_UNAVAILABLE ->
-                "Der geschützte Anmeldespeicher ist gerade nicht verfügbar."
+                tr(R.string.integration_secure_credential_storage_is_currently_unavailable_fb2dbcf)
             RemoteMcpOAuthConnectionFailure.DISCOVERY_REJECTED ->
-                "Der Dienst konnte nicht sicher für die Anmeldung geprüft werden."
+                tr(R.string.integration_the_service_could_not_be_verified_safely_for_sign_in_f43aedc)
             RemoteMcpOAuthConnectionFailure.BROWSER_UNAVAILABLE ->
-                "Für die Anmeldung wurde kein Browser gefunden."
+                tr(R.string.integration_no_browser_was_found_for_sign_in_10137bb)
             RemoteMcpOAuthConnectionFailure.CALLBACK_REJECTED,
             RemoteMcpOAuthConnectionFailure.CALLBACK_EXPIRED,
             RemoteMcpOAuthConnectionFailure.CALLBACK_REPLAYED,
@@ -4741,15 +4949,15 @@ class LauncherActivity : ComponentActivity() {
             RemoteMcpOAuthConnectionFailure.TOKEN_EXCHANGE_FAILED,
             RemoteMcpOAuthConnectionFailure.CREDENTIAL_CHANGED,
             RemoteMcpOAuthConnectionFailure.LOCAL_STATE_UNAVAILABLE,
-            -> "Die Verbindung wurde nicht bestätigt. Tippe auf Verbinden, um es erneut zu versuchen."
+            -> tr(R.string.integration_the_connection_was_not_confirmed_tap_connect_to_try_aga_5ea469a)
         }
 
     private fun copyUserCode(code: String) {
         if (code.isBlank()) return
         val clipboard = getSystemService(ClipboardManager::class.java)
-        clipboard.setPrimaryClip(ClipData.newPlainText("ChatGPT-Code", code))
+        clipboard.setPrimaryClip(ClipData.newPlainText(tr(R.string.integration_chatgpt_code_0996108), code))
         localUi = localUi.copy(
-            supportingMessage = "Code kopiert.",
+            supportingMessage = tr(R.string.integration_code_copied_5d79d19),
             revision = localUi.revision + 1,
         )
     }
@@ -4762,16 +4970,16 @@ class LauncherActivity : ComponentActivity() {
         settings = runCatching {
             settingsStore.saveVoice(voice, speechRate, readAloudMode)
         }.getOrElse {
-            showShortMessage("Die Spracheinstellung konnte nicht gespeichert werden.")
+            showShortMessage(tr(R.string.integration_the_voice_setting_could_not_be_saved_4bd6e3c))
             settings
         }
     }
 
     private fun saveLiveVoice(voice: String) {
         settings = runCatching {
-            settingsStore.saveLiveVoice(voice)
+            settingsStore.saveCodexLiveVoice(voice)
         }.getOrElse {
-            showShortMessage("Die Live-Stimme konnte nicht gespeichert werden.")
+            showShortMessage(tr(R.string.integration_the_live_voice_could_not_be_saved_a8f43ef))
             settings
         }
     }
@@ -4816,86 +5024,86 @@ class LauncherActivity : ComponentActivity() {
         val next = listOf(
             CapabilityAccessUiModel(
                 id = CapabilityAccessUiId.ALL_FILES,
-                title = "Dateizugriff · alle Dateien",
-                description = "Dateien im Telefonspeicher laden, speichern und verwalten. Androids Freigabe ist unabhängig vom Codex-Vollzugriff; private Daten anderer Apps bleiben geschützt.",
+                title = tr(R.string.integration_file_access_all_files_1511f74),
+                description = tr(R.string.integration_load_save_and_manage_files_in_phone_storage_android_per_83a1ef7),
                 granted = environment.hasSpecialAccess(AndroidSpecialAccess.ALL_FILES),
             ),
             CapabilityAccessUiModel(
                 id = CapabilityAccessUiId.HOME_APP,
-                title = "Hans als Startbildschirm",
-                description = "Macht den Chat zur Home-Oberfläche; der normale App-Bereich bleibt erreichbar.",
+                title = tr(R.string.integration_hans_as_home_screen_a9ebbba),
+                description = tr(R.string.integration_makes_chat_your_home_screen_the_regular_app_list_remain_881de5b),
                 granted = environment.hasSpecialAccess(AndroidSpecialAccess.HOME_ROLE),
             ),
             CapabilityAccessUiModel(
                 id = CapabilityAccessUiId.MICROPHONE,
-                title = "Mikrofon",
-                description = "Für Diktate und den Live-Sprachmodus.",
+                title = tr(R.string.integration_microphone_303d5cc),
+                description = tr(R.string.integration_for_dictation_and_live_voice_80266ac),
                 granted = hasMicrophone,
             ),
             CapabilityAccessUiModel(
                 id = CapabilityAccessUiId.APP_NOTIFICATIONS,
-                title = "Hans-Benachrichtigungen",
-                description = "Zeigt laufende Aufnahme, Sprache und längere Hintergrundarbeit sichtbar an.",
+                title = tr(R.string.integration_hans_notifications_7730f5f),
+                description = tr(R.string.integration_makes_ongoing_recording_speech_and_longer_background_wo_e0d0ee7),
                 granted = hasAppNotifications,
             ),
             CapabilityAccessUiModel(
                 id = CapabilityAccessUiId.NOTIFICATION_ACCESS,
-                title = "Benachrichtigungszugriff",
-                description = "Erlaubte, nicht ausgeschlossene Pushs werden privat und zeitlich begrenzt auf dem Telefon gespeichert; ausgewählte wichtige Fakten bleiben zusätzlich langfristig im lokalen, getrennten Benachrichtigungsarchiv erhalten. Ihr Inhalt geht zur Relevanzprüfung an einen isolierten, werkzeugfreien Codex/OpenAI-Schritt. Dabei darf Hans einen kleinen, gefilterten Auszug aus deinem bestätigten Hans-Profil und lokalen Codex-Gedächtnis nur lesend verwenden; bestätigte Profilfakten haben Vorrang und der Prüfschritt kann keine der Quellen durchsuchen oder verändern. Routine bleibt ohne Chatkarte und Sprachausgabe.",
+                title = tr(R.string.integration_notification_access_3e8e550),
+                description = tr(R.string.integration_allowed_notifications_that_are_not_excluded_are_stored__8f3e625),
                 granted = environment.hasSpecialAccess(
                     AndroidSpecialAccess.NOTIFICATION_LISTENER,
                 ),
             ),
             CapabilityAccessUiModel(
                 id = CapabilityAccessUiId.ACCESSIBILITY,
-                title = "App-Steuerung",
-                description = setupAccessibilityDescription(setupRuntime.actionPolicy),
+                title = tr(R.string.integration_app_control_83a211e),
+                description = setupAccessibilityDescription(setupRuntime.actionPolicy, AndroidHansTextResolver(this)),
                 granted = environment.hasSpecialAccess(
                     AndroidSpecialAccess.ACCESSIBILITY_SERVICE,
                 ),
             ),
             CapabilityAccessUiModel(
                 id = CapabilityAccessUiId.CONTACTS,
-                title = "Kontakte",
-                description = "Erlaubt Hans, Namen und Kontaktdaten nur bei einer konkreten Anfrage zu finden.",
+                title = tr(R.string.integration_contacts_bdcd0d6),
+                description = tr(R.string.integration_allows_hans_to_find_names_and_contact_details_only_for__f05b902),
                 granted = hasContacts,
             ),
             CapabilityAccessUiModel(
                 id = CapabilityAccessUiId.CALENDAR,
-                title = "Kalender lesen und ergänzen",
-                description = "Termine können mit erteilter Android-Kalenderberechtigung auf deinen Auftrag gelesen und angelegt werden – ohne zusätzliche Hans-Rückfrage.",
+                title = tr(R.string.integration_read_and_add_calendar_events_5613f6f),
+                description = tr(R.string.integration_with_android_calendar_permission_events_can_be_read_and_99fbf29),
                 granted = hasCalendar,
             ),
             CapabilityAccessUiModel(
                 id = CapabilityAccessUiId.LOCATION,
-                title = "Standort",
-                description = "Gibt Hans bei einer konkreten Anfrage den ungefähren oder genauen Gerätestandort.",
+                title = tr(R.string.integration_location_ecf34cc),
+                description = tr(R.string.integration_gives_hans_the_approximate_or_precise_device_location_f_5a00f42),
                 granted = hasLocation,
             ),
             CapabilityAccessUiModel(
                 id = CapabilityAccessUiId.PHOTOS_AND_VIDEOS,
-                title = "Fotos und Videos",
-                description = "Erlaubt die Suche in freigegebenen Medien; auf neueren Android-Versionen kannst du die Auswahl begrenzen.",
+                title = tr(R.string.integration_photos_and_videos_a2039d3),
+                description = tr(R.string.integration_allows_searching_permitted_media_newer_android_versions_e411efd),
                 granted = hasPhotosAndVideos,
             ),
             CapabilityAccessUiModel(
                 id = CapabilityAccessUiId.AUDIO_MEDIA,
-                title = "Audiodateien",
-                description = "Erlaubt Hans, vorhandene Audiodateien auf ausdrückliche Anfrage aufzulisten.",
+                title = tr(R.string.integration_audio_files_e8523ca),
+                description = tr(R.string.integration_allows_hans_to_list_existing_audio_files_at_your_explic_191dfc7),
                 granted = hasAudioMedia,
             ),
             CapabilityAccessUiModel(
                 id = CapabilityAccessUiId.QUICK_SETTINGS_TILE,
-                title = "Diktat-Kachel · Ausweichweg",
-                description = "Startet ein Diktat über die Quick-Settings-Kachel, wenn Android eine gewünschte Hardwaretaste selbst abfängt.",
+                title = tr(R.string.integration_dictation_tile_alternative_24e2d86),
+                description = tr(R.string.integration_starts_dictation_from_a_quick_settings_tile_when_androi_9a15438),
                 // Android exposes no reliable read API for whether a user later removed a tile.
                 // Keep this setup action available and let requestAddTileService deduplicate it.
                 granted = false,
             ),
             CapabilityAccessUiModel(
                 id = CapabilityAccessUiId.EXACT_ALARMS,
-                title = "Pünktliche Wecker-Automationen",
-                description = "Optional nur für ausdrücklich zeitkritische Wecker oder Kalenderhinweise; normale Automationen bleiben akkuschonend flexibel.",
+                title = tr(R.string.integration_exact_alarm_automations_7a51cf7),
+                description = tr(R.string.integration_optional_only_for_explicitly_time_critical_alarms_or_ca_5b98acd),
                 granted = hasExactAlarmAccess,
             ),
         )
@@ -4929,31 +5137,31 @@ class LauncherActivity : ComponentActivity() {
         descriptor: PersistentAndroidConsentDescriptor,
     ): PersistentAndroidConsentUiModel {
         val title = when (descriptor.scope) {
-            PersistentAndroidConsentScope.INSTALLED_APPS_READ -> "Installierte Apps lesen"
-            PersistentAndroidConsentScope.OPEN_APP -> "Apps sichtbar öffnen"
+            PersistentAndroidConsentScope.INSTALLED_APPS_READ -> tr(R.string.integration_read_installed_apps_ae8f2e4)
+            PersistentAndroidConsentScope.OPEN_APP -> tr(R.string.integration_open_apps_visibly_f19c46e)
             PersistentAndroidConsentScope.OPEN_SAFE_NAVIGATION ->
-                "Sichere Links und Navigation öffnen"
+                tr(R.string.integration_open_safe_links_and_navigation_43533e2)
             PersistentAndroidConsentScope.OPEN_SETTINGS_PAGE ->
-                "WLAN- und Bluetooth-Einstellungen öffnen"
-            PersistentAndroidConsentScope.READ_LOCATION -> "Standort lesen"
-            PersistentAndroidConsentScope.READ_CONTACTS -> "Kontakte lesen"
-            PersistentAndroidConsentScope.READ_CALENDAR -> "Kalender lesen"
-            PersistentAndroidConsentScope.READ_MEDIA -> "Medienkatalog lesen"
-            PersistentAndroidConsentScope.READ_SENSORS -> "Sensoren lesen"
+                tr(R.string.integration_open_wi_fi_and_bluetooth_settings_3030d9b)
+            PersistentAndroidConsentScope.READ_LOCATION -> tr(R.string.integration_read_location_501a45e)
+            PersistentAndroidConsentScope.READ_CONTACTS -> tr(R.string.integration_read_contacts_84ab646)
+            PersistentAndroidConsentScope.READ_CALENDAR -> tr(R.string.integration_read_calendar_73aa1cd)
+            PersistentAndroidConsentScope.READ_MEDIA -> tr(R.string.integration_read_media_catalog_11f36da)
+            PersistentAndroidConsentScope.READ_SENSORS -> tr(R.string.integration_read_sensors_3a37a54)
             PersistentAndroidConsentScope.READ_REPLYABLE_NOTIFICATIONS ->
-                "Beantwortbare Benachrichtigungen lesen"
+                tr(R.string.integration_read_replyable_notifications_510ed60)
             PersistentAndroidConsentScope.NOTIFICATION_LINK_METADATA ->
-                "Öffentliche Link-Vorschau für wichtige Pushs"
-            PersistentAndroidConsentScope.OPEN_CAMERA -> "Kamera sichtbar öffnen"
+                tr(R.string.integration_public_link_previews_for_important_notifications_d3f52db)
+            PersistentAndroidConsentScope.OPEN_CAMERA -> tr(R.string.integration_open_camera_visibly_ae0696e)
             PersistentAndroidConsentScope.PREPARE_CALENDAR_EVENT ->
-                "Kalenderentwurf sichtbar öffnen"
+                tr(R.string.integration_open_calendar_draft_visibly_4019d53)
         }
         val description = when (descriptor.scope) {
             PersistentAndroidConsentScope.INSTALLED_APPS_READ ->
-                "Hans darf ohne erneuten Hans-Dialog prüfen, welche Apps auf diesem Telefon installiert und startbar sind."
+                tr(R.string.integration_hans_may_check_which_apps_are_installed_and_launchable__d3be57f)
             PersistentAndroidConsentScope.NOTIFICATION_LINK_METADATA ->
-                "Hans darf sichere öffentliche HTTPS-Seiten für Titel und Beschreibung abrufen. Der Zielserver sieht IP-Adresse und Zeitpunkt; Cookies, JavaScript und aktionsartige Links bleiben ausgeschlossen."
-            else -> "Gilt für diese Hans-Aktionskategorie, bis du sie widerrufst."
+                tr(R.string.integration_hans_may_fetch_safe_public_https_pages_for_their_title__1d4c400)
+            else -> tr(R.string.integration_applies_to_this_hans_action_category_until_you_revoke_i_fe4111c)
         }
         return PersistentAndroidConsentUiModel(descriptor, title, description)
     }
@@ -4967,9 +5175,9 @@ class LauncherActivity : ComponentActivity() {
         refreshPersistentAndroidConsents()
         showShortMessage(
             if (revoked) {
-                "Dauerfreigabe widerrufen."
+                tr(R.string.integration_persistent_permission_revoked_bd44093)
             } else {
-                "Die Dauerfreigabe konnte nicht sicher widerrufen werden."
+                tr(R.string.integration_the_persistent_permission_could_not_be_revoked_safely_432091a)
             },
         )
     }
@@ -4981,9 +5189,9 @@ class LauncherActivity : ComponentActivity() {
         refreshPersistentAndroidConsents()
         showShortMessage(
             if (revoked) {
-                "Alle Dauerfreigaben wurden widerrufen."
+                tr(R.string.integration_all_persistent_permissions_were_revoked_ee188be)
             } else {
-                "Die Dauerfreigaben konnten nicht sicher widerrufen werden."
+                tr(R.string.integration_persistent_permissions_could_not_be_revoked_safely_736acf7)
             },
         )
     }
@@ -5005,13 +5213,13 @@ class LauncherActivity : ComponentActivity() {
             return
         }
         val dialog = AlertDialog.Builder(this)
-            .setTitle("Alltagszugriff für Hans aktivieren?")
+            .setTitle(tr(R.string.integration_enable_everyday_access_for_hans_ce0aacf))
             .setMessage(
-                "Hans darf danach wiederkehrend installierte Apps und private Telefondaten lesen sowie Apps, sichere Links, WLAN/Bluetooth, Kamera und Kalenderentwürfe sichtbar öffnen. Direkte Nachrichten, Antworten, Käufe, Löschungen, Kalender-Erstellung, Passwörter, Sicherheits- und Berechtigungsdialoge, App-Installationen und rohe Bildschirmkoordinaten bleiben ausgeschlossen und brauchen weiterhin eine eigene Bestätigung. Android-Systemberechtigungen richtest du separat selbst ein.",
+                tr(R.string.integration_hans_will_be_allowed_to_repeatedly_read_installed_apps__091b08f),
             )
-            .setNegativeButton("Abbrechen") { _, _ -> onResult(false) }
+            .setNegativeButton(tr(R.string.integration_cancel_f7ff117)) { _, _ -> onResult(false) }
             .setOnCancelListener { onResult(false) }
-            .setPositiveButton("Aktivieren") { _, _ ->
+            .setPositiveButton(tr(R.string.integration_enable_cfc6942)) { _, _ ->
                 val store = (application as HansApplication).persistentAndroidConsentStore
                 runCatching {
                     mediaExecutor.execute {
@@ -5055,13 +5263,13 @@ class LauncherActivity : ComponentActivity() {
             PersistentAndroidConsentScope.NOTIFICATION_LINK_METADATA,
         )
         val dialog = AlertDialog.Builder(this)
-            .setTitle("Link-Vorschau für wichtige Pushs aktivieren?")
+            .setTitle(tr(R.string.integration_enable_link_previews_for_important_notifications_b352dc8))
             .setMessage(
-                "Wenn eine erlaubte Push-Benachrichtigung klar wichtig wirkt und einen sicheren öffentlichen HTTPS-Link enthält, darf Hans die Seite ohne Cookies oder JavaScript nur für Titel und Beschreibung abrufen. Der Zielserver sieht deine IP-Adresse und den Zeitpunkt. Links mit Login-, Bestätigungs-, Kauf-, Lösch- oder ähnlichen Aktionen werden nicht abgerufen. Ohne diese Freigabe bleibt die Link-Recherche aus.",
+                tr(R.string.integration_if_an_allowed_notification_appears_clearly_important_an_8d93dbc),
             )
-            .setNegativeButton("Nicht aktivieren") { _, _ -> onResult(false) }
+            .setNegativeButton(tr(R.string.integration_keep_disabled_07135fa)) { _, _ -> onResult(false) }
             .setOnCancelListener { onResult(false) }
-            .setPositiveButton("Ausdrücklich aktivieren") { _, _ ->
+            .setPositiveButton(tr(R.string.integration_explicitly_enable_9fe822c)) { _, _ ->
                 runCatching {
                     mediaExecutor.execute {
                         val granted = (application as HansApplication)
@@ -5070,8 +5278,8 @@ class LauncherActivity : ComponentActivity() {
                         runOnUiThread {
                             refreshPersistentAndroidConsents()
                             showShortMessage(
-                                if (granted) "Link-Vorschau ist aktiv."
-                                else "Die Link-Vorschau konnte nicht sicher aktiviert werden.",
+                                if (granted) tr(R.string.integration_link_previews_are_active_02ad08b)
+                                else tr(R.string.integration_link_previews_could_not_be_enabled_safely_18dfb24),
                             )
                             onResult(granted)
                         }
@@ -5094,7 +5302,7 @@ class LauncherActivity : ComponentActivity() {
         when (id) {
             CapabilityAccessUiId.ALL_FILES -> {
                 if (!openCapabilitySettings(SettingsDestination.ALL_FILES)) {
-                    showShortMessage("Die Android-Einstellung für Dateizugriff konnte nicht geöffnet werden.")
+                    showShortMessage(tr(R.string.integration_android_file_access_settings_could_not_be_opened_56ac6b2))
                 }
             }
             CapabilityAccessUiId.MICROPHONE -> {
@@ -5362,9 +5570,9 @@ class LauncherActivity : ComponentActivity() {
                 refreshCapabilityAccess()
                 showShortMessage(
                     if (setupRecorded) {
-                        RestrictedSettingsRecoveryCopy.verified(effect.capability)
+                        RestrictedSettingsRecoveryCopy.verified(effect.capability, AndroidHansTextResolver(this))
                     } else {
-                        "Der Zugriff ist aktiv. Hans prüft den aktuellen Einrichtungsschritt erneut."
+                        tr(R.string.integration_access_is_active_hans_is_checking_the_current_setup_ste_9df67f8)
                     },
                 )
             }
@@ -5405,9 +5613,9 @@ class LauncherActivity : ComponentActivity() {
                 }.isSuccess
                 showShortMessage(
                     if (recorded) {
-                        "Für jetzt übersprungen. Du kannst den Zugriff später einrichten."
+                        tr(R.string.integration_skipped_for_now_you_can_set_up_access_later_28d033e)
                     } else {
-                        "Der Einrichtungsschritt hat sich geändert und wurde nicht übersprungen."
+                        tr(R.string.integration_the_setup_step_changed_and_was_not_skipped_ee2ea83)
                     },
                 )
             }
@@ -5426,9 +5634,9 @@ class LauncherActivity : ComponentActivity() {
             ?: return
         var handled = false
         val dialog = AlertDialog.Builder(this)
-            .setTitle("Android blockiert den Zugriff möglicherweise")
-            .setMessage(RestrictedSettingsRecoveryCopy.explanation(capability))
-            .setNegativeButton(RestrictedSettingsRecoveryCopy.NOT_NOW_LABEL) { _, _ ->
+            .setTitle(tr(R.string.integration_android_may_be_blocking_access_0bf9d05))
+            .setMessage(RestrictedSettingsRecoveryCopy.explanation(capability, AndroidHansTextResolver(this)))
+            .setNegativeButton(RestrictedSettingsRecoveryCopy.notNowLabel(AndroidHansTextResolver(this))) { _, _ ->
                 if (!handled) {
                     handled = true
                     applyRestrictedSettingsRecoveryTransition(
@@ -5436,7 +5644,7 @@ class LauncherActivity : ComponentActivity() {
                     )
                 }
             }
-            .setPositiveButton(RestrictedSettingsRecoveryCopy.POSITIVE_LABEL) { _, _ ->
+            .setPositiveButton(RestrictedSettingsRecoveryCopy.positiveLabel(AndroidHansTextResolver(this))) { _, _ ->
                 if (!handled) {
                     handled = true
                     applyRestrictedSettingsRecoveryTransition(
@@ -5474,9 +5682,9 @@ class LauncherActivity : ComponentActivity() {
             ?: return
         var handled = false
         val dialog = AlertDialog.Builder(this)
-            .setTitle("Zugriff nicht aktiv")
-            .setMessage(RestrictedSettingsRecoveryCopy.manualRequired(capability))
-            .setNegativeButton(RestrictedSettingsRecoveryCopy.NOT_NOW_LABEL) { _, _ ->
+            .setTitle(tr(R.string.integration_access_is_not_active_ca9115c))
+            .setMessage(RestrictedSettingsRecoveryCopy.manualRequired(capability, AndroidHansTextResolver(this)))
+            .setNegativeButton(RestrictedSettingsRecoveryCopy.notNowLabel(AndroidHansTextResolver(this))) { _, _ ->
                 if (!handled) {
                     handled = true
                     applyRestrictedSettingsRecoveryTransition(
@@ -5594,7 +5802,7 @@ class LauncherActivity : ComponentActivity() {
 
     private fun requestExactAlarmAccess() {
         if (!openCapabilitySettings(SettingsDestination.EXACT_ALARM)) {
-            showShortMessage("Die Einstellung für pünktliche Wecker ist nicht verfügbar.")
+            showShortMessage(tr(R.string.integration_the_exact_alarm_setting_is_unavailable_002549f))
         }
     }
 
@@ -5603,7 +5811,7 @@ class LauncherActivity : ComponentActivity() {
         setupCompletion: ((SetupUiCommandResult) -> Unit)? = null,
     ) {
         if (Build.VERSION.SDK_INT < 33) {
-            showShortMessage("Öffne die Kachelverwaltung und füge „Hans-Diktat“ hinzu.")
+            showShortMessage(tr(R.string.integration_open_the_tile_editor_and_add_hans_dictation_da38beb))
             setupCompletion?.invoke(
                 SetupQuickSettingsTileContract.receipt(Build.VERSION.SDK_INT, null),
             )
@@ -5611,7 +5819,7 @@ class LauncherActivity : ComponentActivity() {
         }
         val manager = getSystemService(StatusBarManager::class.java)
         if (manager == null) {
-            showShortMessage("Die Kachelverwaltung ist auf diesem Telefon nicht verfügbar.")
+            showShortMessage(tr(R.string.integration_the_tile_editor_is_unavailable_on_this_phone_e5b24c0))
             setupCompletion?.invoke(
                 SetupUiCommandResult.Rejected("quick_settings_tile_api_unavailable"),
             )
@@ -5638,12 +5846,12 @@ class LauncherActivity : ComponentActivity() {
             ) { result ->
                 val message = when (result) {
                     StatusBarManager.TILE_ADD_REQUEST_RESULT_TILE_ADDED ->
-                        "Hans-Diktat wurde zu den Schnelleinstellungen hinzugefügt."
+                        tr(R.string.integration_hans_dictation_was_added_to_quick_settings_2431b1b)
                     StatusBarManager.TILE_ADD_REQUEST_RESULT_TILE_ALREADY_ADDED ->
-                        "Hans-Diktat ist bereits in den Schnelleinstellungen."
+                        tr(R.string.integration_hans_dictation_is_already_in_quick_settings_ce59ac4)
                     StatusBarManager.TILE_ADD_REQUEST_RESULT_TILE_NOT_ADDED ->
-                        "Die Diktat-Kachel wurde nicht hinzugefügt."
-                    else -> "Die Kachelverwaltung hat die Anfrage beendet."
+                        tr(R.string.integration_the_dictation_tile_was_not_added_8dfd376)
+                    else -> tr(R.string.integration_the_tile_editor_completed_the_request_b6cb7e7)
                 }
                 showShortMessage(message)
                 val pendingCompletion = if (setupRequest != null) {
@@ -5663,7 +5871,7 @@ class LauncherActivity : ComponentActivity() {
             if (pendingSetupQuickSettingsTile === setupRequest) {
                 pendingSetupQuickSettingsTile = null
             }
-            showShortMessage("Die Kachelverwaltung konnte nicht geöffnet werden.")
+            showShortMessage(tr(R.string.integration_the_tile_editor_could_not_be_opened_e426734))
             setupCompletion?.invoke(
                 SetupUiCommandResult.Rejected("quick_settings_tile_request_failed"),
             )
@@ -5687,7 +5895,7 @@ class LauncherActivity : ComponentActivity() {
             },
         )
         if (result is AndroidAdapterResult.Failure) {
-            showShortMessage("Die passende Android-Einstellung konnte nicht geöffnet werden.")
+            showShortMessage(tr(R.string.integration_the_appropriate_android_setting_could_not_be_opened_84dbf86))
             return false
         }
         return true
@@ -5696,23 +5904,23 @@ class LauncherActivity : ComponentActivity() {
     private fun launchCameraCapture() {
         when (val preparation = cameraCaptureCoordinator.prepareCapture()) {
             CameraCapturePreparation.CameraUnavailable -> {
-                showShortMessage("Auf diesem Telefon ist keine Kamera-App verfügbar.")
+                showShortMessage(tr(R.string.integration_no_camera_app_is_available_on_this_phone_aa4106a))
             }
             CameraCapturePreparation.StorageUnavailable -> {
-                showShortMessage("Das Foto konnte nicht sicher vorbereitet werden.")
+                showShortMessage(tr(R.string.integration_the_photo_could_not_be_prepared_safely_4bf235a))
             }
             is CameraCapturePreparation.Ready -> {
                 try {
                     cameraCaptureLauncher.launch(preparation.outputUri)
                 } catch (_: ActivityNotFoundException) {
                     cameraCaptureCoordinator.abandon(preparation)
-                    showShortMessage("Auf diesem Telefon ist keine Kamera-App verfügbar.")
+                    showShortMessage(tr(R.string.integration_no_camera_app_is_available_on_this_phone_aa4106a))
                 } catch (_: SecurityException) {
                     cameraCaptureCoordinator.abandon(preparation)
-                    showShortMessage("Die Kamera konnte nicht sicher geöffnet werden.")
+                    showShortMessage(tr(R.string.integration_the_camera_could_not_be_opened_safely_1578ad8))
                 } catch (_: IllegalArgumentException) {
                     cameraCaptureCoordinator.abandon(preparation)
-                    showShortMessage("Die Kamera konnte nicht sicher geöffnet werden.")
+                    showShortMessage(tr(R.string.integration_the_camera_could_not_be_opened_safely_1578ad8))
                 }
             }
         }
@@ -5723,7 +5931,7 @@ class LauncherActivity : ComponentActivity() {
         val choices = CameraCaptureSelectionPolicy.choices
         lateinit var dialog: AlertDialog
         dialog = AlertDialog.Builder(this)
-            .setTitle("Kamera")
+            .setTitle(tr(R.string.integration_camera_32edeec))
             .setItems(choices.map { it.label }.toTypedArray()) { _, index ->
                 when (choices.getOrNull(index)?.kind) {
                     CameraCaptureKind.PHOTO -> launchCameraCapture()
@@ -5731,7 +5939,7 @@ class LauncherActivity : ComponentActivity() {
                     null -> Unit
                 }
             }
-            .setNegativeButton("Abbrechen", null)
+            .setNegativeButton(tr(R.string.integration_cancel_f7ff117), null)
             .create()
         dialog.setOnDismissListener {
             if (cameraCaptureChoiceDialog === dialog) cameraCaptureChoiceDialog = null
@@ -5743,23 +5951,23 @@ class LauncherActivity : ComponentActivity() {
     private fun launchVideoCapture() {
         when (val preparation = cameraCaptureCoordinator.prepareVideoCapture()) {
             CameraCapturePreparation.CameraUnavailable -> {
-                showShortMessage("Auf diesem Telefon ist keine Video-Kamera-App verfügbar.")
+                showShortMessage(tr(R.string.integration_no_video_camera_app_is_available_on_this_phone_4f5a51c))
             }
             CameraCapturePreparation.StorageUnavailable -> {
-                showShortMessage("Das Video konnte nicht sicher vorbereitet werden.")
+                showShortMessage(tr(R.string.integration_the_video_could_not_be_prepared_safely_cc2f494))
             }
             is CameraCapturePreparation.Ready -> {
                 try {
                     videoCaptureLauncher.launch(preparation.outputUri)
                 } catch (_: ActivityNotFoundException) {
                     cameraCaptureCoordinator.abandon(preparation)
-                    showShortMessage("Auf diesem Telefon ist keine Video-Kamera-App verfügbar.")
+                    showShortMessage(tr(R.string.integration_no_video_camera_app_is_available_on_this_phone_4f5a51c))
                 } catch (_: SecurityException) {
                     cameraCaptureCoordinator.abandon(preparation)
-                    showShortMessage("Die Video-Kamera konnte nicht sicher geöffnet werden.")
+                    showShortMessage(tr(R.string.integration_the_video_camera_could_not_be_opened_safely_f6eb845))
                 } catch (_: IllegalArgumentException) {
                     cameraCaptureCoordinator.abandon(preparation)
-                    showShortMessage("Die Video-Kamera konnte nicht sicher geöffnet werden.")
+                    showShortMessage(tr(R.string.integration_the_video_camera_could_not_be_opened_safely_f6eb845))
                 }
             }
         }
@@ -5782,7 +5990,7 @@ class LauncherActivity : ComponentActivity() {
         expectedKind: ai.hans.standard.media.MediaKind? = null,
         afterImport: () -> Unit = {},
     ) {
-        showShortMessage("Medium wird sicher vorbereitet …")
+        showShortMessage(tr(R.string.integration_preparing_media_safely_01e2fab))
         mediaExecutor.execute {
             val result = runCatching { mediaPipeline.import(uri, expectedKind) }
             runCatching(afterImport)
@@ -5823,7 +6031,7 @@ class LauncherActivity : ComponentActivity() {
             addImportedVideo(video, transcript = null)
             return
         }
-        showShortMessage("Die Tonspur des Videos wird transkribiert …")
+        showShortMessage(tr(R.string.integration_transcribing_the_video_audio_track_3c545cd))
         val cancellation = videoTranscriptionGateway.submit(
             request,
             object : VideoAudioTranscriptionCallback {
@@ -5845,7 +6053,7 @@ class LauncherActivity : ComponentActivity() {
                             mediaExecutor.execute { mediaPipeline.delete(video.importId) }
                         } else {
                             addImportedVideo(video, transcript = null)
-                            showShortMessage("Die Tonspur war nicht lesbar; die Videobilder wurden hinzugefügt.")
+                            showShortMessage(tr(R.string.integration_the_audio_track_could_not_be_read_video_frames_were_add_b2712eb))
                         }
                     }
                 }
@@ -5856,15 +6064,15 @@ class LauncherActivity : ComponentActivity() {
 
     private fun addImportedVideo(video: MediaImportResult.Video, transcript: String?) {
         val metadata = buildString {
-            append("Angehängtes Video ‘")
+            append(tr(R.string.integration_attached_video_28f274f))
             append(video.displayLabel.take(MAX_ATTACHMENT_LABEL))
-            append("’: Dauer ")
+            append(tr(R.string.integration_duration_3079e9d))
             append(video.metadata.durationMillis / 1_000)
-            append(" Sekunden, ")
+            append(tr(R.string.integration_seconds_99435fc))
             append(video.metadata.width)
             append('×')
             append(video.metadata.height)
-            append(" Pixel. Die folgenden Bilder sind repräsentative Einzelbilder des Videos.")
+            append(tr(R.string.integration_pixels_the_following_images_are_representative_frames_f_11f648e))
             transcript?.trim()?.takeIf(String::isNotBlank)?.let {
                 append("\nTranskript der Tonspur:\n")
                 append(it.take(MAX_VIDEO_TRANSCRIPT_CHARACTERS))
@@ -5873,7 +6081,7 @@ class LauncherActivity : ComponentActivity() {
         val attachments = video.representativeFrames.mapIndexed { index, frame ->
             HansPendingAttachment(
                 id = "${video.importId}:frame:$index",
-                label = "${video.displayLabel.take(MAX_ATTACHMENT_LABEL)} · Bild ${index + 1}",
+                label = tr(R.string.integration_1_frame_2_9c1d2b6, video.displayLabel.take(MAX_ATTACHMENT_LABEL), index + 1),
                 absolutePath = frame.image.absolutePath,
                 importId = video.importId,
                 contextText = if (index == 0) metadata else "",
@@ -5906,17 +6114,17 @@ class LauncherActivity : ComponentActivity() {
     ) {
         MediaImportFailureCode.DECLARED_SIZE_EXCEEDED,
         MediaImportFailureCode.READ_LIMIT_EXCEEDED,
-        -> "Das ausgewählte Medium ist zu groß."
-        MediaImportFailureCode.PIXEL_LIMIT_EXCEEDED -> "Die Auflösung des Mediums ist zu groß."
-        MediaImportFailureCode.DURATION_LIMIT_EXCEEDED -> "Das Video ist länger als 15 Minuten."
-        MediaImportFailureCode.UNSUPPORTED_DECLARED_TYPE -> "Dieses Medienformat wird nicht unterstützt."
+        -> tr(R.string.integration_the_selected_media_is_too_large_e025317)
+        MediaImportFailureCode.PIXEL_LIMIT_EXCEEDED -> tr(R.string.integration_the_media_resolution_is_too_large_67d819b)
+        MediaImportFailureCode.DURATION_LIMIT_EXCEEDED -> tr(R.string.integration_the_video_is_longer_than_15_minutes_3818d7f)
+        MediaImportFailureCode.UNSUPPORTED_DECLARED_TYPE -> tr(R.string.integration_this_media_format_is_not_supported_9800ef3)
         MediaImportFailureCode.INVALID_IMAGE,
         MediaImportFailureCode.INVALID_VIDEO,
-        -> "Das Medium konnte nicht sicher gelesen werden."
+        -> tr(R.string.integration_the_media_could_not_be_read_safely_9b9f4e5)
         MediaImportFailureCode.CONTENT_UNAVAILABLE,
         MediaImportFailureCode.PRIVATE_STORAGE_FAILURE,
         null,
-        -> "Das Medium konnte nicht sicher hinzugefügt werden."
+        -> tr(R.string.integration_the_media_could_not_be_added_safely_021486d)
     }
 
     private fun showShortMessage(message: String) {
@@ -5947,7 +6155,7 @@ class LauncherActivity : ComponentActivity() {
                     )
                     if (setupCompletion == null) {
                         setupRuntime.observeSpeechCredentialAvailability(available = true)
-                        showShortMessage("Der OpenAI-Sprachzugang ist sicher eingerichtet.")
+                        showShortMessage(tr(R.string.integration_openai_voice_access_is_securely_configured_1121b5c))
                     } else {
                         setupCompletion(
                             SetupUiCommandResult.Accepted(
@@ -5968,26 +6176,26 @@ class LauncherActivity : ComponentActivity() {
             }
             setupCompletion?.invoke(
                 SetupUiCommandResult.Rejected("speech_credential_surface_already_open"),
-            ) ?: showShortMessage("Die sichere Schlüsseleingabe ist bereits geöffnet.")
+            ) ?: showShortMessage(tr(R.string.integration_secure_key_entry_is_already_open_425b734))
         }
     }
 
     private fun confirmSpeechCredentialRemoval() {
         AlertDialog.Builder(this)
-            .setTitle("Sprachzugang entfernen?")
+            .setTitle(tr(R.string.integration_remove_voice_access_b75997a))
             .setMessage(
-                "Der lokal verschlüsselte OpenAI API-Schlüssel wird von diesem Telefon gelöscht. " +
-                    "ChatGPT- und Codex-Anmeldung bleiben erhalten.",
+                tr(R.string.integration_the_locally_encrypted_openai_api_key_will_be_deleted_fr_02924da) +
+                    tr(R.string.integration_your_chatgpt_and_codex_sign_ins_are_preserved_830c874),
             )
-            .setNegativeButton("Abbrechen", null)
-            .setPositiveButton("Entfernen") { _, _ ->
+            .setNegativeButton(tr(R.string.integration_cancel_f7ff117), null)
+            .setPositiveButton(tr(R.string.integration_remove_3828375)) { _, _ ->
                 sessionHost.clearSpeechCredential()
                 setupRuntime.observeSpeechCredentialAvailability(available = false)
                 localUi = localUi.copy(
                     speechCredentialStatus = currentSpeechCredentialUiStatus(),
                     revision = localUi.revision + 1,
                 )
-                showShortMessage("Der OpenAI-Sprachzugang wurde entfernt.")
+                showShortMessage(tr(R.string.integration_openai_voice_access_was_removed_14ce584))
             }
             .show()
     }
@@ -6019,7 +6227,7 @@ class LauncherActivity : ComponentActivity() {
         const val SETUP_HANDOFF_TAG = "HansSetupHandoff"
         const val OPENAI_API_KEYS_URL = "https://platform.openai.com/api-keys"
         const val OPENAI_BILLING_URL =
-            "https://platform.openai.com/settings/organization/billing/overview"
+            "https://platform.openai.com/settings/organization/billing"
         const val RESTRICTED_SETTINGS_API_STATE_KEY =
             "hans.restricted_settings.api"
         const val RESTRICTED_SETTINGS_CAPABILITY_STATE_KEY =
@@ -6125,23 +6333,24 @@ internal data class SetupConversationPrompt(
     val internalRoutingContext: String,
 ) {
     companion object {
-        fun forState(complete: Boolean): SetupConversationPrompt = SetupConversationPrompt(
+        fun forState(complete: Boolean, text: HansTextResolver): SetupConversationPrompt = SetupConversationPrompt(
             visibleText = if (complete) {
-                "Lass uns meine Hans-Einrichtung gemeinsam noch einmal prüfen."
+                text.text(R.string.integration_setup_recheck)
             } else {
-                "Lass uns Hans jetzt gemeinsam einrichten."
+                text.text(R.string.integration_setup_start)
             },
             internalRoutingContext = buildString {
-                append("Hans-interner Routingkontext, nicht als Nutzertext wiederholen: ")
-                append("Verwende den Skill ${'$'}hans-setup:setup-hans-device und rufe zuerst ")
-                append("hans_setup.get_setup_state auf. ")
-                if (complete) append("Prüfe widerrufene Zugriffe frisch. ")
-                append("Gib nie Schritt-, Status- oder Toolcodes aus und verlange genau eine ")
-                append("nächste Nutzeraktion. Wenn der aktuelle Schritt der Start ist, frage ")
-                append("natürlich: Möchtest du die Einrichtung jetzt starten? Die Antwort ")
-                append("erfolgt im Chat oder per Sprache, nicht über einen besonderen ")
-                append("Bildschirmknopf. Bei einer Zustimmung speichere exakt ")
-                append("{step:\"intro\",choice:\"begin\"}; erfinde kein Synonym.")
+                append("Internal Hans routing context, not user text to repeat: ")
+                append("Use skill ${'$'}hans-setup:setup-hans-device and first call ")
+                append("hans_setup.get_setup_state. ")
+                if (complete) append("Check revoked access freshly. ")
+                append("Do not expose step, status or tool codes. Request exactly one next ")
+                append("user action. If the current step is the start, ask naturally whether ")
+                append("the user would like to start setup now. The answer comes through chat ")
+                append("or voice, not a special screen button. Follow the user's actual ")
+                append("language; use the effective interface language only when no user ")
+                append("language is established. On agreement store exactly ")
+                append("{step:\"intro\",choice:\"begin\"}; do not invent a synonym.")
             },
         )
     }
@@ -6157,18 +6366,18 @@ internal fun SetupConversationPrompt.toCodexInput(
 )
 
 internal object SetupLiveTestCopy {
-    const val VOICE_PREVIEW_ACTION = "Hör jetzt kurz zu."
-    const val VOICE_DICTATION_ACTION = "Sprich jetzt einen kurzen Testsatz."
+    fun voicePreviewAction(text: HansTextResolver) = text.text(R.string.integration_setup_preview)
+    fun voiceDictationAction(text: HansTextResolver) = text.text(R.string.integration_setup_dictate)
 
-    fun cameraAction(record: HansSetupStepRecord): String = when {
+    fun cameraAction(record: HansSetupStepRecord, text: HansTextResolver): String = when {
         record.detailCode == "camera_dictation_sent_waiting_capture" ->
-            "Nimm jetzt über das Kamerasymbol ein Testfoto auf."
+            text.text(R.string.integration_setup_photo)
         record.detailCode == "camera_recording_listening_observed" ->
-            "Sprich jetzt einen kurzen Testsatz. Das Loslassen beendet die Aufnahme automatisch."
+            text.text(R.string.integration_setup_hold_test)
         record.auxiliaryEvidenceObserved ->
-            "Halte jetzt das Kamerasymbol gedrückt, bis Hans zuhört."
+            text.text(R.string.integration_setup_camera_hold)
         else ->
-            "Nimm jetzt über das Kamerasymbol ein Testfoto auf."
+            text.text(R.string.integration_setup_photo)
     }
 }
 
@@ -6236,3 +6445,66 @@ internal fun reconcileSetupConversationReceipt(
 
 private fun ActionKeyMappingSet.hasAction(action: KeySemanticAction): Boolean =
     mappings.any { it.action == action }
+
+/** Fixed allowlist. Full runtime/voice snapshots must never be serialized into this diagnostic. */
+internal fun encodeHansVoiceDiagnostics(
+    realtime: ai.hans.standard.integration.CodexRealtimeDiagnostics?,
+    dictationPhase: DictationUiPhase,
+    livePhase: LiveVoicePhase,
+    captureRequestedOrActive: Boolean,
+    taskLifecycle: ai.hans.standard.voice.realtime.TaskVoiceLifecycleDiagnostics.Snapshot? =
+        ai.hans.standard.voice.realtime.TaskVoiceLifecycleDiagnostics.snapshot(),
+    batchLifecycle: ai.hans.standard.voice.stt.BatchTranscriptionDiagnostics.Snapshot? =
+        ai.hans.standard.voice.stt.BatchTranscriptionDiagnostics.snapshot(),
+): String = org.json.JSONObject()
+    .put("schema", 1)
+    .put("codexBound", realtime != null)
+    .put("state", realtime?.state?.name ?: org.json.JSONObject.NULL)
+    .put("started", realtime?.started ?: org.json.JSONObject.NULL)
+    .put("stopAck", realtime?.stopAcknowledged ?: org.json.JSONObject.NULL)
+    .put("handoffCount", realtime?.handoffCount ?: org.json.JSONObject.NULL)
+    .put("userFinalCount", realtime?.userFinalCount ?: org.json.JSONObject.NULL)
+    .put("userDeltaCount", realtime?.userDeltaCount ?: org.json.JSONObject.NULL)
+    .put("userDeltaCharacters", realtime?.userDeltaCharacters ?: org.json.JSONObject.NULL)
+    .put("assistantFinalCount", realtime?.assistantFinalCount ?: org.json.JSONObject.NULL)
+    .put("lastPhase", realtime?.lastNativePhase?.name ?: org.json.JSONObject.NULL)
+    .put("error", realtime?.lastError?.name ?: org.json.JSONObject.NULL)
+    .put("dictationPhase", dictationPhase.name)
+    .put("livePhase", livePhase.name)
+    .put("captureRequestedOrActive", captureRequestedOrActive)
+    .put("taskLifecycle", taskLifecycle?.let { trace ->
+        org.json.JSONObject()
+            .put("schema", 1)
+            .put("run", trace.run)
+            .put("eventCount", trace.eventCount)
+            .put("droppedCount", trace.droppedCount)
+            .put("records", org.json.JSONArray().apply {
+                trace.records.forEach { record ->
+                    val details = record.details
+                    put(org.json.JSONObject()
+                        .put("sequence", record.sequence)
+                        .put("elapsedMillis", record.elapsedMillis)
+                        .put("type", record.type.name)
+                        .put("activeWork", details.activeWork ?: org.json.JSONObject.NULL)
+                        .put("pendingDispatch", details.pendingDispatch ?: org.json.JSONObject.NULL)
+                        .put("muted", details.muted ?: org.json.JSONObject.NULL)
+                        .put("workOutcome", details.workOutcome?.name ?: org.json.JSONObject.NULL)
+                        .put("reason", details.reason?.name ?: org.json.JSONObject.NULL)
+                        .put("handoffCount", details.handoffCount ?: org.json.JSONObject.NULL)
+                        .put("inputDelayMillis", details.inputDelayMillis ?: org.json.JSONObject.NULL)
+                        .put("mediaClosed", details.mediaClosed ?: org.json.JSONObject.NULL)
+                        .put("nativeClosed", details.nativeClosed ?: org.json.JSONObject.NULL))
+                }
+            })
+    } ?: org.json.JSONObject.NULL)
+    .put("batchLifecycle", batchLifecycle?.let { trace ->
+        org.json.JSONObject().put("run", trace.run)
+            .put("records", org.json.JSONArray().apply {
+                trace.records.forEach { record ->
+                    put(org.json.JSONObject().put("type", record.type.name)
+                        .put("elapsedMillis", record.elapsedMillis)
+                        .put("audioBytes", record.audioBytes ?: org.json.JSONObject.NULL))
+                }
+            })
+    } ?: org.json.JSONObject.NULL)
+    .toString()

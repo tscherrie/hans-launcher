@@ -1,6 +1,11 @@
 package ai.hans.standard.ui
 
-import android.os.SystemClock
+import ai.hans.standard.R
+import ai.hans.standard.localization.HansTextResolver
+import ai.hans.standard.localization.AndroidHansTextResolver
+import ai.hans.standard.localization.rememberHansTextResolver
+import androidx.compose.ui.res.stringResource
+
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.LinearEasing
@@ -42,13 +47,13 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedIconButton
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -94,11 +99,10 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.customActions
-import androidx.compose.ui.semantics.disabled
-import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.onLongClick
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.SemanticsPropertyKey
 import androidx.compose.ui.semantics.SemanticsPropertyReceiver
 import androidx.compose.ui.semantics.semantics
@@ -119,13 +123,9 @@ import ai.hans.standard.voice.audio.SpeechAudioRouteState
 import ai.hans.standard.phone.keys.AndroidKeyEventObserver
 import ai.hans.standard.phone.keys.ComposerKeyTranslation
 import ai.hans.standard.phone.keys.ComposerKeyTranslationPolicy
-import ai.hans.standard.phone.keys.SoftwareHoldToTalkGestureController
 import ai.hans.standard.phone.display.DisplayMotionMode
 import ai.hans.standard.phone.display.DisplayMotionDecision
-import kotlinx.coroutines.async
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.PI
@@ -155,6 +155,7 @@ fun ChatScreen(
     displayMotionMode: DisplayMotionMode = DisplayMotionMode.AUTOMATIC,
     liveCallMinimizedState: MutableState<Boolean> = rememberLiveCallMinimized(state.liveVoiceStatus != null),
 ) {
+    val uiText = rememberHansTextResolver()
     val motion = rememberDisplayMotion(displayMotionMode)
     val listState = rememberLazyListState()
     val idleFocusRequester = remember { FocusRequester() }
@@ -162,6 +163,8 @@ fun ChatScreen(
     val focusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
     var composerFocused by remember { mutableStateOf(false) }
+    var composerStopFocused by remember { mutableStateOf(false) }
+    var composerDictationFocused by remember { mutableStateOf(false) }
     val composerEditor = remember { ComposerEditorState(state.composer.text) }
     val currentComposerChanged by rememberUpdatedState(callbacks.onComposerChanged)
     var sidePanelOpen by remember { mutableStateOf(false) }
@@ -208,10 +211,13 @@ fun ChatScreen(
     val dictationOwnsInput = state.dictationStatus in setOf(
         DictationUiStatus.PREPARING,
         DictationUiStatus.LISTENING,
+        DictationUiStatus.FINALIZING,
     )
+    val showSpeechTaskPanel = dictationOwnsInput && !liveActive
     val lastMessage = state.messages.lastOrNull()
     val dictationPreviewMessage = state.dictationPreviewMessage()
-    val showEmptyChat = state.messages.isEmpty() && dictationPreviewMessage == null
+    val showTranscriptPlaceholder = state.showDictationTranscriptPlaceholder()
+    val showEmptyChat = state.messages.isEmpty() && dictationPreviewMessage == null && !showTranscriptPlaceholder
     val transientRows = listOfNotNull(
         state.dictationStatus,
         state.liveVoiceStatus,
@@ -220,13 +226,16 @@ fun ChatScreen(
     val tailIndex = state.messages.size + transientRows + if (showEmptyChat) 1 else 0
 
     LaunchedEffect(
-        state.timelineRevision,
+        // The aggregate revision also includes hidden events and unrelated local state.
+        // Only changes to the visible tail may move a reader away from older history.
         state.messages.size,
+        lastMessage?.id,
         lastMessage?.revision,
-        lastMessage?.text?.length,
+        lastMessage?.text,
         state.isWorking,
         state.dictationStatus,
         dictationPreviewMessage?.text,
+        showTranscriptPlaceholder,
     ) {
         listState.scrollToItem(tailIndex)
     }
@@ -260,7 +269,7 @@ fun ChatScreen(
                     emptyList()
                 } else {
                     listOf(
-                        CustomAccessibilityAction(label = "Menü öffnen") {
+                        CustomAccessibilityAction(label = uiText.text(R.string.ui_open_menu_ac3b2e)) {
                             openSidebar()
                             true
                         },
@@ -283,6 +292,8 @@ fun ChatScreen(
                 if (
                     sidePanelOpen ||
                     composerFocused ||
+                    composerStopFocused ||
+                    composerDictationFocused ||
                     dictationOwnsInput ||
                     composerEditor.dispatchPending ||
                     !state.composer.enabled ||
@@ -309,6 +320,9 @@ fun ChatScreen(
                 audioRoute = state.speechAudioRoute,
                 onAudioRouteRequested = callbacks.onSpeechAudioRouteRequested,
                 onMinimize = { liveCallMinimized = true },
+                speechFailure = state.speechFailure,
+                onOpenSpeechFailureHelp = callbacks.onOpenSpeechFailureHelp,
+                onDismissSpeechFailure = callbacks.onDismissSpeechFailure,
             )
         } else {
         Column(modifier = Modifier.fillMaxSize()) {
@@ -332,12 +346,14 @@ fun ChatScreen(
                         liveStartConfirmationVisible = true
                     }
                 },
-                audioRoute = state.speechAudioRoute,
-                onAudioRouteRequested = callbacks.onSpeechAudioRouteRequested,
                 onOpenMenu = openSidebar,
             )
             }
             HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+
+            state.speechFailure?.let { failure ->
+                SpeechFailureNotice(failure, callbacks.onOpenSpeechFailureHelp, callbacks.onDismissSpeechFailure)
+            }
 
             if (state.internetNotice.isNotBlank() || state.connectionFailureMessage.isNotBlank()) {
                 Column(
@@ -354,7 +370,7 @@ fun ChatScreen(
                     )
                     if (state.internetNotice.isNotBlank()) {
                         TextButton(onClick = callbacks.onOpenInternetSettings) {
-                            Text("Interneteinstellungen")
+                            Text(stringResource(R.string.ui_internet_settings_99f923))
                         }
                     }
                 }
@@ -374,7 +390,7 @@ fun ChatScreen(
             ) {
                 if (showEmptyChat) {
                     item(key = "empty_chat") {
-                        EmptyChat()
+                        EmptyChat(actionKeyConfigured = state.actionKeyConfigured)
                     }
                 } else {
                     items(
@@ -391,7 +407,7 @@ fun ChatScreen(
                     }
                 }
 
-                if (state.isWorking) {
+                if (state.isWorking && !showSpeechTaskPanel) {
                     item(key = "working_indicator") {
                         WorkingIndicator(animated = motion.animateHome && !sidePanelOpen)
                     }
@@ -405,8 +421,19 @@ fun ChatScreen(
                                 onReadAloud = callbacks.onReadAssistantMessageAloud,
                                 textModifier = Modifier.testTag("dictation_preview"),
                             )
-                        } else {
-                            DictationStatus(status)
+                        } else if (showTranscriptPlaceholder) {
+                            MessageCard(
+                                message = ChatMessageUiModel(
+                                    id = "dictation-awaiting-transcript",
+                                    author = ChatMessageAuthor.USER,
+                                    text = "",
+                                    complete = false,
+                                ),
+                                onReadAloud = callbacks.onReadAssistantMessageAloud,
+                                waitingForTranscript = true,
+                            )
+                        } else if (!showSpeechTaskPanel) {
+                            DictationStatus(status, state.dictationInputMuted)
                         }
                     }
                 }
@@ -434,14 +461,14 @@ fun ChatScreen(
                         Text(
                             text = when (pending.delivery) {
                                 PendingDictationDelivery.AWAITING_USER -> if (pending.incomplete) {
-                                    "Diktat unterbrochen – unvollständiger Text, noch nicht gesendet"
+                                    uiText.text(R.string.ui_dictation_interrupted_incomplete_text_not_sent_263bf7)
                                 } else {
-                                    "Sprachtext gespeichert, noch nicht gesendet"
+                                    uiText.text(R.string.ui_dictation_saved_not_sent_602a2b)
                                 }
                                 PendingDictationDelivery.AWAITING_RECEIPT ->
-                                    "Sprachtext wartet auf Sendebestätigung"
+                                    uiText.text(R.string.ui_waiting_for_dictation_delivery_confirmation_0d1133)
                                 PendingDictationDelivery.OUTCOME_UNKNOWN ->
-                                    "Sendestatus unbekannt. Prüfe den Chat, bevor du den Auftrag wiederholst."
+                                    uiText.text(R.string.ui_delivery_status_unknown_check_the_chat_before_re_a67185)
                             },
                             style = MaterialTheme.typography.titleSmall,
                             color = MaterialTheme.colorScheme.error,
@@ -452,12 +479,12 @@ fun ChatScreen(
                         Row {
                             if (pending.canRetry) {
                                 TextButton(onClick = { callbacks.onRetryPendingDictation(pending.id) }) {
-                                    Text(if (pending.incomplete) "Diesen Teil senden" else "Senden")
+                                    Text(if (pending.incomplete) uiText.text(R.string.ui_send_this_part_510526) else uiText.text(R.string.ui_send_079bef))
                                 }
                             }
                             if (pending.canDiscard) {
                                 TextButton(onClick = { callbacks.onDiscardPendingDictation(pending.id) }) {
-                                    Text("Entwurf entfernen")
+                                    Text(stringResource(R.string.ui_discard_draft_968d8c))
                                 }
                             }
                         }
@@ -473,8 +500,14 @@ fun ChatScreen(
             Composer(
                 cursorBlinkEnabled = motion.animateHome && !sidePanelOpen,
                 state = state.composer,
+                workInterrupt = state.workInterrupt,
                 dictationOwnsInput = dictationOwnsInput,
-                cameraHoldToTalkEnabled = state.cameraHoldToTalkEnabled,
+                dictationStatus = state.dictationStatus,
+                dictationInputMuted = state.dictationInputMuted,
+                dictationControlVisible = !liveActive && !state.actionKeyConfigured,
+                showSpeechTaskPanel = showSpeechTaskPanel,
+                isWorking = state.isWorking,
+                audioRoute = state.speechAudioRoute.takeUnless { liveActive },
                 editor = composerEditor,
                 publishDraft = {
                     composerEditor.takeDraftPublication()?.let(currentComposerChanged)
@@ -482,6 +515,8 @@ fun ChatScreen(
                 callbacks = callbacks,
                 composerFocusRequester = composerFocusRequester,
                 onComposerFocusChanged = { composerFocused = it },
+                onStopButtonFocusChanged = { composerStopFocused = it },
+                onDictationButtonFocusChanged = { composerDictationFocused = it },
                 onReturnToIdleFocus = { idleFocusRequester.requestFocus() },
                 modifier = Modifier
                     .fillMaxWidth()
@@ -517,6 +552,7 @@ private fun LiveVoiceStartConfirmation(
     onConfirm: () -> Unit,
     onDismiss: () -> Unit,
 ) {
+    val uiText = rememberHansTextResolver()
     AlertDialog(
         onDismissRequest = onDismiss,
         modifier = Modifier.testTag("live_start_confirmation"),
@@ -525,23 +561,23 @@ private fun LiveVoiceStartConfirmation(
                 text = "☎",
                 modifier = Modifier
                     .testTag("live_start_phone_icon")
-                    .semantics { contentDescription = "Telefon" },
+                    .semantics { contentDescription = uiText.text(R.string.ui_phone_fa6906) },
                 style = MaterialTheme.typography.headlineLarge,
             )
         },
-        title = { Text("Hans anrufen?") },
-        text = { Text("Live Voice als Telefongespräch starten?") },
+        title = { Text(stringResource(R.string.ui_call_hans_209368)) },
+        text = { Text(stringResource(R.string.ui_start_a_live_voice_call_372dca)) },
         confirmButton = {
             TextButton(
                 onClick = onConfirm,
                 modifier = Modifier.testTag("live_start_confirm"),
-            ) { Text("Anrufen") }
+            ) { Text(stringResource(R.string.ui_call_74f357)) }
         },
         dismissButton = {
             TextButton(
                 onClick = onDismiss,
                 modifier = Modifier.testTag("live_start_cancel"),
-            ) { Text("Abbrechen") }
+            ) { Text(stringResource(R.string.ui_cancel_f7ff11)) }
         },
     )
 }
@@ -550,9 +586,10 @@ internal fun chatTimelineItemKey(message: ChatMessageUiModel): String =
     "${message.author.name}:${message.id}"
 
 @Composable
-private fun DictationStatus(status: DictationUiStatus) {
+private fun DictationStatus(status: DictationUiStatus, inputMuted: Boolean) {
+    val uiText = rememberHansTextResolver()
     Text(
-        text = status.label,
+        text = stringResource(if (inputMuted) R.string.dictation_microphone_muted else status.labelResource),
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 8.dp, vertical = 5.dp)
@@ -568,8 +605,9 @@ private fun DictationStatus(status: DictationUiStatus) {
 
 @Composable
 private fun LiveVoiceStatus(status: LiveVoiceUiStatus) {
+    val uiText = rememberHansTextResolver()
     Text(
-        text = status.label,
+        text = stringResource(status.labelResource),
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 8.dp, vertical = 5.dp)
@@ -589,14 +627,14 @@ private fun ChatHeader(
     liveVoiceStatus: LiveVoiceUiStatus?,
     animateLiveRecording: Boolean,
     onToggleLiveVoice: () -> Unit,
-    audioRoute: SpeechAudioRouteState,
-    onAudioRouteRequested: (SpeechAudioRoute) -> Unit,
     onOpenMenu: () -> Unit,
 ) {
+    val uiText = rememberHansTextResolver()
     val liveActive = liveVoiceStatus?.isActive == true
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .testTag("chat_header")
             .padding(start = 18.dp, end = 12.dp, top = 12.dp, bottom = 10.dp),
         verticalAlignment = Alignment.Top,
     ) {
@@ -605,9 +643,9 @@ private fun ChatHeader(
                 .testTag("hans_title")
                 .semantics {
                     contentDescription = if (liveActive) {
-                        "Hans. Live Voice beenden"
+                        uiText.text(R.string.ui_hans_end_live_voice_3f3440)
                     } else {
-                        "Hans. Anrufdialog öffnen"
+                        uiText.text(R.string.ui_hans_open_call_dialog_b6c733)
                     }
                 }
                 .clickable(
@@ -634,13 +672,10 @@ private fun ChatHeader(
             }
         }
         Spacer(Modifier.weight(1f))
-        if (audioRoute.active) {
-            SpeechAudioRouteButton(audioRoute, onAudioRouteRequested)
-        }
         OutlinedIconButton(
             onClick = onOpenMenu,
-            modifier = Modifier.testTag("open_chat_navigation")
-                .semantics { contentDescription = "Menü öffnen" },
+            modifier = Modifier.size(48.dp).testTag("open_chat_navigation")
+                .semantics { contentDescription = uiText.text(R.string.ui_open_menu_ac3b2e) },
         ) {
             val color = MaterialTheme.colorScheme.onSurface
             Canvas(Modifier.size(22.dp)) {
@@ -657,19 +692,20 @@ private fun SpeechAudioRouteButton(
     state: SpeechAudioRouteState,
     onRequested: (SpeechAudioRoute) -> Unit,
 ) {
+    val uiText = rememberHansTextResolver()
     var expanded by remember { mutableStateOf(false) }
     val label = when (state.effective) {
-        SpeechAudioRoute.SPEAKER -> "Lautsprecher"
-        SpeechAudioRoute.EARPIECE -> "Hörmuschel"
-        SpeechAudioRoute.EXTERNAL -> "Headset / Bluetooth"
-        SpeechAudioRoute.UNKNOWN -> "noch nicht bestätigt"
+        SpeechAudioRoute.SPEAKER -> uiText.text(R.string.ui_speaker_8cb912)
+        SpeechAudioRoute.EARPIECE -> uiText.text(R.string.ui_earpiece_def97c)
+        SpeechAudioRoute.EXTERNAL -> uiText.text(R.string.ui_headset_bluetooth_ddc46b)
+        SpeechAudioRoute.UNKNOWN -> uiText.text(R.string.ui_not_yet_confirmed_fa2871)
     }
     Box {
         OutlinedIconButton(
             onClick = { expanded = true },
             enabled = state.available.any { it == SpeechAudioRoute.SPEAKER || it == SpeechAudioRoute.EARPIECE },
-            modifier = Modifier.testTag("speech_audio_route")
-                .semantics { contentDescription = "Tonausgabe: $label. Ändern" },
+            modifier = Modifier.size(48.dp).testTag("speech_audio_route")
+                .semantics { contentDescription = uiText.text(R.string.ui_audio_output_value_change_0001a2, label) },
         ) {
             Text(when (state.effective) {
                 SpeechAudioRoute.EARPIECE -> "👂"
@@ -679,7 +715,7 @@ private fun SpeechAudioRouteButton(
             })
         }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            listOf(SpeechAudioRoute.EARPIECE to "Hörmuschel", SpeechAudioRoute.SPEAKER to "Lautsprecher")
+            listOf(SpeechAudioRoute.EARPIECE to uiText.text(R.string.ui_earpiece_def97c), SpeechAudioRoute.SPEAKER to uiText.text(R.string.ui_speaker_8cb912))
                 .forEach { (route, name) ->
                     DropdownMenuItem(
                         text = { Text(if (state.effective == route) "✓ $name" else name) },
@@ -689,7 +725,7 @@ private fun SpeechAudioRouteButton(
                     )
                 }
             Text(
-                text = "Aktuell: $label",
+                text = stringResource(R.string.ui_current_value_c67f39, label),
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp).testTag("speech_route_effective"),
                 style = MaterialTheme.typography.bodyMedium,
             )
@@ -699,17 +735,19 @@ private fun SpeechAudioRouteButton(
 
 @Composable
 private fun RuntimeSleepingIndicator() {
+    val uiText = rememberHansTextResolver()
     Text(
         text = "💤",
         modifier = Modifier
             .testTag("runtime_sleeping_indicator")
-            .semantics { contentDescription = "Hans ist nicht bereit" },
+            .semantics { contentDescription = uiText.text(R.string.ui_hans_is_not_ready_9b069d) },
         style = MaterialTheme.typography.titleMedium,
     )
 }
 
 @Composable
 private fun LiveRecordingIndicator(animated: Boolean) {
+    val uiText = rememberHansTextResolver()
     // This animation exists only while Live Voice owns the microphone. The
     // composable leaves the tree at idle, so there is no permanent timer,
     // recomposition loop, or frame invalidation on the E-Ink home screen.
@@ -735,7 +773,7 @@ private fun LiveRecordingIndicator(animated: Boolean) {
             .graphicsLayer { alpha = indicatorAlpha?.value ?: 1f }
             .testTag("live_recording_indicator")
             .semantics {
-                contentDescription = "Live Voice aktiv"
+                contentDescription = uiText.text(R.string.ui_live_voice_active_a5fd5b)
                 liveRecordingIndicatorAnimated = animated
             },
     ) {
@@ -751,6 +789,7 @@ private fun ChatNavigationPanel(
     settingsCallbacks: SettingsUiCallbacks?,
     displayMotion: DisplayMotionDecision,
 ) {
+    val uiText = rememberHansTextResolver()
     // This panel leaves composition on close, so reopening never restores a deep group.
     var navigation by remember { mutableStateOf(SettingsNavigation()) }
     val group = navigation.group
@@ -763,21 +802,23 @@ private fun ChatNavigationPanel(
             .fillMaxSize()
             .testTag("chat_navigation_overlay"),
     ) {
-        Box(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxHeight()
-                .background(Color.Black.copy(alpha = 0.16f))
-                .testTag("chat_navigation_scrim")
-                .semantics {
-                    contentDescription = "Menü schließen"
-                    role = Role.Button
-                }
-                .clickable(onClick = onClose),
-        )
+        if (group == null) {
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .background(Color.Black.copy(alpha = 0.16f))
+                    .testTag("chat_navigation_scrim")
+                    .semantics {
+                        contentDescription = uiText.text(R.string.ui_close_menu_48700e)
+                        role = Role.Button
+                    }
+                    .clickable(onClick = onClose),
+            )
+        }
         Surface(
             modifier = Modifier
-                .width(panelWidth)
+                .then(if (group == null) Modifier.width(panelWidth) else Modifier.fillMaxWidth())
                 .fillMaxHeight()
                 .testTag("chat_navigation_panel")
                 .pointerInput(Unit) {
@@ -801,7 +842,7 @@ private fun ChatNavigationPanel(
                 ) {
                     if (group == null) {
                         Text(
-                            text = navigation.title,
+                            text = stringResource(navigation.titleResource),
                             modifier = Modifier.weight(1f),
                             style = MaterialTheme.typography.headlineMedium,
                         )
@@ -810,7 +851,7 @@ private fun ChatNavigationPanel(
                             onClick = { navigation = navigation.backToGroups() },
                             modifier = Modifier.testTag("settings_back_to_groups"),
                         ) {
-                            Text("Zurück")
+                            Text(stringResource(R.string.ui_back_548611))
                         }
                         Spacer(Modifier.weight(1f))
                     }
@@ -818,12 +859,12 @@ private fun ChatNavigationPanel(
                         onClick = onClose,
                         modifier = Modifier.testTag("close_chat_navigation"),
                     ) {
-                        Text("Schließen")
+                        Text(stringResource(R.string.ui_close_b808f6))
                     }
                 }
                 if (group != null) {
                     Text(
-                        text = group.title,
+                        text = stringResource(group.titleResource),
                         modifier = Modifier.padding(horizontal = 16.dp)
                             .testTag("settings_group_title"),
                         style = MaterialTheme.typography.headlineMedium,
@@ -850,7 +891,7 @@ private fun ChatNavigationPanel(
                                 },
                             )
                             NavigationPanelButton(
-                                label = "Automationen",
+                                label = uiText.text(R.string.ui_automations_1a2219),
                                 testTag = "open_automations",
                                 onClick = {
                                     onClose()
@@ -893,6 +934,7 @@ private fun NavigationPanelButton(
     testTag: String,
     onClick: () -> Unit,
 ) {
+    val uiText = rememberHansTextResolver()
     TextButton(
         onClick = onClick,
         modifier = Modifier
@@ -952,19 +994,21 @@ private suspend fun PointerInputScope.detectDeliberateHorizontalSwipe(
 }
 
 @Composable
-private fun EmptyChat() {
+private fun EmptyChat(actionKeyConfigured: Boolean) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .padding(top = 28.dp, bottom = 12.dp),
     ) {
         Text(
-            text = "Was steht an?",
+            text = stringResource(R.string.ui_what_s_next_02f5c8),
             style = MaterialTheme.typography.headlineLarge,
         )
         Spacer(Modifier.height(10.dp))
         Text(
-            text = "Schreib direkt los oder nutze deine eingerichtete Aktionstaste.",
+            text = stringResource(if (actionKeyConfigured) R.string.voice_composer_empty_action_key
+                else R.string.voice_composer_empty_microphone),
+            modifier = Modifier.testTag("empty_chat_input_hint"),
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             style = MaterialTheme.typography.bodyLarge,
         )
@@ -976,7 +1020,9 @@ private fun MessageCard(
     message: ChatMessageUiModel,
     onReadAloud: (String) -> Unit,
     textModifier: Modifier = Modifier,
+    waitingForTranscript: Boolean = false,
 ) {
+    val uiText = rememberHansTextResolver()
     if (message.author == ChatMessageAuthor.SYSTEM) {
         Text(
             text = message.text,
@@ -998,7 +1044,7 @@ private fun MessageCard(
                 detectTapGestures(onLongPress = { selectedReadAloudText = message.text })
             }
             .semantics {
-                onLongClick(label = "Antwortaktionen") {
+                onLongClick(label = uiText.text(R.string.ui_response_actions_9d3844)) {
                     selectedReadAloudText = message.text
                     true
                 }
@@ -1033,12 +1079,14 @@ private fun MessageCard(
         ) {
             Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 13.dp)) {
                 Text(
-                    text = if (message.author == ChatMessageAuthor.USER) "Du" else "Hans",
+                    text = if (message.author == ChatMessageAuthor.USER) uiText.text(R.string.ui_you_0b6722) else "Hans",
                     fontWeight = FontWeight.SemiBold,
                     style = MaterialTheme.typography.labelMedium,
                 )
                 Spacer(Modifier.height(4.dp))
-                if (message.author == ChatMessageAuthor.HANS) {
+                if (waitingForTranscript && message.author == ChatMessageAuthor.USER) {
+                    TranscriptWaitingDots()
+                } else if (message.author == ChatMessageAuthor.HANS) {
                     AssistantRichText(
                         raw = message.text,
                         complete = message.complete,
@@ -1061,7 +1109,7 @@ private fun MessageCard(
                 modifier = Modifier.testTag("message_read_aloud_menu"),
             ) {
                 DropdownMenuItem(
-                    text = { Text("Vorlesen") },
+                    text = { Text(stringResource(R.string.ui_read_aloud_aa20c7)) },
                     onClick = {
                         val selected = selectedReadAloudText
                         selectedReadAloudText = null
@@ -1069,7 +1117,7 @@ private fun MessageCard(
                     },
                     modifier = Modifier
                         .testTag("message_read_aloud_action")
-                        .semantics { contentDescription = "Diese Antwort vorlesen" },
+                        .semantics { contentDescription = uiText.text(R.string.ui_read_this_response_aloud_e9b1eb) },
                 )
             }
         }
@@ -1077,7 +1125,26 @@ private fun MessageCard(
 }
 
 @Composable
+private fun TranscriptWaitingDots() {
+    val description = stringResource(R.string.voice_composer_transcript_pending)
+    val color = MaterialTheme.colorScheme.onSurface
+    // Visible immediately, but never an animation or polling clock — including on E-Ink.
+    Canvas(
+        modifier = Modifier
+            .size(width = 42.dp, height = 24.dp)
+            .testTag("dictation_transcript_waiting_dots")
+            .semantics { contentDescription = description },
+    ) {
+        val radius = 3.dp.toPx()
+        listOf(radius, size.width / 2f, size.width - radius).forEach { x ->
+            drawCircle(color, radius, Offset(x, size.height / 2f))
+        }
+    }
+}
+
+@Composable
 private fun WorkingIndicator(animated: Boolean) {
+    val uiText = rememberHansTextResolver()
     // The E-Ink/static branch never constructs a transition or owns an animation clock.
     val phase = if (animated) {
         val transition = rememberInfiniteTransition(label = "working")
@@ -1095,7 +1162,7 @@ private fun WorkingIndicator(animated: Boolean) {
             .fillMaxWidth()
             .padding(horizontal = 8.dp, vertical = 5.dp)
             .semantics {
-                contentDescription = "Hans arbeitet"
+                contentDescription = uiText.text(R.string.ui_hans_is_working_440086)
                 workingIndicatorAnimated = animated
             }
             .testTag("working_indicator"),
@@ -1115,7 +1182,7 @@ private fun WorkingIndicator(animated: Boolean) {
         }
         Spacer(Modifier.width(10.dp))
         Text(
-            text = "Hans arbeitet",
+            text = stringResource(R.string.ui_hans_is_working_440086),
             style = MaterialTheme.typography.bodyMedium,
         )
     }
@@ -1126,16 +1193,25 @@ private fun WorkingIndicator(animated: Boolean) {
 private fun Composer(
     cursorBlinkEnabled: Boolean,
     state: ComposerUiState,
+    workInterrupt: WorkInterruptUiState,
     dictationOwnsInput: Boolean,
-    cameraHoldToTalkEnabled: Boolean,
+    dictationStatus: DictationUiStatus?,
+    dictationInputMuted: Boolean,
+    dictationControlVisible: Boolean,
+    showSpeechTaskPanel: Boolean,
+    isWorking: Boolean,
+    audioRoute: SpeechAudioRouteState?,
     editor: ComposerEditorState,
     publishDraft: () -> Unit,
     callbacks: ChatUiCallbacks,
     composerFocusRequester: FocusRequester,
     onComposerFocusChanged: (Boolean) -> Unit,
+    onStopButtonFocusChanged: (Boolean) -> Unit,
+    onDictationButtonFocusChanged: (Boolean) -> Unit,
     onReturnToIdleFocus: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val uiText = rememberHansTextResolver()
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
     val maximumComposerHeight = (
@@ -1182,6 +1258,52 @@ private fun Composer(
     }
 
     Column(modifier = modifier) {
+        if (showSpeechTaskPanel) {
+            Row(
+                modifier = Modifier.fillMaxWidth().testTag("voice_task_composer"),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                SpeechTaskStatusPanel(
+                    status = checkNotNull(dictationStatus),
+                    inputMuted = dictationInputMuted,
+                    isWorking = isWorking,
+                    audioRoute = audioRoute,
+                    onAudioRouteRequested = callbacks.onSpeechAudioRouteRequested,
+                    modifier = Modifier.weight(1f),
+                )
+                ComposerStopButton(
+                    state = workInterrupt,
+                    onInterrupt = callbacks.onInterruptWork,
+                    onFocusChanged = onStopButtonFocusChanged,
+                )
+                if (dictationControlVisible) {
+                    ComposerDictationButton(
+                        status = dictationStatus,
+                        inputMuted = dictationInputMuted,
+                        onToggle = callbacks.onToggleDictation,
+                        onFocusChanged = onDictationButtonFocusChanged,
+                    )
+                }
+            }
+            return@Column
+        }
+
+        // Text read-aloud has no task microphone. Its route remains available here,
+        // rather than adding a second changing control beside the header menu.
+        if (audioRoute?.active == true) {
+            Row(
+                modifier = Modifier.fillMaxWidth().testTag("speech_output_controls"),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    stringResource(R.string.voice_composer_output),
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                SpeechAudioRouteButton(audioRoute, callbacks.onSpeechAudioRouteRequested)
+            }
+        }
         state.attachments.forEach { attachment ->
             AttachmentRow(
                 attachment = attachment,
@@ -1197,7 +1319,6 @@ private fun Composer(
         ) {
             CameraComposerButton(
                 enabled = composerInputEnabled,
-                holdToTalkEnabled = cameraHoldToTalkEnabled,
                 callbacks = callbacks,
             )
 
@@ -1287,7 +1408,12 @@ private fun Composer(
                             visualTransformation = VisualTransformation.None,
                             interactionSource = interactionSource,
                             placeholder = {
-                                Text(if (dictationOwnsInput) "Aufnahme läuft" else "Frag Hans …")
+                                Text(uiText.text(when (dictationStatus) {
+                                    DictationUiStatus.PREPARING -> R.string.presentation_dictation_preparing
+                                    DictationUiStatus.LISTENING -> if (dictationInputMuted) R.string.dictation_microphone_muted
+                                        else R.string.ui_recording_fbd4a1
+                                    else -> R.string.ui_ask_hans_69c7ab
+                                }))
                             },
                             colors = colors,
                             container = {
@@ -1303,6 +1429,174 @@ private fun Composer(
                     },
                 )
             }
+            ComposerStopButton(
+                state = workInterrupt,
+                onInterrupt = callbacks.onInterruptWork,
+                onFocusChanged = onStopButtonFocusChanged,
+            )
+            if (dictationControlVisible) {
+                ComposerDictationButton(
+                    status = dictationStatus,
+                    inputMuted = dictationInputMuted,
+                    onToggle = callbacks.onToggleDictation,
+                    onFocusChanged = onDictationButtonFocusChanged,
+                )
+            }
+        }
+    }
+}
+
+/** Event-driven, visible microphone state even when a hardware key replaces the button. */
+@Composable
+private fun SpeechTaskStatusPanel(
+    status: DictationUiStatus,
+    inputMuted: Boolean,
+    isWorking: Boolean,
+    audioRoute: SpeechAudioRouteState?,
+    onAudioRouteRequested: (SpeechAudioRoute) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        modifier = modifier,
+        shape = MaterialTheme.shapes.large,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+    ) {
+        Row(
+            modifier = Modifier.padding(start = 12.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(
+                    text = stringResource(when {
+                        status == DictationUiStatus.FINALIZING -> R.string.voice_composer_finishing
+                        isWorking -> R.string.ui_hans_is_working_440086
+                        status == DictationUiStatus.PREPARING -> R.string.voice_composer_starting
+                        inputMuted -> R.string.voice_composer_request
+                        else -> R.string.voice_composer_listening
+                    }),
+                    modifier = Modifier.testTag("voice_task_status"),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Text(
+                    text = stringResource(when {
+                        status == DictationUiStatus.FINALIZING -> R.string.voice_composer_microphone_off
+                        inputMuted -> R.string.voice_composer_microphone_off
+                        status == DictationUiStatus.PREPARING -> R.string.voice_composer_microphone_starting
+                        else -> R.string.voice_composer_microphone_on
+                    }),
+                    modifier = Modifier.testTag("voice_task_microphone_state"),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            if (audioRoute?.active == true) {
+                SpeechAudioRouteButton(audioRoute, onAudioRouteRequested)
+            }
+        }
+    }
+}
+
+/** Start once, then stop and transcribe. Finalization cannot start a second recording. */
+@Composable
+private fun ComposerDictationButton(
+    status: DictationUiStatus?,
+    inputMuted: Boolean,
+    onToggle: () -> Unit,
+    onFocusChanged: (Boolean) -> Unit,
+) {
+    val uiText = rememberHansTextResolver()
+    val active = status == DictationUiStatus.PREPARING || status == DictationUiStatus.LISTENING
+    val finishing = status == DictationUiStatus.FINALIZING
+    val contentColor = if (active) MaterialTheme.colorScheme.surface else MaterialTheme.colorScheme.onSurface
+    // Voice control must remain reachable when recording or Codex work locks the text field.
+    // Permission, ownership and pending transitions are checked by the shared command owner.
+    OutlinedIconButton(
+        onClick = onToggle,
+        enabled = !finishing,
+        colors = IconButtonDefaults.outlinedIconButtonColors(
+            containerColor = if (active) MaterialTheme.colorScheme.onSurface else Color.Transparent,
+            contentColor = contentColor,
+        ),
+        modifier = Modifier
+            .size(48.dp)
+            .onFocusChanged { onFocusChanged(it.isFocused) }
+            .testTag("toggle_dictation")
+            .semantics {
+                selected = active
+                contentDescription = uiText.text(when {
+                    finishing -> R.string.presentation_dictation_finalizing
+                    active -> R.string.dictation_tile_stop
+                    else -> R.string.voice_composer_start
+                })
+            },
+    ) {
+        Canvas(Modifier.size(24.dp)) {
+            val color = contentColor.copy(alpha = if (finishing) 0.38f else 1f)
+            val strokeWidth = 2.dp.toPx()
+            drawRoundRect(
+                color = color,
+                topLeft = Offset(size.width * 0.36f, size.height * 0.08f),
+                size = androidx.compose.ui.geometry.Size(size.width * 0.28f, size.height * 0.49f),
+                cornerRadius = androidx.compose.ui.geometry.CornerRadius(size.width * 0.14f),
+                style = Stroke(strokeWidth),
+            )
+            drawArc(
+                color = color,
+                startAngle = 0f,
+                sweepAngle = 180f,
+                useCenter = false,
+                topLeft = Offset(size.width * 0.21f, size.height * 0.15f),
+                size = androidx.compose.ui.geometry.Size(size.width * 0.58f, size.height * 0.59f),
+                style = Stroke(strokeWidth),
+            )
+            drawLine(color, Offset(size.width * 0.5f, size.height * 0.74f),
+                Offset(size.width * 0.5f, size.height * 0.91f), strokeWidth)
+            drawLine(color, Offset(size.width * 0.32f, size.height * 0.91f),
+                Offset(size.width * 0.68f, size.height * 0.91f), strokeWidth)
+            if (active && inputMuted) {
+                drawLine(color, Offset(size.width * 0.12f, size.height * 0.08f),
+                    Offset(size.width * 0.88f, size.height * 0.92f), strokeWidth)
+            }
+        }
+    }
+}
+
+/** A static control independent of recording, draft ownership, and the Live-call lifecycle. */
+@Composable
+private fun ComposerStopButton(
+    state: WorkInterruptUiState,
+    onInterrupt: () -> Boolean,
+    onFocusChanged: (Boolean) -> Unit,
+) {
+    val uiText = rememberHansTextResolver()
+    if (!state.visible) return
+    // Close the same-frame double-click window. The runtime revision also releases this
+    // latch if a fast rejection arrives before PENDING was ever rendered.
+    var requested by remember(state) { mutableStateOf(false) }
+    val pending = state.pending || requested
+    val contentColor = MaterialTheme.colorScheme.onSurface
+    OutlinedIconButton(
+        onClick = {
+            if (state.enabled && !requested) {
+                requested = true
+                if (!onInterrupt()) requested = false
+            }
+        },
+        enabled = state.enabled && !pending,
+        modifier = Modifier
+            .size(52.dp)
+            .onFocusChanged { onFocusChanged(it.isFocused) }
+            .testTag("interrupt_codex_work")
+            .semantics {
+                contentDescription = when {
+                    pending -> uiText.text(R.string.ui_stop_requested_96eccb)
+                    state.enabled -> uiText.text(R.string.ui_stop_codex_task_7c4b45)
+                    else -> uiText.text(R.string.ui_codex_task_is_starting_80de46)
+                }
+            },
+    ) {
+        Canvas(Modifier.size(16.dp)) {
+            drawRect(contentColor.copy(alpha = if (state.enabled && !pending) 1f else 0.38f))
         }
     }
 }
@@ -1310,87 +1604,20 @@ private fun Composer(
 @Composable
 private fun CameraComposerButton(
     enabled: Boolean,
-    holdToTalkEnabled: Boolean,
     callbacks: ChatUiCallbacks,
 ) {
-    if (!holdToTalkEnabled) {
-        OutlinedIconButton(
-            onClick = callbacks.onChooseMedia,
-            enabled = enabled,
-            modifier = Modifier
-                .size(52.dp)
-                .testTag("choose_media")
-                .semantics { contentDescription = "Foto oder Video aufnehmen" },
-        ) {
-            CameraIcon()
-        }
-        return
-    }
-
-    // The pointer coroutine exists only while a finger is down. It creates no idle timer,
-    // animation, frame invalidation, or recomposition loop on the E-Ink home screen.
-    val latestEnabled = rememberUpdatedState(enabled)
-    val gestureModifier = Modifier.pointerInput(holdToTalkEnabled) {
-        detectTapGestures(
-            onPress = onPress@{
-                if (!latestEnabled.value) return@onPress
-                val id = callbacks.onCameraGestureDown(SystemClock.uptimeMillis())
-                    ?: return@onPress
-                coroutineScope {
-                    val release = async { tryAwaitRelease() }
-                    val releasedBeforeThreshold = withTimeoutOrNull(
-                        SoftwareHoldToTalkGestureController.DEFAULT_LONG_PRESS_MILLIS,
-                    ) {
-                        release.await()
-                    }
-                    if (releasedBeforeThreshold != null) {
-                        if (releasedBeforeThreshold) {
-                            callbacks.onCameraGestureUp(id, SystemClock.uptimeMillis())
-                        } else {
-                            callbacks.onCameraGestureCancel(id, SystemClock.uptimeMillis())
-                        }
-                    } else {
-                        callbacks.onCameraGestureLongPress(id, SystemClock.uptimeMillis())
-                        if (release.await()) {
-                            callbacks.onCameraGestureUp(id, SystemClock.uptimeMillis())
-                        } else {
-                            callbacks.onCameraGestureCancel(id, SystemClock.uptimeMillis())
-                        }
-                    }
-                }
-            },
-        )
-    }
-    Surface(
+    val uiText = rememberHansTextResolver()
+    OutlinedIconButton(
+        onClick = callbacks.onChooseMedia,
+        enabled = enabled,
         modifier = Modifier
             .size(52.dp)
             .testTag("choose_media")
-            .then(gestureModifier)
             .semantics {
-                contentDescription =
-                    "Foto oder Video aufnehmen. Gedrückt halten für Diktat, loslassen zum Senden."
-                role = Role.Button
-                if (!enabled) disabled()
-                onClick(label = "Foto oder Video aufnehmen") {
-                    if (enabled) {
-                        callbacks.onChooseMedia()
-                        true
-                    } else {
-                        false
-                    }
-                }
+                contentDescription = uiText.text(R.string.ui_take_a_photo_or_video_646907)
             },
-        shape = CircleShape,
-        color = MaterialTheme.colorScheme.surface,
-        contentColor = MaterialTheme.colorScheme.onSurface,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
     ) {
-        Box(
-            modifier = Modifier.fillMaxSize(),
-            contentAlignment = Alignment.Center,
-        ) {
-            CameraIcon()
-        }
+        CameraIcon()
     }
 }
 
@@ -1415,6 +1642,7 @@ internal fun composerCanSend(
 
 @Composable
 private fun CameraIcon() {
+    val uiText = rememberHansTextResolver()
     val color = MaterialTheme.colorScheme.onSurface
     Canvas(modifier = Modifier.size(27.dp)) {
         val stroke = Stroke(width = 2.dp.toPx())
@@ -1461,6 +1689,7 @@ private fun AttachmentRow(
     attachment: ComposerAttachmentUiModel,
     onRemove: (String) -> Unit,
 ) {
+    val uiText = rememberHansTextResolver()
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -1475,7 +1704,7 @@ private fun AttachmentRow(
             style = MaterialTheme.typography.bodyMedium,
         )
         TextButton(onClick = { onRemove(attachment.id) }) {
-            Text("Entfernen")
+            Text(stringResource(R.string.ui_remove_382837))
         }
     }
 }

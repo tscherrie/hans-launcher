@@ -3,6 +3,7 @@ package ai.hans.standard.integration
 import ai.hans.standard.BuildConfig
 import ai.hans.standard.codex.AccountLogoutResult
 import ai.hans.standard.codex.AccountReadResult
+import ai.hans.standard.codex.AccountIdentity
 import ai.hans.standard.codex.ActiveTurn
 import ai.hans.standard.codex.AppServerEventDecoder
 import ai.hans.standard.codex.AppServerMethod
@@ -14,11 +15,13 @@ import ai.hans.standard.codex.CorrelatedResponse
 import ai.hans.standard.codex.CrossCorrelationException
 import ai.hans.standard.codex.DeliveredServerEvent
 import ai.hans.standard.codex.DeliveryCursor
+import ai.hans.standard.codex.DeliveryDisposition
 import ai.hans.standard.codex.DeviceCodeLoginResult
 import ai.hans.standard.codex.DispatchOptions
 import ai.hans.standard.codex.DispatchPlan
 import ai.hans.standard.codex.DispatchPolicy
 import ai.hans.standard.codex.DynamicToolCancellation
+import ai.hans.standard.codex.DynamicToolCallParams
 import ai.hans.standard.codex.DynamicToolExecutionHandle
 import ai.hans.standard.codex.DynamicToolExecutionResult
 import ai.hans.standard.codex.DynamicToolExecutor
@@ -44,10 +47,12 @@ import ai.hans.standard.codex.ServerRequestId
 import ai.hans.standard.codex.SkillsListResult
 import ai.hans.standard.codex.ThreadResumeResult
 import ai.hans.standard.codex.ThreadMemoryModeSetResult
+import ai.hans.standard.codex.ThreadMaterializeResult
 import ai.hans.standard.codex.ThreadStartResult
 import ai.hans.standard.codex.ThreadSettingsUpdateResult
 import ai.hans.standard.codex.TurnInterruptResult
 import ai.hans.standard.codex.TurnStartResult
+import ai.hans.standard.codex.NotificationToolOutputTurnResult
 import ai.hans.standard.codex.TurnStatus
 import ai.hans.standard.codex.TurnSteerResult
 import ai.hans.standard.plugins.AppListPageWireResult
@@ -89,6 +94,8 @@ import ai.hans.standard.runtime.AppServerSessionContract
 import ai.hans.standard.runtime.BundledSetupPluginContract
 import ai.hans.standard.settings.HansSettings
 import ai.hans.standard.settings.HansSettingsStore
+import ai.hans.standard.diagnostics.PerformanceEvent
+import ai.hans.standard.diagnostics.PerformancePhase
 import java.io.File
 import java.nio.charset.StandardCharsets
 import java.util.LinkedHashMap
@@ -185,8 +192,51 @@ internal class CodexSessionController(
     private val pluginInstallDeadline: PluginInstallDeadline? = null,
     private val pluginInstallDeadlineNowMillis: () -> Long = android.os.SystemClock::elapsedRealtime,
     private val pluginInstallTimeoutMillis: Long = DEFAULT_PLUGIN_INSTALL_TIMEOUT_MILLIS,
+    private val workInterruptDeadlineScheduler: SetupDispatchDeadlineScheduler =
+        ProcessSetupDispatchDeadlineScheduler,
+    private val workInterruptTimeoutMillis: Long = 10_000L,
+    private val phoneToolsMcpConfigured: Boolean = false,
+    private val performanceObserver: PerformanceSessionObserver = PerformanceSessionObserver.NONE,
+    private val realtimeDeadlineScheduler: SetupDispatchDeadlineScheduler = ProcessSetupDispatchDeadlineScheduler,
+    private val realtimeAudioDeadlineScheduler: SetupDispatchDeadlineScheduler = ProcessSetupDispatchDeadlineScheduler,
+    private val realtimeDrainDeadlineScheduler: SetupDispatchDeadlineScheduler = ProcessSetupDispatchDeadlineScheduler,
+    private val desktopRemoteAccessEnabled: Boolean = ai.hans.standard.remotecontrol.DesktopRemoteAccessPolicy.enabled,
+    private val notificationExternalDeadlineScheduler: SetupDispatchDeadlineScheduler = ProcessSetupDispatchDeadlineScheduler,
+    private val notificationExternalTimeoutMillis: Long = 20_000L,
 ) : RuntimeSessionListener {
+    // Diagnostic-only state. Never exported, persisted, or used to authorize work.
+    private var performanceObservedTurnId: String? = null
+    private var performanceLastTerminalTurnId: String? = null
+    private val performanceTerminalTurnIds = LinkedHashSet<String>()
+    private var performanceContextThreadId: String? = null
+    private var performanceUserWaitReported = false
+    private var performanceAssistantOutputObserved = false
+    private var replayingPerformanceEvents = false
     private val requestIds = RequestIdSequence()
+    private val retiredFreshBootstrapRequestIds = LinkedHashSet<RequestId>()
+    private val realtime = CodexRealtimeCoordinator(send = { epoch, wire ->
+        if (epoch != generation || runtimePhase != ClientRuntimePhase.READY) false
+        else runCatching {
+            transport.sendFrame(epoch, wire.toByteArray(StandardCharsets.UTF_8))
+            true
+        }.getOrDefault(false)
+    }, scheduleAudioDeadline = { task ->
+        realtimeAudioDeadlineScheduler.schedule(10_000L) { synchronized(this) { task() } }
+    }, scheduleDrainDeadline = { task ->
+        realtimeDrainDeadlineScheduler.schedule(10_000L) { synchronized(this) { task() } }
+    }, onDrainRecoveryRequired = { notifyObservers() }, localHandoffTurn = { epoch, threadId ->
+        (activeTurn?.turnId ?: unknownActiveTurnId)?.takeIf { turnId ->
+            epoch == generation && voiceControlTurnIsLocal(threadId, turnId)
+        }
+    })
+    private var realtimeDeadline: SetupDispatchDeadline? = null
+    private var preparingRealtime: PreparedRealtime? = null
+    private val realtimeTurnAccounts = LinkedHashMap<String, ai.hans.standard.codex.AccountIdentity>()
+    private var realtimeOriginAccount: ai.hans.standard.codex.AccountIdentity? = null
+    private val voiceControlTurnProofs = LinkedHashMap<String, VoiceControlTurnProof>()
+    private var voiceControlProofCapacityExceeded = false
+    private var realtimeDispatchWaiter: RealtimeDispatchWaiter? = null
+    private var lastRealtimeFrameSequence = 0L
     private val remoteControl = ai.hans.standard.remotecontrol.RemoteControlCoordinator(
         sendRequest = { request ->
             val epoch = generation
@@ -199,6 +249,8 @@ internal class CodexSessionController(
     )
     private var remoteControlDeadline: SetupDispatchDeadline? = null
     private var remoteControlDeadlineAt: Long? = null
+    private var remotePolicyProbedGeneration: Long? = null
+    private var remotePolicyDisableAttempted = false
     private val remoteControlledTurnIds = LinkedHashSet<String>()
     private var remoteLogoutRequiresRuntimeRestart = false
     private var nextOperationId = 1L
@@ -216,12 +268,25 @@ internal class CodexSessionController(
     private val bufferedEvents = ArrayDeque<BufferedEvent>()
     private val timelineMetadata = LinkedHashMap<String, TimelineMetadata>()
     private var recoveredTimeline: List<RecoveredTimelineEntry> = emptyList()
+    private var recoveredAgentChannelHistory: AgentChannelRecoveredHistory? = null
+    private var nativeNotificationHistory: NativeNotificationExternalHistory? = null
+    private val nativeNotificationTurnIds = LinkedHashSet<String>()
+    private val nativeNotificationUnprovenTurnIds = LinkedHashSet<String>()
+    private val pendingNativeNotifications = LinkedHashMap<RequestId, RequestPurpose.NotificationToolOutput>()
+    private val retiredNativeNotificationRequests = LinkedHashSet<RequestId>()
+    private val nativeNotificationDeadlines = LinkedHashMap<RequestId, SetupDispatchDeadline>()
+    private var agentChannelHistoryRevision = 0L
     private val pendingDynamicCalls = LinkedHashMap<ServerRequestId, PendingDynamicCall>()
     private val pendingDynamicCallIds = LinkedHashMap<DynamicCallIdentity, ServerRequestId>()
     private val completedDynamicResults =
         LinkedHashMap<DynamicCallIdentity, DynamicToolExecutionResult>()
     private val completedDynamicRequestIds = LinkedHashSet<ServerRequestId>()
     private val dynamicToolTurnAuthorizationGate = DynamicToolTurnAuthorizationGate()
+    private val remotePhoneTools = dynamicToolExecutor?.let {
+        ai.hans.standard.remotecontrol.RemotePhoneToolAuthority(it)
+    }
+    private val remoteInterruptRequests = LinkedHashSet<String>()
+    private var nextRemoteInterrupt = 1L
     private val setupTurnIds = LinkedHashSet<String>()
 
     private var runtimePhase = ClientRuntimePhase.STOPPED
@@ -257,6 +322,9 @@ internal class CodexSessionController(
     /** One current resume receipt proves identity, but not the active turn's model/options. */
     private var identityOnlyActiveTurn: Pair<String, String>? = null
     private var locallyStoppingDynamicTurn: Pair<String, String>? = null
+    private var workInterruptRevision = 0L
+    private val workInterruptDeadlines = LinkedHashMap<RequestId, SetupDispatchDeadline>()
+    private val retiredWorkInterruptRequestIds = LinkedHashSet<RequestId>()
     private var localRuntimeStopRequested = false
     private var migrationEffectiveSelection: DispatchSelection? = null
     private var pendingDispatch: PendingDispatch? = null
@@ -315,6 +383,75 @@ internal class CodexSessionController(
     @Synchronized
     fun snapshot(): CodexClientSnapshot = snapshotLocked()
 
+    /** Passive restart-recovery receipts only; never requests history or starts a model turn. */
+    @Synchronized
+    fun agentChannelRecoveredHistory(): AgentChannelRecoveredHistory? {
+        if (!signedIn || runtimePhase != ClientRuntimePhase.READY || !threadReady || rehydrating) return null
+        return recoveredAgentChannelHistory?.takeIf { it.threadId == reducer.snapshot().currentThreadId }
+    }
+
+    /** Positive content-free receipts only; absence from bounded history never proves unsent. */
+    @Synchronized
+    fun notificationExternalHistory(): NativeNotificationExternalHistory? {
+        if (!signedIn || runtimePhase != ClientRuntimePhase.READY || !threadReady || rehydrating) return null
+        return nativeNotificationHistory?.takeIf { it.threadId == reducer.snapshot().currentThreadId }
+    }
+
+    @Synchronized
+    fun refreshNotificationExternalHistory(expectedThreadId: String): Boolean {
+        if (!signedIn || runtimePhase != ClientRuntimePhase.READY || !threadReady || rehydrating ||
+            reducer.snapshot().currentThreadId != expectedThreadId ||
+            requestPurposes.values.any { it is RequestPurpose.NotificationHistory }) return false
+        val request = AppServerRequests.notificationExternalHistory(requestIds.next(), expectedThreadId,
+            ai.hans.standard.codex.ExtensionResultDecoder { result ->
+                NativeNotificationHistoryPage(NativeNotificationExternalHistoryDecoder.page(expectedThreadId, result))
+            })
+        return transmitAttempt(request, RequestPurpose.NotificationHistory(expectedThreadId),
+            restartOnAmbiguity = false) == RequestTransmissionResult.SENT
+    }
+
+    /** No outbound user item, selection change, visible-input receipt, or steer is created. */
+    @Synchronized
+    fun dispatchNotificationEvent(
+        message: NativeNotificationExternalMessage,
+        expectedThreadId: String,
+        beforeTransport: () -> Boolean,
+        onReceipt: (NativeNotificationDispatchReceipt) -> Unit,
+    ): NativeNotificationDispatchResult {
+        if (runtimePhase != ClientRuntimePhase.READY || !signedIn || !threadReady || rehydrating ||
+            sessionPhase !in setOf(ClientSessionPhase.READY, ClientSessionPhase.BUSY) ||
+            pendingDispatch != null || pendingNativeNotifications.isNotEmpty() || localRuntimeStopRequested ||
+            locallyStoppingDynamicTurn?.let {
+                it.first == expectedThreadId && it.second == (activeTurn?.turnId ?: unknownActiveTurnId)
+            } == true ||
+            (activeTurn?.turnId ?: unknownActiveTurnId)?.let { it in remoteControlledTurnIds } == true ||
+            reducer.snapshot().currentThreadId != expectedThreadId ||
+            (pendingSettingsUpdate != null && activeTurn == null && unknownActiveTurnId == null)) {
+            return NativeNotificationDispatchResult.RejectedBeforeTransport
+        }
+        val id = requestIds.next()
+        val request = AppServerRequests.notificationToolOutputTurnStart(id, expectedThreadId, message.payloadJson)
+        // The source owner durably pins its lease and event identity only after encoding/preflight.
+        if (!runCatching(beforeTransport).getOrElse {
+                protocolDiagnostics("notification_event_source_seal_failed")
+                false
+            }) return NativeNotificationDispatchResult.RejectedBeforeTransport
+        val purpose = RequestPurpose.NotificationToolOutput(expectedThreadId, message.eventId,
+            message.payloadSha256, onReceipt)
+        pendingNativeNotifications[id] = purpose
+        val transmission = transmitAttempt(request, purpose, restartOnAmbiguity = false)
+        if (transmission == RequestTransmissionResult.REJECTED_BEFORE_TRANSPORT) {
+            pendingNativeNotifications.remove(id)
+        }
+        // Ambiguous sends keep correlation for a possible late actual native acceptance.
+        notifyObservers()
+        return when (transmission) {
+            RequestTransmissionResult.SENT -> NativeNotificationDispatchResult.Submitted(expectedThreadId, message.eventId)
+            RequestTransmissionResult.REJECTED_BEFORE_TRANSPORT -> NativeNotificationDispatchResult.RejectedBeforeTransport
+            RequestTransmissionResult.OUTCOME_AMBIGUOUS -> NativeNotificationDispatchResult.TransportOutcomeAmbiguous
+        }
+    }
+
     /** Explicit local Settings actions only; no model tool can enable incoming access. */
     @Synchronized
     fun remoteControlSettingsOpened(): Boolean {
@@ -328,11 +465,13 @@ internal class CodexSessionController(
 
     @Synchronized
     fun remoteControlEnable(): Boolean = remoteControlAction {
-        remoteControl.enableFromLocalUserConsent()
+        if (!desktopRemoteAccessEnabled || preparingRealtime != null || realtime.lease != null || realtimeTurnAccounts.isNotEmpty()) false
+        else remoteControl.enableFromLocalUserConsent()
     }
 
     @Synchronized
     fun remoteControlDisable(): Boolean {
+        interruptRemotePhoneTurns()
         // Withdrawal stops already observed remote work as well as preventing later phone calls.
         val turnId = activeTurn?.turnId ?: unknownActiveTurnId
         if (turnId != null && turnId in remoteControlledTurnIds) interrupt()
@@ -341,7 +480,7 @@ internal class CodexSessionController(
 
     @Synchronized
     fun remoteControlPair(): Boolean = remoteControlAction {
-        remoteControl.startPairingFromLocalUserAction()
+        desktopRemoteAccessEnabled && remoteControl.startPairingFromLocalUserAction()
     }
 
     @Synchronized
@@ -355,6 +494,7 @@ internal class CodexSessionController(
 
     @Synchronized
     fun remoteControlRevoke(clientId: String): Boolean {
+        interruptRemotePhoneTurns()
         // The protocol does not identify the originating desktop on turn/started.
         val turnId = activeTurn?.turnId ?: unknownActiveTurnId
         if (turnId != null && turnId in remoteControlledTurnIds) interrupt()
@@ -364,6 +504,55 @@ internal class CodexSessionController(
     @Synchronized
     fun remoteControlCheckPairing(): Boolean = remoteControlAction { remoteControl.refreshPairingStatus() }
 
+    private fun updateRemotePhoneToolAuthority() {
+        remotePhoneTools?.updateState(ai.hans.standard.remotecontrol.RemotePhoneToolRuntime(
+            generation = generation,
+            allowed = desktopRemoteAccessEnabled && signedIn && runtimePhase == ClientRuntimePhase.READY &&
+                remoteControl.snapshot.mayUsePhoneToolsRemotely && !localRuntimeStopRequested &&
+                !dynamicToolTurnAuthorizationGate.blocksRemoteTools,
+            localThreadId = reducer.snapshot().currentThreadId,
+            notificationRestrictedTurnIds = dynamicToolTurnAuthorizationGate.restrictedTurnIds,
+        ))
+    }
+
+    /** HTTP is only a transport; the same immutable executor and runtime authority own effects. */
+    fun executeRemotePhoneTool(
+        params: ai.hans.standard.codex.DynamicToolCallParams,
+        cancellation: DynamicToolCancellation,
+        onResult: (DynamicToolExecutionResult) -> Unit,
+    ): DynamicToolExecutionHandle {
+        val authority = synchronized(this) {
+            updateRemotePhoneToolAuthority()
+            remotePhoneTools?.takeUnless { dynamicToolTurnAuthorizationGate.blocks(params) }
+        }
+        if (authority == null) {
+            onResult(DynamicToolExecutionResult("{\"error\":\"remote_phone_tools_not_authorized\"}", false))
+            return object : DynamicToolExecutionHandle {
+                override fun cancel() = ai.hans.standard.codex.DynamicToolCancellationDisposition.CANCELLED_BEFORE_EXTERNAL_EFFECT
+            }
+        }
+        return authority.execute(params, DynamicToolCancellation {
+            cancellation.isCancellationRequested() || dynamicToolTurnAuthorizationGate.blocks(params)
+        }, onResult)
+    }
+
+    @Synchronized fun closeRemotePhoneTools() { remotePhoneTools?.close() }
+
+    private fun interruptRemotePhoneTurns() {
+        val turns = remotePhoneTools?.activeTurns.orEmpty()
+        remotePhoneTools?.cancelAll()
+        val epoch = generation ?: return
+        turns.forEach { (threadId, turnId) ->
+            val id = "hans:remote-interrupt:${nextRemoteInterrupt++}"
+            if (remoteInterruptRequests.size >= 64) return@forEach
+            remoteInterruptRequests += id
+            runCatching { transport.sendFrame(epoch, JSONObject().put("id", id)
+                .put("method", "turn/interrupt")
+                .put("params", JSONObject().put("threadId", threadId).put("turnId", turnId))
+                .toString().toByteArray(StandardCharsets.UTF_8)) }
+        }
+    }
+
     private inline fun remoteControlAction(action: () -> Boolean): Boolean {
         if (runtimePhase != ClientRuntimePhase.READY || !signedIn) return false
         val accepted = action()
@@ -372,6 +561,14 @@ internal class CodexSessionController(
     }
 
     private fun remoteControlChanged() {
+        enforceDesktopRemotePolicy()
+        continuePreparedRealtime()
+        if (!desktopRelayIsQuiescent()) {
+            realtime.revokeOrigin()
+            realtimeOriginAccount = null
+            if (realtime.lease != null) invalidateRealtime()
+        }
+        updateRemotePhoneToolAuthority()
         val deadline = remoteControl.snapshot.nextDeadlineAtMillis
         if (deadline != remoteControlDeadlineAt) {
             remoteControlDeadline?.cancel()
@@ -397,12 +594,44 @@ internal class CodexSessionController(
     }
 
     private fun invalidateRemoteControl(clearRemoteTurnIds: Boolean = true) {
+        // Runtime lifecycle callers revoke local voice as well. Ordinary relay disable must
+        // not borrow this path to disconnect a locally initiated voice call.
+        remotePhoneTools?.cancelAll()
+        remoteInterruptRequests.clear()
         remoteControlDeadline?.cancel()
         remoteControlDeadline = null
         remoteControlDeadlineAt = null
         remoteControl.onRuntimeUnavailable()
+        // A later authenticated lifetime needs a fresh receipt even if the native process
+        // generation stayed the same across logout. Ordinary account refreshes do not reset it.
+        remotePolicyProbedGeneration = null
+        remotePolicyDisableAttempted = false
+        updateRemotePhoneToolAuthority()
         if (clearRemoteTurnIds) remoteControlledTurnIds.clear()
         remoteLogoutRequiresRuntimeRestart = false
+    }
+
+    private fun probeDesktopRemotePolicyOnce() {
+        val epoch = generation ?: return
+        if (desktopRemoteAccessEnabled || !signedIn || runtimePhase != ClientRuntimePhase.READY ||
+            remotePolicyProbedGeneration == epoch) return
+        remotePolicyProbedGeneration = epoch
+        remoteControlSettingsOpened()
+    }
+
+    private fun enforceDesktopRemotePolicy() {
+        if (desktopRemoteAccessEnabled || !signedIn || runtimePhase != ClientRuntimePhase.READY) return
+        val remote = remoteControl.snapshot
+        if (remote.generation != generation || !remote.statusConfirmedForCurrentRuntime) return
+        if (remote.isDisabledConfirmed && remote.pendingOperation == null) {
+            remotePolicyDisableAttempted = false
+            return
+        }
+        if (remote.pendingOperation != null || remotePolicyDisableAttempted) return
+        // Native startup normally already proves disabled. Contrary effective state is
+        // explicitly revoked once; failures/timeouts retain the denial without retry loops.
+        remotePolicyDisableAttempted = true
+        remoteControlDisable()
     }
 
     /** Returns true when spontaneous authentication loss has started native relay teardown. */
@@ -464,7 +693,240 @@ internal class CodexSessionController(
     }
 
     @Synchronized
+    fun startRealtime(offerSdp: String, prompt: String, voice: String?, callbacks: CodexRealtimeCallbacks): CodexRealtimeCall? =
+        startRealtime(offerSdp, prompt, voice, CodexRealtimeOptions(), callbacks)
+
+    @Synchronized
+    fun realtimeDiagnostics(): CodexRealtimeDiagnostics = realtime.diagnostics()
+
+    /** Resolves only an earlier local native-handoff binding. The Host additionally rejects
+     * automation before this lookup and again at the actual effect boundary. No model text or
+     * current-session fallback can confer authority to end a newer call. */
+    @Synchronized
+    fun voiceControlSessionIdFor(call: DynamicToolCallParams): String? {
+        val epoch = generation ?: return null
+        if (!voiceControlTurnIsLocal(call.threadId, call.turnId)) return null
+        return realtime.voiceControlSessionIdFor(epoch, call.threadId, call.turnId)
+    }
+
+    private fun voiceControlTurnIsLocal(threadId: String, turnId: String): Boolean {
+        val proof = voiceControlTurnProofs[turnId] ?: return false
+        if (voiceControlProofCapacityExceeded || !signedIn || rehydrating || !threadReady ||
+            runtimePhase != ClientRuntimePhase.READY || localRuntimeStopRequested ||
+            proof.generation != generation || proof.threadId != threadId ||
+            proof.account != reducer.snapshot().account.identity ||
+            reducer.snapshot().currentThreadId != threadId ||
+            (activeTurn?.turnId ?: unknownActiveTurnId) != turnId ||
+            turnId in terminalTurnIds || turnId in remoteControlledTurnIds || turnId in setupTurnIds ||
+            locallyStoppingDynamicTurn == threadId to turnId || !desktopRelayIsQuiescent()) return false
+        return !dynamicToolTurnAuthorizationGate.blocks(
+            DynamicToolCallParams(threadId, turnId, "local-voice-authority", "hans_voice", "end_call", "{}"))
+    }
+
+    private fun rememberLocalVoiceControlTurn(threadId: String, turnId: String) {
+        val epoch = generation ?: return
+        val account = reducer.snapshot().account.identity as? ai.hans.standard.codex.AccountIdentity.ChatGpt ?: return
+        if (!signedIn || rehydrating || turnId in terminalTurnIds || voiceControlProofCapacityExceeded) return
+        if (turnId in voiceControlTurnProofs) return
+        if (voiceControlTurnProofs.size >= 128) {
+            // Do not evict an active first-owner proof and later reconstruct it under a new call.
+            voiceControlProofCapacityExceeded = true
+            return
+        }
+        voiceControlTurnProofs[turnId] = VoiceControlTurnProof(epoch, threadId, account)
+    }
+
+    private data class VoiceControlTurnProof(val generation: Long, val threadId: String,
+        val account: ai.hans.standard.codex.AccountIdentity.ChatGpt)
+
+    @Synchronized
+    fun startRealtime(offerSdp: String, prompt: String, voice: String?, options: CodexRealtimeOptions,
+        callbacks: CodexRealtimeCallbacks): CodexRealtimeCall? {
+        val threadId = reducer.snapshot().currentThreadId
+        val epoch = generation
+        val issue = when {
+            !signedIn || reducer.snapshot().account.identity !is ai.hans.standard.codex.AccountIdentity.ChatGpt ->
+                CodexRealtimeIssue.CHATGPT_LOGIN_REQUIRED
+            epoch == null || runtimePhase != ClientRuntimePhase.READY || !threadReady || rehydrating ||
+                threadId == null || sessionPhase !in setOf(ClientSessionPhase.READY, ClientSessionPhase.BUSY) ->
+                CodexRealtimeIssue.SESSION_NOT_READY
+            realtime.requiresRecovery -> CodexRealtimeIssue.RECOVERY_REQUIRED
+            preparingRealtime != null || realtime.lease != null -> CodexRealtimeIssue.ALREADY_ACTIVE
+            else -> null
+        }
+        if (issue != null) {
+            runCatching { callbacks.onStartRejected() }
+            runCatching { callbacks.onError(issue) }
+            return null
+        }
+        val pending = PreparedRealtime(checkNotNull(epoch), checkNotNull(threadId), offerSdp, prompt, voice,
+            callbacks, options, checkNotNull(reducer.snapshot().account.identity))
+        preparingRealtime = pending
+        realtimeDeadline?.cancel()
+        realtimeDeadline = realtimeDeadlineScheduler.schedule(45_000L) {
+            synchronized(this) {
+                val ownsDeadline = preparingRealtime === pending ||
+                    (pending.lease != null && pending.lease == realtime.lease)
+                if (generation != epoch || !ownsDeadline) return@synchronized
+                if (preparingRealtime === pending) failPreparedRealtime(pending, CodexRealtimeIssue.TIMED_OUT)
+                else pending.lease?.let { if (generation == epoch) realtime.timeout(it) }
+                realtimeDeadline = null
+            }
+        }
+        if (remoteControl.snapshot.generation != epoch || !remoteControl.snapshot.statusConfirmedForCurrentRuntime) {
+            // Read-only capability/state probe, never silently disable or enable desktop access.
+            remoteControlSettingsOpened()
+        } else continuePreparedRealtime()
+        return object : CodexRealtimeCall {
+            override fun stop() {
+                synchronized(this@CodexSessionController) {
+                    if (preparingRealtime === pending) {
+                        preparingRealtime = null
+                        // Cancelled while only the local remote-status preflight existed.
+                        // No native start frame has left; release the reader's native barrier.
+                        runCatching { pending.callbacks.onStartRejected() }
+                    }
+                    pending.lease?.let(realtime::stop)
+                    if (preparingRealtime == null && !realtime.hasPendingStart) {
+                        realtimeDeadline?.cancel()
+                        realtimeDeadline = null
+                    }
+                }
+            }
+            override fun appendAudio(base64: String, sampleRateHz: Int, callback: (Result<Unit>) -> Unit): Boolean =
+                synchronized(this@CodexSessionController) {
+                    val lease = pending.lease ?: return@synchronized false
+                    if (pending.generation != generation || pending.threadId != reducer.snapshot().currentThreadId ||
+                        !signedIn || !desktopRelayIsQuiescent()) return@synchronized false
+                    realtime.appendAudio(lease, pending.generation, pending.threadId, base64, sampleRateHz, callback)
+                }
+            override fun finishUnroutedDictation(text: String, callback: (Result<Unit>) -> Unit): Boolean =
+                synchronized(this@CodexSessionController) {
+                    this@CodexSessionController.finishUnroutedDictation(pending, text, callback)
+                }
+            override fun appendSpeech(text: String, callback: (Result<Unit>) -> Unit): Boolean =
+                synchronized(this@CodexSessionController) {
+                    val lease = pending.lease ?: return@synchronized false
+                    if (pending.generation != generation || pending.threadId != reducer.snapshot().currentThreadId ||
+                        pending.account != reducer.snapshot().account.identity || !signedIn ||
+                        !desktopRelayIsQuiescent()) return@synchronized false
+                    realtime.appendSpeech(lease, pending.generation, pending.threadId, text, callback)
+                }
+        }
+    }
+
+    private fun finishUnroutedDictation(pending: PreparedRealtime, text: String,
+        callback: (Result<Unit>) -> Unit): Boolean {
+        val lease = pending.lease ?: return false
+        if (text.isBlank() || text.length > 32_000 || pending.generation != generation ||
+            pending.threadId != reducer.snapshot().currentThreadId || !signedIn ||
+            pending.account != reducer.snapshot().account.identity || !desktopRelayIsQuiescent() ||
+            realtimeDispatchWaiter != null || runtimePhase != ClientRuntimePhase.READY ||
+            !realtime.claimUnroutedDictation(lease, pending.generation, pending.threadId)) return false
+        val waiter = RealtimeDispatchWaiter(clientMessageIds.nextId(), pending.generation, callback)
+        realtimeDispatchWaiter = waiter
+        waiter.deadline = runCatching {
+            realtimeDrainDeadlineScheduler.schedule(10_000L) {
+                synchronized(this) {
+                    settleRealtimeDispatch(waiter.messageId, Result.failure(CodexRealtimeFailure(CodexRealtimeIssue.TIMED_OUT)))
+                }
+            }
+        }.getOrElse {
+            settleRealtimeDispatch(waiter.messageId, Result.failure(CodexRealtimeFailure(CodexRealtimeIssue.CONNECTION_FAILED)))
+            return true
+        }
+        if (realtimeDispatchWaiter !== waiter) { waiter.deadline?.cancel(); return true }
+        // Keep an existing turn's proven preferences: dictation must never interrupt work
+        // merely because the user's next-turn selection has changed in the meantime.
+        val selection = activeTurn?.effectiveOptions?.let {
+            DispatchSelection(it.model, it.effort, it.serviceTier)
+        }
+        val result = runCatching {
+            dispatchAttempt(listOf(CodexInput.Text(text)), selection, waiter.messageId,
+                allowInterruptForSelection = false, restartOnTransportAmbiguity = false)
+        }.getOrNull()
+        if (result !is CodexDispatchAttemptResult.Accepted) {
+            settleRealtimeDispatch(waiter.messageId,
+                Result.failure(CodexRealtimeFailure(CodexRealtimeIssue.CONNECTION_FAILED)))
+        }
+        return true
+    }
+
+    private fun settleRealtimeDispatch(messageId: String, result: Result<Unit>) {
+        val waiter = realtimeDispatchWaiter?.takeIf { it.messageId == messageId } ?: return
+        realtimeDispatchWaiter = null
+        waiter.deadline?.cancel()
+        val effective = if (waiter.generation == generation) result
+            else Result.failure(CodexRealtimeFailure(CodexRealtimeIssue.SESSION_CHANGED))
+        runCatching { waiter.callback(effective) }
+    }
+
+    private class RealtimeDispatchWaiter(val messageId: String, val generation: Long,
+        val callback: (Result<Unit>) -> Unit) {
+        var deadline: SetupDispatchDeadline? = null
+    }
+
+    private fun desktopRelayIsQuiescent(): Boolean = remoteControl.snapshot.let {
+        it.generation == generation && it.runtimeReady && it.isDisabledConfirmed &&
+            it.pendingOperation != ai.hans.standard.remotecontrol.RemoteControlOperation.ENABLE &&
+            remoteControlledTurnIds.isEmpty() && remotePhoneTools?.hasActiveWork != true
+    }
+
+    private fun continuePreparedRealtime() {
+        val pending = preparingRealtime ?: return
+        if (pending.generation != generation || pending.threadId != reducer.snapshot().currentThreadId || !signedIn) {
+            failPreparedRealtime(pending, CodexRealtimeIssue.SESSION_CHANGED)
+            return
+        }
+        if (remoteControl.snapshot.pendingOperation != null) return
+        if (!desktopRelayIsQuiescent()) {
+            failPreparedRealtime(pending, CodexRealtimeIssue.REMOTE_ACCESS_ACTIVE)
+            return
+        }
+        preparingRealtime = null
+        realtimeOriginAccount = reducer.snapshot().account.identity
+        pending.lease = realtime.start(pending.generation, pending.threadId, pending.offerSdp, pending.prompt,
+            pending.voice, pending.callbacks, pending.options)
+        if (pending.lease != null) realtime.workState(pending.generation, pending.threadId,
+            activeTurn?.turnId ?: unknownActiveTurnId, pendingDispatch != null)
+        if (pending.lease == null) {
+            realtimeDeadline?.cancel()
+            realtimeDeadline = null
+        }
+    }
+
+    private fun failPreparedRealtime(pending: PreparedRealtime, issue: CodexRealtimeIssue) {
+        if (preparingRealtime !== pending) return
+        preparingRealtime = null
+        realtimeDeadline?.cancel()
+        realtimeDeadline = null
+        runCatching { pending.callbacks.onStartRejected() }
+        runCatching { pending.callbacks.onError(issue) }
+    }
+
+    private class PreparedRealtime(
+        val generation: Long, val threadId: String, val offerSdp: String, val prompt: String,
+        val voice: String?, val callbacks: CodexRealtimeCallbacks, val options: CodexRealtimeOptions,
+        val account: ai.hans.standard.codex.AccountIdentity,
+        var lease: Long? = null,
+    )
+
+    private fun invalidateRealtime() {
+        realtimeOriginAccount = null
+        voiceControlTurnProofs.clear()
+        realtimeDispatchWaiter?.let {
+            settleRealtimeDispatch(it.messageId, Result.failure(CodexRealtimeFailure(CodexRealtimeIssue.SESSION_CHANGED)))
+        }
+        preparingRealtime?.let { failPreparedRealtime(it, CodexRealtimeIssue.SESSION_CHANGED) }
+        realtimeDeadline?.cancel()
+        realtimeDeadline = null
+        realtime.invalidate()
+    }
+
+    @Synchronized
     fun stop() {
+        invalidateNativeNotificationRequests()
+        invalidateRealtime()
         invalidateRemoteControl()
         invalidateSelectionContext(invalidateActiveProof = true)
         localRuntimeStopRequested = true
@@ -1047,7 +1509,7 @@ internal class CodexSessionController(
         if (sessionPhase == ClientSessionPhase.FAILED && !threadReady &&
             requestPurposes.values.none {
                 it is RequestPurpose.ThreadStart || it is RequestPurpose.ThreadResume ||
-                    it is RequestPurpose.ThreadMemoryEnable
+                    it is RequestPurpose.ThreadMemoryEnable || it is RequestPurpose.ThreadMaterialize
             }
         ) {
             threadBootstrapRequested = false
@@ -1065,6 +1527,8 @@ internal class CodexSessionController(
     @Synchronized
     fun logout(): Boolean {
         if (runtimePhase != ClientRuntimePhase.READY) return false
+        invalidateNativeNotificationRequests()
+        invalidateRealtime()
         if (requestPurposes.values.any { it is RequestPurpose.Logout }) return true
         remoteLogoutRequiresRuntimeRestart = remoteControl.snapshot.runtimeReady &&
             (!remoteControl.snapshot.isDisabledConfirmed ||
@@ -1097,6 +1561,9 @@ internal class CodexSessionController(
         selection: DispatchSelection? = null,
         clientUserMessageId: String? = null,
         dynamicToolTurnPolicy: DynamicToolTurnPolicy = DynamicToolTurnPolicy.ALLOW,
+        allowInterruptForSelection: Boolean = true,
+        restartOnTransportAmbiguity: Boolean = true,
+        expectedThreadId: String? = null,
     ): CodexDispatchAttemptResult {
         if (
             runtimePhase != ClientRuntimePhase.READY ||
@@ -1113,6 +1580,11 @@ internal class CodexSessionController(
         }
         val threadId = reducer.snapshot().currentThreadId ?: run {
             setProblem(ClientProblemCode.THREAD_RECOVERY, retryable = true)
+            return CodexDispatchAttemptResult.RejectedBeforeTransport
+        }
+        // Safety-critical callers seal their destination before transport. Validate it under
+        // the same controller lock as outbound creation and send, not against a Host snapshot.
+        if (expectedThreadId != null && threadId != expectedThreadId) {
             return CodexDispatchAttemptResult.RejectedBeforeTransport
         }
         val currentCatalog = catalog ?: run {
@@ -1180,6 +1652,7 @@ internal class CodexSessionController(
         pendingDispatch = pending
         pendingSelection = desiredSelection.takeUnless { steerResumedIdentity }
         problem = null
+        performanceEvent(PerformanceEvent.DISPATCH_ACCEPTED)
 
         val plan = try {
             if (steerResumedIdentity) DispatchPlan.Steer(
@@ -1204,6 +1677,10 @@ internal class CodexSessionController(
             setProblem(ClientProblemCode.DISPATCH_REJECTED, retryable = true)
             return CodexDispatchAttemptResult.RejectedBeforeTransport
         }
+        if (plan is DispatchPlan.RequiresNewTurn && !allowInterruptForSelection) {
+            markPendingDispatchFailed(retryable = false)
+            return CodexDispatchAttemptResult.RejectedBeforeTransport
+        }
         dynamicToolTurnAuthorizationGate.prepareDispatch(messageId, dynamicToolTurnPolicy)
         VisibleInputReceipt.fromInputs(threadId, messageId, input)?.let { receipt ->
             runCatching { visibleInputReceipts.record(receipt) }
@@ -1215,11 +1692,13 @@ internal class CodexSessionController(
             is DispatchPlan.StartTurn -> transmitAttempt(
                 plan.request,
                 RequestPurpose.TurnStart(messageId, desiredSelection, !keepsActiveTurnDefaults),
+                restartOnAmbiguity = restartOnTransportAmbiguity,
             )
             is DispatchPlan.Steer -> transmitAttempt(
                 plan.request,
                 RequestPurpose.TurnSteer(messageId, desiredSelection,
                     !keepsActiveTurnDefaults && !steerResumedIdentity),
+                restartOnAmbiguity = restartOnTransportAmbiguity,
             )
             is DispatchPlan.RequiresNewTurn -> {
                 val active = checkNotNull(activeTurn)
@@ -1249,13 +1728,22 @@ internal class CodexSessionController(
             // emitted before the steer response cannot expose setup implementation details.
             (activeTurn?.turnId ?: unknownActiveTurnId)?.let(::rememberSetupTurn)
         }
-        if (transmission != RequestTransmissionResult.SENT && pendingDispatch?.clientMessageId == messageId) {
+        val retainAmbiguousCorrelation = transmission == RequestTransmissionResult.OUTCOME_AMBIGUOUS &&
+            !restartOnTransportAmbiguity
+        if (transmission != RequestTransmissionResult.SENT && pendingDispatch?.clientMessageId == messageId &&
+            !retainAmbiguousCorrelation) {
             markPendingDispatchFailed(
                 retryable = true,
                 releaseDynamicToolAuthority =
                     transmission == RequestTransmissionResult.REJECTED_BEFORE_TRANSPORT,
             )
             setProblem(ClientProblemCode.DISPATCH_REJECTED, retryable = true)
+        }
+        if (retainAmbiguousCorrelation) {
+            // This request may already have started/steered work. Preserve its correlation so
+            // a subsequent turn event cannot be relabelled as Desktop work. Do not resubmit;
+            // a missing receipt remains unresolved until an explicit runtime recovery.
+            setProblem(ClientProblemCode.DISPATCH_AMBIGUOUS, retryable = false)
         }
         if (transmission == RequestTransmissionResult.REJECTED_BEFORE_TRANSPORT) {
             removeVisibleInputReceipt(threadId, messageId)
@@ -1276,21 +1764,81 @@ internal class CodexSessionController(
 
     @Synchronized
     fun interrupt(): Boolean {
-        val identity = activeTurn?.let { it.threadId to it.turnId }
-            ?: identityOnlyActiveTurn?.takeIf { hasSteerableResumedIdentity() }
-            ?: return false
+        val identity = interruptibleTurnIdentity() ?: return false
+        if (pendingInterruptFor(identity)) return true
+        workInterruptRevision += 1
         if (!stopDynamicToolTurnLocally(identity.first, identity.second)) return false
-        if (requestPurposes.values.any { it is RequestPurpose.UserInterrupt }) return true
         val sent = transmit(
             AppServerRequests.turnInterrupt(
                 id = requestIds.next(),
                 threadId = identity.first,
                 turnId = identity.second,
             ),
-            RequestPurpose.UserInterrupt(identity.second),
+            RequestPurpose.UserInterrupt(identity.first, identity.second),
         )
         notifyObservers()
         return sent
+    }
+
+    private fun interruptibleTurnIdentity(): Pair<String, String>? =
+        activeTurn?.let { it.threadId to it.turnId }
+            ?: identityOnlyActiveTurn?.takeIf { hasSteerableResumedIdentity() }
+            // Local cancellation deliberately revokes the resumed turn's steer/tool proof.
+            // Keep a retry of that exact, still-current stop possible after a rejected ACK;
+            // this must not restore permission to steer or execute its tools.
+            ?: locallyStoppingDynamicTurn?.takeIf {
+                it.first == reducer.snapshot().currentThreadId && it.second == unknownActiveTurnId
+            }
+
+    private fun pendingInterruptFor(identity: Pair<String, String>): Boolean =
+        requestPurposes.values.any {
+            it is RequestPurpose.UserInterrupt && it.threadId == identity.first && it.turnId == identity.second
+        }
+
+    private fun retireWorkInterrupt(requestId: RequestId) {
+        workInterruptDeadlines.remove(requestId)?.cancel()
+        correlator.discard(requestId)
+        requestPurposes.remove(requestId)
+        retiredWorkInterruptRequestIds.add(requestId)
+        while (retiredWorkInterruptRequestIds.size > 64) {
+            retiredWorkInterruptRequestIds.remove(retiredWorkInterruptRequestIds.first())
+        }
+    }
+
+    private fun retireWorkInterruptsFor(threadId: String, turnId: String) {
+        requestPurposes.entries.filter {
+            val purpose = it.value
+            purpose is RequestPurpose.UserInterrupt && purpose.threadId == threadId && purpose.turnId == turnId
+        }.map { it.key }.forEach(::retireWorkInterrupt)
+    }
+
+    private fun cancelWorkInterruptDeadlines() {
+        workInterruptDeadlines.values.forEach { it.cancel() }
+        workInterruptDeadlines.clear()
+    }
+
+    /** Only an in-flight interrupt owns this one-shot timer; idle projection never schedules. */
+    private fun armWorkInterruptDeadline(
+        requestId: RequestId,
+        purpose: RequestPurpose,
+        expectedGeneration: Long,
+    ) {
+        if (purpose !is RequestPurpose.UserInterrupt) return
+        workInterruptDeadlines[requestId] = workInterruptDeadlineScheduler.schedule(workInterruptTimeoutMillis) {
+            synchronized(this) {
+                if (generation != expectedGeneration || requestPurposes[requestId] != purpose) return@synchronized
+                retireWorkInterrupt(requestId)
+                if (runtimePhase == ClientRuntimePhase.READY &&
+                    interruptibleTurnIdentity() == purpose.threadId to purpose.turnId
+                ) {
+                    // No ACK is not success: retain the active turn and its local tool revocation.
+                    // The user may retry this exact turn; a late reply to the old request is inert.
+                    setProblem(ClientProblemCode.INTERRUPT_REJECTED, retryable = true)
+                } else {
+                    notifyObservers()
+                }
+            }
+        }
     }
 
     @Synchronized
@@ -1300,6 +1848,10 @@ internal class CodexSessionController(
         eventSequence: Long,
         state: Int,
     ) {
+        if (state in setOf(AppServerSessionContract.STATE_STOPPING, AppServerSessionContract.STATE_STOPPED,
+                AppServerSessionContract.STATE_EXITED, AppServerSessionContract.STATE_FAILED)) {
+            invalidateNativeNotificationRequests()
+        }
         when (state) {
             AppServerSessionContract.STATE_STARTING -> {
                 runtimeSessionActive = generation > 0
@@ -1315,6 +1867,8 @@ internal class CodexSessionController(
             }
             AppServerSessionContract.STATE_READY -> handleReady(generation)
             AppServerSessionContract.STATE_STOPPING -> {
+                invalidateRealtime()
+                cancelWorkInterruptDeadlines()
                 invalidateRemoteControl()
                 invalidateSelectionContext()
                 localRuntimeStopRequested = true
@@ -1328,6 +1882,8 @@ internal class CodexSessionController(
                 }
             }
             AppServerSessionContract.STATE_STOPPED -> {
+                invalidateRealtime()
+                cancelWorkInterruptDeadlines()
                 invalidateRemoteControl()
                 invalidateSelectionContext()
                 runtimeSessionActive = false
@@ -1393,6 +1949,20 @@ internal class CodexSessionController(
         }
         // This optional domain owns its redacted parser/correlation. A missing or rejected
         // remote API must not break authenticated chat or leak pairing secrets to diagnostics.
+        val realtimeOwnedFrame = runCatching {
+            val envelope = JSONObject(raw)
+            envelope.optString("method").startsWith("thread/realtime/") ||
+                (!envelope.has("method") && envelope.optString("id").startsWith("hans_realtime_"))
+        }.getOrDefault(false)
+        if (realtimeOwnedFrame && eventSequence <= lastRealtimeFrameSequence) return null
+        if (realtime.onFrame(generation, raw)) {
+            lastRealtimeFrameSequence = eventSequence
+            if (!realtime.hasPendingStart) {
+                realtimeDeadline?.cancel()
+                realtimeDeadline = null
+            }
+            return null
+        }
         if (remoteControl.onRpcResponse(generation, raw) ||
             remoteControl.onStatusNotification(generation, raw)
         ) {
@@ -1404,6 +1974,26 @@ internal class CodexSessionController(
         var optionalUsageFrame = false
         try {
             val envelope = JsonContract.parseObject(raw, ProtocolLimits.MAX_INBOUND_FRAME_BYTES)
+            if (!envelope.has("method") && envelope.optString("id") in remoteInterruptRequests) {
+                remoteInterruptRequests.remove(envelope.optString("id"))
+                return null
+            }
+            if (!envelope.has("id") && envelope.has("method")) {
+                updateRemotePhoneToolAuthority()
+                val remoteWasActive = remotePhoneTools?.hasActiveWork == true
+                remotePhoneTools?.onEvent(generation, raw)
+                val params = envelope.optJSONObject("params")
+                val eventThreadId = params?.optString("threadId")?.takeIf(String::isNotBlank)
+                    ?: params?.optJSONObject("thread")?.optString("id")?.takeIf(String::isNotBlank)
+                // A second desktop task must never replace or pollute the phone's open chat.
+                // Its authoritative lifecycle is consumed above, independently of the UI reducer.
+                val localThread = reducer.snapshot().currentThreadId
+                if (eventThreadId != null && eventThreadId != localThread &&
+                    (localThread != null || !rehydrating)) {
+                    if (remoteWasActive != (remotePhoneTools?.hasActiveWork == true)) notifyObservers()
+                    return null
+                }
+            }
             optionalUsageFrame = !envelope.has("id") &&
                 envelope.opt("method") == "thread/tokenUsage/updated"
             val serverRequest = if (envelope.has("id") && envelope.has("method")) {
@@ -1603,9 +2193,14 @@ internal class CodexSessionController(
         val activeGeneration = generation
         val currentThreadId = reducer.snapshot().currentThreadId
         val currentTurnId = activeTurn?.turnId ?: unknownActiveTurnId
-        if (call.params.turnId in remoteControlledTurnIds &&
-            (!signedIn || !remoteControl.snapshot.mayUsePhoneToolsRemotely)
-        ) {
+        val voiceAccount = realtimeTurnAccounts[call.params.turnId]
+        if (voiceAccount != null && (!signedIn || reducer.snapshot().account.identity != voiceAccount || !desktopRelayIsQuiescent())) {
+            sendDynamicToolError(call.requestId, -32001, "realtime_account_context_changed")
+            return null
+        }
+        if (call.params.turnId in nativeNotificationUnprovenTurnIds ||
+            (call.params.turnId in remoteControlledTurnIds &&
+                (!desktopRemoteAccessEnabled || !signedIn || !remoteControl.snapshot.mayUsePhoneToolsRemotely))) {
             sendDynamicToolError(call.requestId, -32001, "remote_control_consent_not_active")
             return null
         }
@@ -1715,6 +2310,7 @@ internal class CodexSessionController(
             removePendingDynamicCall(pending)
             completedDynamicResults[pending.identity] = result
             trimCompletedDynamicResults()
+            performanceEvent(PerformanceEvent.TOOL_RESULT_SEND)
             sendDynamicToolResult(pending.requestId, result)
             notifyObservers()
         }
@@ -1876,6 +2472,27 @@ internal class CodexSessionController(
     }
 
     private fun prepareGeneration(newGeneration: Long) {
+        invalidateNativeNotificationRequests()
+        nativeNotificationHistory = null
+        nativeNotificationTurnIds.clear()
+        nativeNotificationUnprovenTurnIds.clear()
+        retiredNativeNotificationRequests.clear()
+        realtimeDispatchWaiter?.let {
+            settleRealtimeDispatch(it.messageId, Result.failure(CodexRealtimeFailure(CodexRealtimeIssue.SESSION_CHANGED)))
+        }
+        realtimeOriginAccount = null
+        realtimeDeadline?.cancel()
+        realtimeDeadline = null
+        realtime.resetGeneration()
+        preparingRealtime?.let { failPreparedRealtime(it, CodexRealtimeIssue.SESSION_CHANGED) }
+        realtimeTurnAccounts.clear()
+        voiceControlTurnProofs.clear()
+        voiceControlProofCapacityExceeded = false
+        lastRealtimeFrameSequence = 0L
+        remotePolicyProbedGeneration = null
+        remotePolicyDisableAttempted = false
+        cancelWorkInterruptDeadlines()
+        retiredWorkInterruptRequestIds.clear()
         invalidateRemoteControl()
         if (generation != null && newGeneration <= generation!!) {
             throw CrossCorrelationException("Runtime generation did not advance")
@@ -1883,6 +2500,7 @@ internal class CodexSessionController(
         invalidateSelectionContext()
         retiredSettingsRequestIds.clear()
         lastReceivedFrameSequence = 0L
+        retiredFreshBootstrapRequestIds.clear()
         cancelPluginRecoveryEpoch()
         if (generation != null) {
             abortRuntimePluginTransactions()
@@ -1893,6 +2511,12 @@ internal class CodexSessionController(
         dynamicToolTurnAuthorizationGate.resetGeneration()
         reducer.clearTokenUsageForRuntimeChange()
         generation = newGeneration
+        performanceObservedTurnId = null
+        performanceLastTerminalTurnId = null
+        performanceTerminalTurnIds.clear()
+        performanceContextThreadId = null
+        performanceUserWaitReported = false
+        performanceAssistantOutputObserved = false
         localRuntimeStopRequested = false
         correlator = ResponseCorrelator()
         requestPurposes.clear()
@@ -1910,6 +2534,8 @@ internal class CodexSessionController(
         migrationEffectiveSelection = null
         terminalTurnIds.clear()
         terminalTurns.clear()
+        recoveredAgentChannelHistory = null
+        agentChannelHistoryRevision += 1
         setupTurnIds.clear()
         deviceCodeLogin = null
         pluginBootstrappedGeneration = null
@@ -1927,22 +2553,54 @@ internal class CodexSessionController(
 
     private fun handleResponse(raw: String, envelope: JSONObject) {
         val anticipatedId = responseRequestId(envelope)
-        if (anticipatedId in retiredSettingsRequestIds) return
+        if (anticipatedId in retiredNativeNotificationRequests) return
+        if (anticipatedId in retiredFreshBootstrapRequestIds) return
+        if (anticipatedId in retiredSettingsRequestIds || anticipatedId in retiredWorkInterruptRequestIds) return
         val anticipatedPurpose = anticipatedId?.let(requestPurposes::get)
         try {
             val response = correlator.accept(raw)
             val purpose = requestPurposes.remove(response.id)
                 ?: throw CrossCorrelationException("Response has no controller purpose")
+            if (purpose.isFreshThreadBootstrap()) retireFreshBootstrapRequest(response.id)
+            if (purpose is RequestPurpose.UserInterrupt) retireWorkInterrupt(response.id)
+            nativeNotificationDeadlines.remove(response.id)?.cancel()
             cancelSetupDispatchDeadline(response.id)
             if (purpose == RequestPurpose.AccountRead && response is CorrelatedResponse.Success &&
                 (response.result as AccountReadResult).account != reducer.snapshot().account.identity
-            ) invalidateSelectionContext(invalidateActiveProof = true)
+            ) {
+                invalidateRealtime()
+                invalidateSelectionContext(invalidateActiveProof = true)
+            }
             reducer.apply(response)
             when (response) {
                 is CorrelatedResponse.Success -> handleSuccess(purpose, response.result)
                 is CorrelatedResponse.Failure -> handleFailure(purpose, response.error)
             }
         } catch (error: Exception) {
+            if (anticipatedPurpose is RequestPurpose.NotificationToolOutput ||
+                anticipatedPurpose is RequestPurpose.NotificationHistory) {
+                anticipatedId?.let {
+                    correlator.discard(it); requestPurposes.remove(it)
+                    nativeNotificationDeadlines.remove(it)?.cancel()
+                    retireNativeNotificationRequest(it)
+                }
+                if (anticipatedPurpose is RequestPurpose.NotificationToolOutput) {
+                    protocolDiagnostics("notification_event_receipt_ambiguous")
+                    settleNativeNotification(anticipatedPurpose, NativeNotificationDispatchReceipt.OutcomeAmbiguous)
+                } else protocolDiagnostics("notification_event_history_invalid")
+                return
+            }
+            if (anticipatedPurpose?.isFreshThreadBootstrap() == true) {
+                anticipatedId?.let {
+                    retireFreshBootstrapRequest(it)
+                    correlator.discard(it)
+                    requestPurposes.remove(it)
+                }
+                recordThreadBootstrapFailure(anticipatedPurpose,
+                    BootstrapFailureStage.INVALID_RECEIPT, local = error)
+                failSession(ClientProblemCode.THREAD_RECOVERY, retryable = true)
+                return
+            }
             if (anticipatedPurpose is RequestPurpose.SettingsUpdate) {
                 retireSettingsRequest(anticipatedPurpose.requestId)
                 if (pendingSettingsUpdate?.requestId == anticipatedPurpose.requestId) {
@@ -1974,8 +2632,61 @@ internal class CodexSessionController(
         }
     }
 
+    private fun retireFreshBootstrapRequest(id: RequestId) {
+        retiredFreshBootstrapRequestIds.add(id)
+        while (retiredFreshBootstrapRequestIds.size > ProtocolLimits.MAX_PENDING_REQUESTS) {
+            retiredFreshBootstrapRequestIds.remove(retiredFreshBootstrapRequestIds.first())
+        }
+    }
+
+    private fun RequestPurpose.isFreshThreadBootstrap(): Boolean =
+        this is RequestPurpose.ThreadStart || this is RequestPurpose.ThreadMaterialize ||
+            (this is RequestPurpose.ThreadMemoryEnable && freshProof != null)
+
     private fun handleSuccess(purpose: RequestPurpose, result: AppServerResult) {
         when (purpose) {
+            is RequestPurpose.NotificationToolOutput -> {
+                val accepted = extensionPayload<NotificationToolOutputTurnResult>(result)
+                check(accepted.threadId == purpose.threadId)
+                if (accepted.turnId !in remoteControlledTurnIds) {
+                    nativeNotificationTurnIds.add(accepted.turnId)
+                    nativeNotificationUnprovenTurnIds.remove(accepted.turnId)
+                }
+                while (nativeNotificationTurnIds.size > 128) {
+                    nativeNotificationTurnIds.remove(nativeNotificationTurnIds.first())
+                }
+                recordNativeNotificationReceipt(NativeNotificationExternalReceipt(purpose.eventId,
+                    purpose.payloadSha256, accepted.threadId, accepted.turnId))
+                if (accepted.status == TurnStatus.IN_PROGRESS && accepted.turnId !in terminalTurnIds) {
+                    if (activeTurn == null && unknownActiveTurnId in setOf(null, accepted.turnId)) {
+                        // Omitted overrides preserve native thread defaults but prove identity only.
+                        activeTurn = null
+                        unknownActiveTurnId = accepted.turnId
+                        identityOnlyActiveTurn = accepted.threadId to accepted.turnId
+                    }
+                } else if (accepted.status != TurnStatus.IN_PROGRESS) {
+                    rememberTerminalTurn(accepted.threadId, accepted.turnId, accepted.status)
+                    if (activeTurn?.turnId == accepted.turnId) activeTurn = null
+                    if (unknownActiveTurnId == accepted.turnId) unknownActiveTurnId = null
+                }
+                updateSessionPhase()
+                settleNativeNotification(purpose, NativeNotificationDispatchReceipt.Accepted(
+                    accepted.threadId, accepted.turnId))
+            }
+            is RequestPurpose.NotificationHistory -> {
+                val page = extensionPayload<NativeNotificationHistoryPage>(result)
+                if (reducer.snapshot().currentThreadId != purpose.threadId) return
+                if (page.history == null) {
+                    protocolDiagnostics("notification_event_history_invalid")
+                } else {
+                    val previous = nativeNotificationHistory?.takeIf { it.threadId == purpose.threadId }
+                    nativeNotificationHistory = page.history.copy(
+                        receipts = (previous?.receipts.orEmpty() + page.history.receipts).distinct().takeLast(256),
+                        turnStatuses = (previous?.turnStatuses.orEmpty() + page.history.turnStatuses).entries.toList()
+                            .takeLast(256).associate { it.key to it.value },
+                    )
+                }
+            }
             is RequestPurpose.SettingsUpdate -> {
                 check(result === ThreadSettingsUpdateResult)
                 retireSettingsRequest(purpose.requestId)
@@ -1996,6 +2707,7 @@ internal class CodexSessionController(
                 modelCatalogRefreshAfterAccountRead = false
                 if (signedIn) {
                     deviceCodeLogin = null
+                    probeDesktopRemotePolicyOnce()
                     if (refreshModels) refreshModelCatalogAfterAuthentication()
                     maybeBootstrapThread()
                 } else {
@@ -2051,6 +2763,9 @@ internal class CodexSessionController(
             is RequestPurpose.ThreadResume -> {
                 invalidateSelectionContext()
                 val resumed = result as ThreadResumeResult
+                // Raw protocol IDs, not filtered visible text, establish restart correlation.
+                recoveredAgentChannelHistory = agentChannelRecoveredHistoryFromResume(resumed)
+                agentChannelHistoryRevision += 1
                 resumedThreadId = resumed.thread.id
                 recoveredTimeline = hydrateRecoveredTimeline(
                     threadId = resumed.thread.id,
@@ -2118,16 +2833,17 @@ internal class CodexSessionController(
                 lastThreadSettingsEventSequence = lastReceivedFrameSequence
                 requestPersonalThreadMemoryEnable(resumed.thread.id)
             }
-            RequestPurpose.ThreadStart -> {
+            is RequestPurpose.ThreadStart -> {
                 invalidateSelectionContext(invalidateActiveProof = true)
                 val started = result as ThreadStartResult
+                if (!freshBootstrapContextMatches(purpose.proof, started.threadId)) {
+                    failSession(ClientProblemCode.THREAD_RECOVERY, retryable = true)
+                    return
+                }
                 resumedThreadId = null
                 recoveredTimeline = emptyList()
-                try {
-                    sessionStore.saveThreadId(started.threadId)
-                } catch (_: Exception) {
-                    setProblem(ClientProblemCode.LOCAL_PERSISTENCE, retryable = true)
-                }
+                recoveredAgentChannelHistory = null
+                agentChannelHistoryRevision += 1
                 migrationEffectiveSelection = null
                 provenThreadSettingsSelection = started.effectiveEffort?.let { effort ->
                     runCatching {
@@ -2136,7 +2852,7 @@ internal class CodexSessionController(
                     }.getOrNull()
                 }
                 lastThreadSettingsEventSequence = lastReceivedFrameSequence
-                requestPersonalThreadMemoryEnable(started.threadId)
+                requestPersonalThreadMemoryEnable(started.threadId, purpose.proof)
             }
             is RequestPurpose.ThreadMemoryEnable -> {
                 check(result === ThreadMemoryModeSetResult)
@@ -2146,6 +2862,41 @@ internal class CodexSessionController(
                     )
                 }
                 memoryModeEnabledThreadId = purpose.threadId
+                if (purpose.freshProof != null) {
+                    if (!freshBootstrapContextMatches(purpose.freshProof, purpose.threadId)) {
+                        failSession(ClientProblemCode.THREAD_RECOVERY, retryable = true)
+                        return
+                    }
+                    transmitThreadBootstrap(RequestPurpose.ThreadMaterialize(purpose.threadId, purpose.freshProof)) {
+                        AppServerRequests.materializeFreshThread(requestIds.next(), purpose.threadId)
+                    }
+                    return
+                }
+                threadReady = true
+                finishRehydrationIfReady()
+            }
+            is RequestPurpose.ThreadMaterialize -> {
+                val receipt = result as ThreadMaterializeResult
+                if (receipt.threadId != purpose.threadId ||
+                    !freshBootstrapContextMatches(purpose.proof, purpose.threadId) ||
+                    memoryModeEnabledThreadId != purpose.threadId ||
+                    bufferedEvents.any { buffered -> when (val event = buffered.event) {
+                        is ServerEvent.TurnStarted -> event.threadId == purpose.threadId
+                        is ServerEvent.TurnCompleted -> event.threadId == purpose.threadId
+                        else -> false
+                    } }
+                ) {
+                    throw CrossCorrelationException("Fresh thread materialization lost its bootstrap context")
+                }
+                // Never publish an unmaterialized ID, nor overwrite a pointer changed by a
+                // separate local recovery action while this storage barrier was in flight.
+                try {
+                    check(sessionStore.readThreadId() == null) { "Selected thread changed during bootstrap" }
+                    sessionStore.saveThreadId(receipt.threadId)
+                } catch (_: Exception) {
+                    failSession(ClientProblemCode.LOCAL_PERSISTENCE, retryable = true)
+                    return
+                }
                 threadReady = true
                 finishRehydrationIfReady()
             }
@@ -2167,6 +2918,11 @@ internal class CodexSessionController(
                 }
                 unknownActiveTurnId = null
                 identityOnlyActiveTurn = null
+                if (started.status == TurnStatus.IN_PROGRESS && started.turnId !in terminalTurnIds) {
+                    performanceTurnStarted(started.turnId)
+                } else if (started.status != TurnStatus.IN_PROGRESS) {
+                    performanceTurnCompleted(started.turnId)
+                }
                 markDispatchSent(purpose.messageId, purpose.selection, started.turnId, purpose.confirmsDefaultSelection)
                 if (started.status != TurnStatus.IN_PROGRESS) {
                     dynamicToolTurnAuthorizationGate.completeTurn(started.threadId, started.turnId)
@@ -2203,16 +2959,19 @@ internal class CodexSessionController(
                 )
                 if (activeTurn?.turnId == purpose.interruptedTurnId) activeTurn = null
                 unknownActiveTurnId = null
+                performanceTurnCompleted(purpose.interruptedTurnId)
                 startPendingDispatchAfterBoundary(purpose.messageId)
             }
             is RequestPurpose.UserInterrupt -> {
                 result as TurnInterruptResult
-                abandonPendingDynamicTurn(reducer.snapshot().currentThreadId, purpose.turnId)
+                abandonPendingDynamicTurn(purpose.threadId, purpose.turnId)
                 if (activeTurn?.turnId == purpose.turnId) activeTurn = null
                 if (unknownActiveTurnId == purpose.turnId) unknownActiveTurnId = null
                 if (identityOnlyActiveTurn?.second == purpose.turnId) identityOnlyActiveTurn = null
+                performanceTurnCompleted(purpose.turnId)
                 if (retainedActiveTurn?.turnId == purpose.turnId) retainedActiveTurn = null
                 migrationEffectiveSelection = provenThreadSettingsSelection
+                if (problem?.code == ClientProblemCode.INTERRUPT_REJECTED) problem = null
                 updateSessionPhase()
             }
             RequestPurpose.BundledMarketplaceAdd -> {
@@ -2393,6 +3152,11 @@ internal class CodexSessionController(
 
     private fun handleFailure(purpose: RequestPurpose, error: RemoteError) {
         when (purpose) {
+            is RequestPurpose.NotificationToolOutput -> {
+                protocolDiagnostics("notification_event_runtime_rejected")
+                settleNativeNotification(purpose, NativeNotificationDispatchReceipt.RejectedByRuntime)
+            }
+            is RequestPurpose.NotificationHistory -> protocolDiagnostics("notification_event_history_rejected")
             is RequestPurpose.SettingsUpdate -> {
                 retireSettingsRequest(purpose.requestId)
                 if (pendingSettingsUpdate?.requestId == purpose.requestId) {
@@ -2407,7 +3171,9 @@ internal class CodexSessionController(
                 recordThreadBootstrapFailure(purpose, BootstrapFailureStage.REMOTE_REJECTION, error)
                 failSession(ClientProblemCode.THREAD_RECOVERY, retryable = true)
             }
-            is RequestPurpose.ThreadMemoryEnable -> {
+            is RequestPurpose.ThreadMemoryEnable,
+            is RequestPurpose.ThreadMaterialize,
+            -> {
                 recordThreadBootstrapFailure(purpose, BootstrapFailureStage.REMOTE_REJECTION, error)
                 failSession(ClientProblemCode.THREAD_RECOVERY, retryable = true)
             }
@@ -2448,12 +3214,12 @@ internal class CodexSessionController(
                     failSession(ClientProblemCode.MODEL_CATALOG, retryable = true)
                 }
             }
-            RequestPurpose.ThreadStart -> {
+            is RequestPurpose.ThreadStart -> {
                 recordThreadBootstrapFailure(purpose, BootstrapFailureStage.REMOTE_REJECTION, error)
                 failSession(ClientProblemCode.THREAD_RECOVERY, retryable = true)
             }
             is RequestPurpose.UserInterrupt -> setProblem(
-                ClientProblemCode.DISPATCH_REJECTED,
+                ClientProblemCode.INTERRUPT_REJECTED,
                 retryable = true,
             )
             RequestPurpose.BundledMarketplaceAdd -> {
@@ -2552,6 +3318,17 @@ internal class CodexSessionController(
     }
 
     private fun handleEvent(eventSequence: Long, raw: String, frameBytes: Int): Boolean {
+        // Observe only a native item envelope, never assistant/tool text imitating JSON.
+        val envelope = JSONObject(raw)
+        if (envelope.opt("method") in setOf("item/started", "item/completed")) {
+            val params = envelope.optJSONObject("params")
+            val threadId = params?.opt("threadId") as? String
+            val turnId = params?.opt("turnId") as? String
+            val item = params?.optJSONObject("item")
+            if (threadId != null && threadId == reducer.snapshot().currentThreadId && turnId != null && item != null) {
+                NativeNotificationExternalHistoryDecoder.item(threadId, turnId, item)?.let(::recordNativeNotificationReceipt)
+            }
+        }
         val decoded = AppServerEventDecoder.decode(raw)
         if (decoded is ServerEvent.ThreadTokenUsageUpdated) {
             // Startup measurements are superseded by the next correlated update. They may not
@@ -2628,6 +3405,22 @@ internal class CodexSessionController(
     private fun applyEvent(eventSequence: Long, event: ServerEvent) {
         val activeGeneration = checkNotNull(generation)
         val previousThreadId = reducer.snapshot().currentThreadId
+        val eventThreadId = when (event) {
+            is ServerEvent.ThreadStarted -> event.thread.id
+            is ServerEvent.ThreadStatusChanged -> event.threadId
+            is ServerEvent.ThreadSettingsUpdated -> event.threadId
+            is ServerEvent.ThreadTokenUsageUpdated -> event.threadId
+            is ServerEvent.TurnStarted -> event.threadId
+            is ServerEvent.TurnCompleted -> event.threadId
+            is ServerEvent.ItemStarted -> event.threadId
+            is ServerEvent.ItemCompleted -> event.threadId
+            is ServerEvent.AgentMessageDelta -> event.threadId
+            is ServerEvent.CommandOutputDelta -> event.threadId
+            else -> null
+        }
+        // Recheck buffered events after restoration: they may have arrived before the local
+        // thread was known. Foreign lifecycle already went to its independent authority.
+        if (eventThreadId != null && eventThreadId != previousThreadId) return
         val previousAuthMode = reducer.snapshot().account.authMode
         val pendingLoginId = reducer.snapshot().account.pendingLoginId
         if (event is ServerEvent.AccountLoginCompleted &&
@@ -2662,13 +3455,78 @@ internal class CodexSessionController(
             )
             else -> Unit
         }
-        reducer.apply(
+        val beforePerformanceThread = if (performanceObserver !== PerformanceSessionObserver.NONE &&
+            (event is ServerEvent.ItemStarted || event is ServerEvent.ItemCompleted)
+        ) {
+            reducer.snapshot().threads.singleOrNull { it.threadId == previousThreadId }
+        } else null
+        val performanceReduction = reducer.apply(
             DeliveredServerEvent(
                 cursor = DeliveryCursor(activeGeneration, eventSequence),
                 event = event,
             ),
         )
+        val performanceEventApplied = performanceReduction.disposition == DeliveryDisposition.APPLIED &&
+            !replayingPerformanceEvents && !rehydrating
+        if (performanceEventApplied) {
+            when (event) {
+                is ServerEvent.TurnStarted -> {
+                    val projected = performanceReduction.snapshot.threads
+                        .singleOrNull { it.threadId == previousThreadId }?.currentTurn
+                    if (projected?.turnId == event.turn.id && projected.status == TurnStatus.IN_PROGRESS) {
+                        performanceTurnStarted(event.turn.id)
+                    }
+                }
+                is ServerEvent.TurnCompleted -> if (event.turn.status != TurnStatus.IN_PROGRESS) {
+                    performanceTurnCompleted(event.turn.id)
+                }
+                is ServerEvent.ThreadStatusChanged -> {
+                    performanceUserWaitReported = event.status.activeFlags.isNotEmpty() &&
+                        event.status.status == ai.hans.standard.codex.ThreadRuntimeStatus.ACTIVE
+                }
+                else -> Unit
+            }
+            val itemId = when (event) {
+                is ServerEvent.ItemStarted -> event.item.id
+                is ServerEvent.ItemCompleted -> event.item.id
+                else -> null
+            }
+            val itemTurnId = when (event) {
+                is ServerEvent.ItemStarted -> event.turnId
+                is ServerEvent.ItemCompleted -> event.turnId
+                else -> null
+            }
+            if (itemId != null && itemTurnId == performanceObservedTurnId
+            ) {
+                val before = beforePerformanceThread?.tools?.singleOrNull { it.itemId == itemId }
+                val after = performanceReduction.snapshot.threads
+                    .singleOrNull { it.threadId == previousThreadId }?.tools
+                    ?.singleOrNull { it.itemId == itemId }
+                if (event is ServerEvent.ItemStarted && before == null && after?.complete == false) {
+                    performanceEvent(PerformanceEvent.SERVER_ITEM_STARTED)
+                } else if (event is ServerEvent.ItemCompleted && before?.complete == false && after?.complete == true) {
+                    performanceEvent(PerformanceEvent.SERVER_ITEM_COMPLETED)
+                }
+            }
+            val outputTurn = when (event) {
+                is ServerEvent.AgentMessageDelta -> event.turnId.takeIf { event.delta.isNotEmpty() }
+                is ServerEvent.ItemStarted -> event.turnId.takeIf {
+                    (event.item as? ai.hans.standard.codex.StreamItem.AgentMessage)?.text?.isNotEmpty() == true
+                }
+                is ServerEvent.ItemCompleted -> event.turnId.takeIf {
+                    (event.item as? ai.hans.standard.codex.StreamItem.AgentMessage)?.text?.isNotEmpty() == true
+                }
+                else -> null
+            }
+            if (!performanceAssistantOutputObserved && outputTurn != null &&
+                outputTurn == performanceObservedTurnId
+            ) {
+                performanceAssistantOutputObserved = true
+                performanceEvent(PerformanceEvent.FIRST_ASSISTANT_OUTPUT)
+            }
+        }
         if (previousThreadId != reducer.snapshot().currentThreadId) {
+            invalidateRealtime()
             invalidateSelectionContext(invalidateActiveProof = true)
         }
         when (event) {
@@ -2687,6 +3545,7 @@ internal class CodexSessionController(
             }
             is ServerEvent.AccountUpdated -> {
                 if (event.authMode != previousAuthMode || (event.authMode != null) != signedIn) {
+                    invalidateRealtime()
                     invalidateSelectionContext(invalidateActiveProof = true)
                 }
                 val wasSignedIn = signedIn
@@ -2721,14 +3580,28 @@ internal class CodexSessionController(
                     return
                 }
                 val pending = pendingDispatch
+                val nativeNotificationOrigin = event.turn.id in nativeNotificationTurnIds
                 if (pending == null && activeTurn == null &&
                     event.threadId == reducer.snapshot().currentThreadId &&
                     identityOnlyActiveTurn != event.threadId to event.turn.id
                 ) {
-                    remoteControlledTurnIds.add(event.turn.id)
+                    val localVoiceTurn = performanceEventApplied && signedIn && realtimeOriginAccount != null &&
+                        realtimeOriginAccount == reducer.snapshot().account.identity &&
+                        desktopRelayIsQuiescent() &&
+                        realtime.claimTurnOrigin(generation, event.threadId, event.turn.id)
+                    if (localVoiceTurn) {
+                        rememberLocalVoiceControlTurn(event.threadId, event.turn.id)
+                        reducer.snapshot().account.identity?.let { realtimeTurnAccounts[event.turn.id] = it }
+                        while (realtimeTurnAccounts.size > 128) realtimeTurnAccounts.remove(realtimeTurnAccounts.keys.first())
+                    } else if (!nativeNotificationOrigin) {
+                        if (pendingNativeNotifications.values.any { it.threadId == event.threadId }) {
+                            // Shared thread/timing is not origin proof. No tools before an exact receipt.
+                            nativeNotificationUnprovenTurnIds.add(event.turn.id)
+                        } else remoteControlledTurnIds.add(event.turn.id)
+                    }
                     // The event proves identity, not model/effort. Local speech may steer this
                     // same observed turn without inventing effective dispatch preferences.
-                    if (remoteControl.snapshot.mayUsePhoneToolsRemotely) {
+                    if (localVoiceTurn || nativeNotificationOrigin || remoteControl.snapshot.mayUsePhoneToolsRemotely) {
                         identityOnlyActiveTurn = event.threadId to event.turn.id
                     }
                     while (remoteControlledTurnIds.size > 128) {
@@ -2741,6 +3614,9 @@ internal class CodexSessionController(
                         event.threadId,
                         event.turn.id,
                     )
+                    if (performanceEventApplied && !it.clientMessageId.startsWith(SETUP_CLIENT_MESSAGE_PREFIX)) {
+                        rememberLocalVoiceControlTurn(event.threadId, event.turn.id)
+                    }
                 }
                 if (pending?.clientMessageId?.startsWith(SETUP_CLIENT_MESSAGE_PREFIX) == true) {
                     // App Server may emit turn/started and the first command item before replying
@@ -2777,6 +3653,9 @@ internal class CodexSessionController(
                 updateSessionPhase()
             }
             is ServerEvent.TurnCompleted -> {
+                realtime.completeVoiceTurn(generation, event.threadId, event.turn.id)
+                voiceControlTurnProofs.remove(event.turn.id)
+                realtimeTurnAccounts.remove(event.turn.id)
                 remoteControlledTurnIds.remove(event.turn.id)
                 if (unknownActiveTurnId == event.turn.id) {
                     migrationEffectiveSelection = provenThreadSettingsSelection
@@ -2795,6 +3674,14 @@ internal class CodexSessionController(
                 // marketplace helper rather than Hans's own plugin/install button. Force a
                 // bounded post-turn refresh so the launcher reflects that change automatically.
                 refreshCapabilitiesAfterMutation()
+                if (performanceEventApplied) realtime.workState(generation, event.threadId,
+                    activeTurn?.turnId ?: unknownActiveTurnId, pendingDispatch != null,
+                    ai.hans.standard.voice.realtime.CodexTaskVoiceTerminal(event.turn.id,
+                        when (event.turn.status) {
+                            TurnStatus.COMPLETED -> ai.hans.standard.voice.realtime.CodexTaskVoiceWorkOutcome.COMPLETED
+                            TurnStatus.INTERRUPTED -> ai.hans.standard.voice.realtime.CodexTaskVoiceWorkOutcome.INTERRUPTED
+                            else -> ai.hans.standard.voice.realtime.CodexTaskVoiceWorkOutcome.FAILED
+                        }))
             }
             ServerEvent.SkillsChanged -> {
                 noteSkillsChanged()
@@ -2814,7 +3701,23 @@ internal class CodexSessionController(
             generation?.let(::bootstrapPluginDomain)
             return
         }
-        if (threadBootstrapRequested) return
+        if (threadBootstrapRequested) {
+            // Successful same-account reauthentication restores the existing bootstrap's
+            // phase, not its request. In particular, do not create a second fresh thread.
+            // A changed account cannot adopt the old fresh-thread proof.
+            if (sessionPhase == ClientSessionPhase.LOGIN_PENDING && requestPurposes.values.any { purpose ->
+                when (purpose) {
+                    is RequestPurpose.ThreadStart -> freshBootstrapAccountMatches(purpose.proof)
+                    is RequestPurpose.ThreadMaterialize -> freshBootstrapAccountMatches(purpose.proof)
+                    is RequestPurpose.ThreadMemoryEnable -> purpose.freshProof?.let(::freshBootstrapAccountMatches) ?: true
+                    is RequestPurpose.ThreadResume -> true
+                    else -> false
+                }
+            }) {
+                sessionPhase = ClientSessionPhase.RECOVERING_THREAD
+            }
+            return
+        }
         threadBootstrapRequested = true
         sessionPhase = ClientSessionPhase.RECOVERING_THREAD
         val storedThread = try {
@@ -2838,6 +3741,7 @@ internal class CodexSessionController(
                     threadId = storedThread,
                     excludeTurns = true,
                     developerInstructions = instructions,
+                    disablePhoneToolsMcp = phoneToolsMcpConfigured,
                 )
             }
         }
@@ -2863,12 +3767,17 @@ internal class CodexSessionController(
             failSession(ClientProblemCode.LOCAL_PERSISTENCE, retryable = true)
             return
         }
-        transmitThreadBootstrap(RequestPurpose.ThreadStart) {
+        val proof = FreshThreadBootstrapProof(
+            generation = generation ?: return,
+            account = reducer.snapshot().account.identity ?: return,
+        )
+        transmitThreadBootstrap(RequestPurpose.ThreadStart(proof)) {
             AppServerRequests.threadStart(
                 id = requestIds.next(),
                 options = options,
                 developerInstructions = instructions,
                 dynamicTools = dynamicToolExecutor?.specs ?: emptyList(),
+                disablePhoneToolsMcp = phoneToolsMcpConfigured,
             )
         }
     }
@@ -2878,15 +3787,29 @@ internal class CodexSessionController(
      * runtime intentionally preserves an existing thread's stored memory mode on resume, so an
      * acknowledged per-thread update is the in-place migration receipt for upgraded Hans users.
      */
-    private fun requestPersonalThreadMemoryEnable(threadId: String) {
+    private fun requestPersonalThreadMemoryEnable(
+        threadId: String,
+        freshProof: FreshThreadBootstrapProof? = null,
+    ) {
         sessionPhase = ClientSessionPhase.RECOVERING_THREAD
-        transmitThreadBootstrap(RequestPurpose.ThreadMemoryEnable(threadId)) {
+        transmitThreadBootstrap(RequestPurpose.ThreadMemoryEnable(threadId, freshProof)) {
             AppServerRequests.threadMemoryModeSetEnabled(
                 id = requestIds.next(),
                 threadId = threadId,
             )
         }
     }
+
+    private data class FreshThreadBootstrapProof(val generation: Long, val account: AccountIdentity)
+
+    private fun freshBootstrapAccountMatches(proof: FreshThreadBootstrapProof): Boolean =
+        proof.generation == generation && proof.account == reducer.snapshot().account.identity &&
+            signedIn && accountReadComplete
+
+    private fun freshBootstrapContextMatches(proof: FreshThreadBootstrapProof, threadId: String): Boolean =
+        freshBootstrapAccountMatches(proof) && runtimePhase == ClientRuntimePhase.READY &&
+            sessionPhase == ClientSessionPhase.RECOVERING_THREAD && !threadReady &&
+            reducer.snapshot().currentThreadId == threadId
 
     /** Keep local request rejection separate from remote rejection and ambiguous transport. */
     private fun transmitThreadBootstrap(
@@ -2901,8 +3824,13 @@ internal class CodexSessionController(
             return
         }
         try {
-            if (transmitAttempt(request, purpose) == RequestTransmissionResult.REJECTED_BEFORE_TRANSPORT) {
+            val freshBootstrap = purpose.isFreshThreadBootstrap()
+            val sent = transmitAttempt(request, purpose, restartOnAmbiguity = !freshBootstrap)
+            if (sent == RequestTransmissionResult.REJECTED_BEFORE_TRANSPORT) {
                 recordThreadBootstrapFailure(purpose, BootstrapFailureStage.TRANSPORT_UNAVAILABLE)
+                failSession(ClientProblemCode.THREAD_RECOVERY, retryable = true)
+            } else if (freshBootstrap && sent == RequestTransmissionResult.OUTCOME_AMBIGUOUS) {
+                // Do not automatically create another thread after an ambiguous fresh bootstrap.
                 failSession(ClientProblemCode.THREAD_RECOVERY, retryable = true)
             }
         } catch (error: Exception) {
@@ -2919,9 +3847,10 @@ internal class CodexSessionController(
         local: Exception? = null,
     ) {
         val boundary = when (purpose) {
-            RequestPurpose.ThreadStart -> "thread_start"
+            is RequestPurpose.ThreadStart -> "thread_start"
             is RequestPurpose.ThreadResume -> "thread_resume"
             is RequestPurpose.ThreadMemoryEnable -> "thread_memory_enable"
+            is RequestPurpose.ThreadMaterialize -> "thread_materialize"
             else -> return
         }
         val reason = when (local) {
@@ -2934,15 +3863,15 @@ internal class CodexSessionController(
                 else -> "invalid_request"
             }
             is IllegalStateException -> "invalid_state"
-            else -> if (
-                remote?.code == -32600L &&
-                remote.message == "dynamic tool namespace description must be at most 1024 characters"
-            ) {
-                // Exact rejection reproduced against the pinned Android runtime; no interpolation.
-                "dynamic_namespace_description_limit"
-            } else {
-                "unclassified"
-            }
+            else -> ThreadBootstrapRemoteFailureClassifier.classify(
+                remote,
+                expectedThreadId = when (purpose) {
+                    is RequestPurpose.ThreadResume -> purpose.threadId
+                    is RequestPurpose.ThreadMemoryEnable -> purpose.threadId
+                    is RequestPurpose.ThreadMaterialize -> purpose.threadId
+                    else -> null
+                },
+            ).diagnosticName
         }
         protocolDiagnostics(buildString {
             append("Thread bootstrap failure boundary=").append(boundary)
@@ -2958,6 +3887,7 @@ internal class CodexSessionController(
         TRANSPORT_UNAVAILABLE("transport_unavailable"),
         TRANSPORT_OUTCOME_AMBIGUOUS("transport_outcome_ambiguous"),
         REMOTE_REJECTION("remote_rejection"),
+        INVALID_RECEIPT("invalid_receipt"),
     }
 
     private fun requestModelPage(cursor: String?): Boolean =
@@ -4582,10 +5512,28 @@ internal class CodexSessionController(
         reducer.confirmRehydratedGeneration(activeGeneration)
         rehydrating = false
         sessionPhase = if (signedIn) ClientSessionPhase.READY else ClientSessionPhase.AUTH_REQUIRED
-        while (bufferedEvents.isNotEmpty()) {
-            val buffered = bufferedEvents.removeFirst()
-            bufferedEventBytes -= buffered.frameBytes
-            applyEvent(buffered.eventSequence, buffered.event)
+        replayingPerformanceEvents = true
+        try {
+            while (bufferedEvents.isNotEmpty()) {
+                val buffered = bufferedEvents.removeFirst()
+                bufferedEventBytes -= buffered.frameBytes
+                applyEvent(buffered.eventSequence, buffered.event)
+            }
+        } finally {
+            replayingPerformanceEvents = false
+            // Recovered state is not a live start/wait receipt.
+            val restoredSession = reducer.snapshot()
+            val restoredThread = restoredSession.threads.singleOrNull {
+                it.threadId == restoredSession.currentThreadId
+            }
+            val restoredTurn = restoredThread?.currentTurn
+            performanceObservedTurnId = restoredTurn?.turnId.takeIf { restoredTurn?.status == TurnStatus.IN_PROGRESS }
+            performanceLastTerminalTurnId = restoredTurn?.turnId.takeUnless { restoredTurn?.status == TurnStatus.IN_PROGRESS }
+            performanceLastTerminalTurnId?.let { performanceTerminalTurnIds.add(it) }
+            performanceUserWaitReported = restoredThread?.runtimeStatus?.let {
+                it.status == ai.hans.standard.codex.ThreadRuntimeStatus.ACTIVE && it.activeFlags.isNotEmpty()
+            } == true
+            performanceAssistantOutputObserved = true // Replayed history cannot prove first live output.
         }
         automaticRestartCount = 0
         updateSessionPhase()
@@ -4633,6 +5581,9 @@ internal class CodexSessionController(
         val wasPending = outbound[messageId]?.status == OutboundMessageStatus.PENDING
         outbound[messageId]?.threadId?.let { threadId ->
             dynamicToolTurnAuthorizationGate.bindDispatch(messageId, threadId, turnId)
+            if (wasPending && !messageId.startsWith(SETUP_CLIENT_MESSAGE_PREFIX)) {
+                rememberLocalVoiceControlTurn(threadId, turnId)
+            }
         }
         outbound[messageId]?.apply {
             status = OutboundMessageStatus.SENT
@@ -4654,6 +5605,8 @@ internal class CodexSessionController(
             }
         }
         updateSessionPhase()
+        if (wasPending) performanceEvent(PerformanceEvent.DISPATCH_ACKNOWLEDGED)
+        settleRealtimeDispatch(messageId, Result.success(Unit))
     }
 
     private fun removeVisibleInputReceiptForMessage(messageId: String) {
@@ -4682,6 +5635,9 @@ internal class CodexSessionController(
         pendingDispatch = null
         pendingSelection = null
         updateSessionPhase()
+        performanceEvent(PerformanceEvent.DISPATCH_FAILED)
+        settleRealtimeDispatch(pending.clientMessageId,
+            Result.failure(CodexRealtimeFailure(CodexRealtimeIssue.CONNECTION_FAILED)))
     }
 
     private fun armSetupDispatchDeadline(
@@ -4750,6 +5706,7 @@ internal class CodexSessionController(
     private fun transmitAttempt(
         request: EncodedRequest,
         purpose: RequestPurpose,
+        restartOnAmbiguity: Boolean = true,
     ): RequestTransmissionResult {
         val activeGeneration = generation
             ?: return RequestTransmissionResult.REJECTED_BEFORE_TRANSPORT
@@ -4758,18 +5715,45 @@ internal class CodexSessionController(
             throw CrossCorrelationException("Request purpose id is already pending")
         }
         armSetupDispatchDeadline(request.id, purpose, activeGeneration)
+        armWorkInterruptDeadline(request.id, purpose, activeGeneration)
+        if (purpose is RequestPurpose.NotificationToolOutput || purpose is RequestPurpose.NotificationHistory) {
+            nativeNotificationDeadlines[request.id] = notificationExternalDeadlineScheduler.schedule(notificationExternalTimeoutMillis) {
+                synchronized(this) {
+                    if (generation != activeGeneration || requestPurposes[request.id] !== purpose) return@synchronized
+                    correlator.discard(request.id)
+                    requestPurposes.remove(request.id)
+                    nativeNotificationDeadlines.remove(request.id)
+                    retireNativeNotificationRequest(request.id)
+                    if (purpose is RequestPurpose.NotificationToolOutput) {
+                        protocolDiagnostics("notification_event_receipt_timeout")
+                        settleNativeNotification(purpose, NativeNotificationDispatchReceipt.OutcomeAmbiguous)
+                    } else protocolDiagnostics("notification_event_history_timeout")
+                    notifyObservers()
+                }
+            }
+        }
+        val performanceSendEvent = when (purpose) {
+            is RequestPurpose.TurnStart -> PerformanceEvent.TURN_START_SEND
+            is RequestPurpose.TurnSteer -> PerformanceEvent.TURN_STEER_SEND
+            is RequestPurpose.UserInterrupt, is RequestPurpose.BoundaryInterrupt -> PerformanceEvent.INTERRUPT_SEND
+            else -> null
+        }
         return try {
+            performanceSendEvent?.let(::performanceEvent)
             transport.sendFrame(activeGeneration, request.json.toByteArray(StandardCharsets.UTF_8))
             RequestTransmissionResult.SENT
         } catch (error: Exception) {
+            if (performanceSendEvent != null) performanceEvent(PerformanceEvent.TRANSPORT_OUTCOME_AMBIGUOUS)
             recordThreadBootstrapFailure(
                 purpose,
                 BootstrapFailureStage.TRANSPORT_OUTCOME_AMBIGUOUS,
                 local = error,
             )
-            controlledRestart(
-                CodexClientProblem(ClientProblemCode.DISPATCH_AMBIGUOUS, retryable = false),
-            )
+            if (restartOnAmbiguity) {
+                controlledRestart(
+                    CodexClientProblem(ClientProblemCode.DISPATCH_AMBIGUOUS, retryable = false),
+                )
+            }
             RequestTransmissionResult.OUTCOME_AMBIGUOUS
         }
     }
@@ -4778,6 +5762,9 @@ internal class CodexSessionController(
         failure: CodexClientProblem,
         automatic: Boolean = true,
     ) {
+        invalidateNativeNotificationRequests()
+        invalidateRealtime()
+        cancelWorkInterruptDeadlines()
         invalidateRemoteControl()
         invalidateSelectionContext()
         cancelSetupDispatchDeadline()
@@ -4815,6 +5802,58 @@ internal class CodexSessionController(
         }
     }
 
+    private fun recordNativeNotificationReceipt(receipt: NativeNotificationExternalReceipt) {
+        if (receipt.threadId != reducer.snapshot().currentThreadId) return
+        val previous = nativeNotificationHistory?.takeIf { it.threadId == receipt.threadId }
+        nativeNotificationHistory = NativeNotificationExternalHistory(receipt.threadId,
+            (previous?.receipts.orEmpty() + receipt).distinct().takeLast(256),
+            previous?.turnStatuses.orEmpty())
+        if (receipt.turnId !in remoteControlledTurnIds && pendingNativeNotifications.values.any {
+                it.threadId == receipt.threadId && it.eventId == receipt.eventId && it.payloadSha256 == receipt.payloadSha256
+            }) {
+            nativeNotificationTurnIds.add(receipt.turnId)
+            nativeNotificationUnprovenTurnIds.remove(receipt.turnId)
+            if (unknownActiveTurnId == receipt.turnId) identityOnlyActiveTurn = receipt.threadId to receipt.turnId
+        }
+        while (nativeNotificationTurnIds.size > 128) nativeNotificationTurnIds.remove(nativeNotificationTurnIds.first())
+    }
+
+    private fun settleNativeNotification(
+        purpose: RequestPurpose.NotificationToolOutput,
+        receipt: NativeNotificationDispatchReceipt,
+    ) {
+        val entry = pendingNativeNotifications.entries.firstOrNull { it.value === purpose } ?: return
+        pendingNativeNotifications.remove(entry.key)
+        if (pendingNativeNotifications.isEmpty()) {
+            remoteControlledTurnIds.addAll(nativeNotificationUnprovenTurnIds)
+            nativeNotificationUnprovenTurnIds.clear()
+            while (remoteControlledTurnIds.size > 128) remoteControlledTurnIds.remove(remoteControlledTurnIds.first())
+        }
+        nativeNotificationDeadlines.remove(entry.key)?.cancel()
+        retireNativeNotificationRequest(entry.key)
+        runCatching { purpose.onReceipt(receipt) }
+            .onFailure { protocolDiagnostics("notification_event_receipt_delivery_failed") }
+    }
+
+    private fun retireNativeNotificationRequest(id: RequestId) {
+        retiredNativeNotificationRequests.add(id)
+        while (retiredNativeNotificationRequests.size > 256) {
+            retiredNativeNotificationRequests.remove(retiredNativeNotificationRequests.first())
+        }
+    }
+
+    private fun invalidateNativeNotificationRequests() {
+        val pending = pendingNativeNotifications.values.toList()
+        pending.forEach { settleNativeNotification(it, NativeNotificationDispatchReceipt.OutcomeAmbiguous) }
+        val ids = requestPurposes.filterValues {
+            it is RequestPurpose.NotificationToolOutput || it is RequestPurpose.NotificationHistory
+        }.keys.toList()
+        ids.forEach { id ->
+            correlator.discard(id); requestPurposes.remove(id); retireNativeNotificationRequest(id)
+            nativeNotificationDeadlines.remove(id)?.cancel()
+        }
+    }
+
     private fun updateSessionPhase() {
         if (sessionPhase in setOf(
                 ClientSessionPhase.AUTH_REQUIRED,
@@ -4834,6 +5873,9 @@ internal class CodexSessionController(
     }
 
     private fun failSession(code: ClientProblemCode, retryable: Boolean) {
+        invalidateNativeNotificationRequests()
+        invalidateRealtime()
+        cancelWorkInterruptDeadlines()
         invalidateSelectionContext()
         abortRuntimePluginTransactions()
         pluginReducer.onSessionLost()
@@ -4843,6 +5885,9 @@ internal class CodexSessionController(
     }
 
     private fun failPermanently(code: ClientProblemCode, retryable: Boolean) {
+        invalidateNativeNotificationRequests()
+        invalidateRealtime()
+        cancelWorkInterruptDeadlines()
         invalidateRemoteControl()
         invalidateSelectionContext()
         abandonPendingDynamicCalls(clearRequestIds = false)
@@ -4865,6 +5910,7 @@ internal class CodexSessionController(
         status: TurnStatus,
     ) {
         if (status == TurnStatus.IN_PROGRESS) return
+        retireWorkInterruptsFor(threadId, turnId)
         if (retainedActiveTurn?.let { it.threadId to it.turnId } == threadId to turnId) {
             retainedActiveTurn = null
         }
@@ -4926,10 +5972,15 @@ internal class CodexSessionController(
             timeline = timeline,
             pendingSelection = pendingSelection,
             pendingSettingsSelection = queuedSettingsSelection ?: pendingSettingsUpdate?.selection,
+            workInterrupt = workInterruptSnapshot(),
             confirmedSelection = confirmedSelection,
             problem = problem,
             plugins = pluginReducer.snapshot(),
             remoteControl = remoteControl.snapshot,
+            remoteControlProjectPath = sessionStore.workspacePath,
+            remotePhoneToolsActive = remotePhoneTools?.hasActiveWork == true,
+            remotePhoneToolsAvailable = phoneToolsMcpConfigured && runtimePhase == ClientRuntimePhase.READY,
+            agentChannelHistoryRevision = agentChannelHistoryRevision,
             pendingDynamicToolCalls = pendingDynamicCalls.size,
             terminalTurns = terminalTurns.values.toList(),
             setupTurnIds = setupTurnIds.toSet(),
@@ -4952,6 +6003,20 @@ internal class CodexSessionController(
             ),
         )
     }
+
+    private fun workInterruptSnapshot(): ClientWorkInterruptSnapshot = ClientWorkInterruptSnapshot(
+        phase = when {
+            runtimePhase != ClientRuntimePhase.READY -> ClientWorkInterruptPhase.IDLE
+            interruptibleTurnIdentity()?.let(::pendingInterruptFor) == true ->
+                ClientWorkInterruptPhase.PENDING
+            interruptibleTurnIdentity() != null ->
+                ClientWorkInterruptPhase.AVAILABLE
+            pendingDispatch != null || sessionPhase == ClientSessionPhase.BUSY ->
+                ClientWorkInterruptPhase.AWAITING_TURN
+            else -> ClientWorkInterruptPhase.IDLE
+        },
+        revision = workInterruptRevision,
+    )
 
     private fun bundledSetupBootstrapStatus(): BundledSetupBootstrapStatus = when {
         !bundledSetupPlugin.enabled -> BundledSetupBootstrapStatus.DISABLED
@@ -5177,8 +6242,80 @@ internal class CodexSessionController(
         "${role.name}:$id"
 
     private fun notifyObservers() {
+        updateRemotePhoneToolAuthority()
+        realtime.workState(generation, reducer.snapshot().currentThreadId,
+            activeTurn?.turnId ?: unknownActiveTurnId, pendingDispatch != null)
         val value = snapshotLocked()
+        publishPerformanceState(value.session)
         observers.toList().forEach { observer -> observer.onSnapshot(value) }
+    }
+
+    private fun performanceTurnStarted(turnId: String) {
+        if (replayingPerformanceEvents || rehydrating || performanceObservedTurnId == turnId ||
+            turnId in performanceTerminalTurnIds
+        ) return
+        performanceObservedTurnId = turnId
+        performanceUserWaitReported = false
+        performanceAssistantOutputObserved = false
+        performanceEvent(PerformanceEvent.TURN_STARTED)
+    }
+
+    private fun performanceTurnCompleted(turnId: String) {
+        if (replayingPerformanceEvents || rehydrating || turnId in performanceTerminalTurnIds ||
+            (performanceObservedTurnId != null && performanceObservedTurnId != turnId)
+        ) return
+        performanceObservedTurnId = null
+        performanceLastTerminalTurnId = turnId
+        performanceTerminalTurnIds.add(turnId)
+        while (performanceTerminalTurnIds.size > MAX_TERMINAL_TURNS) {
+            performanceTerminalTurnIds.remove(performanceTerminalTurnIds.first())
+        }
+        performanceUserWaitReported = false
+        performanceEvent(PerformanceEvent.TURN_COMPLETED)
+    }
+
+    private fun performanceEvent(event: PerformanceEvent) {
+        if (performanceObserver === PerformanceSessionObserver.NONE || replayingPerformanceEvents || rehydrating) return
+        runCatching {
+            publishPerformanceState(reducer.snapshot())
+            performanceObserver.onEvent(event)
+        }
+    }
+
+    private fun publishPerformanceState(session: ai.hans.standard.codex.SessionUiSnapshot) {
+        if (performanceObserver === PerformanceSessionObserver.NONE) return
+        runCatching {
+            val authenticated = session.account.phase == ai.hans.standard.codex.AccountPhase.SIGNED_IN
+            if (performanceContextThreadId != session.currentThreadId) {
+                performanceContextThreadId = session.currentThreadId
+                val restoredThread = session.threads.singleOrNull { it.threadId == session.currentThreadId }
+                val restored = restoredThread?.currentTurn
+                performanceObservedTurnId = restored?.turnId.takeIf { restored?.status == TurnStatus.IN_PROGRESS }
+                performanceLastTerminalTurnId = restored?.turnId.takeUnless { restored?.status == TurnStatus.IN_PROGRESS }
+                performanceTerminalTurnIds.clear()
+                performanceLastTerminalTurnId?.let { performanceTerminalTurnIds.add(it) }
+                performanceUserWaitReported = restoredThread?.runtimeStatus?.let {
+                    it.status == ai.hans.standard.codex.ThreadRuntimeStatus.ACTIVE && it.activeFlags.isNotEmpty()
+                } == true
+                performanceAssistantOutputObserved = restored != null
+            }
+            val phase = when {
+                !authenticated || session.currentThreadId == null || rehydrating || replayingPerformanceEvents ||
+                    runtimePhase != ClientRuntimePhase.READY || localRuntimeStopRequested ||
+                    sessionPhase !in setOf(ClientSessionPhase.READY, ClientSessionPhase.BUSY) -> PerformancePhase.UNKNOWN
+                pendingDispatch != null -> PerformancePhase.DISPATCH_PENDING
+                performanceUserWaitReported -> PerformancePhase.WAITING_FOR_USER
+                performanceObservedTurnId != null -> PerformancePhase.TURN_ACTIVE
+                pendingDynamicCalls.isNotEmpty() -> PerformancePhase.UNKNOWN
+                session.threads.singleOrNull { it.threadId == session.currentThreadId }?.let {
+                    it.currentTurn == null && it.runtimeStatus.status == ai.hans.standard.codex.ThreadRuntimeStatus.ACTIVE
+                } == true -> PerformancePhase.UNKNOWN
+                else -> PerformancePhase.IDLE_BETWEEN_TURNS
+            }
+            performanceObserver.onState(
+                generation.takeIf { authenticated }, session.currentThreadId.takeIf { authenticated }, phase,
+            )
+        }
     }
 
     private class PluginRecoveryEpoch(
@@ -5320,8 +6457,10 @@ internal class CodexSessionController(
         data object ModelList : RequestPurpose
         data class SettingsUpdate(val requestId: RequestId, val contextEpoch: Long) : RequestPurpose
         data class ThreadResume(val threadId: String) : RequestPurpose
-        data object ThreadStart : RequestPurpose
-        data class ThreadMemoryEnable(val threadId: String) : RequestPurpose
+        data class ThreadStart(val proof: FreshThreadBootstrapProof) : RequestPurpose
+        data class ThreadMemoryEnable(val threadId: String,
+            val freshProof: FreshThreadBootstrapProof? = null) : RequestPurpose
+        data class ThreadMaterialize(val threadId: String, val proof: FreshThreadBootstrapProof) : RequestPurpose
         data class TurnStart(
             val messageId: String,
             val selection: DispatchSelection,
@@ -5334,12 +6473,21 @@ internal class CodexSessionController(
             val confirmsDefaultSelection: Boolean = true,
         ) : RequestPurpose
 
+        data class NotificationToolOutput(
+            val threadId: String,
+            val eventId: String,
+            val payloadSha256: String,
+            val onReceipt: (NativeNotificationDispatchReceipt) -> Unit,
+        ) : RequestPurpose
+
+        data class NotificationHistory(val threadId: String) : RequestPurpose
+
         data class BoundaryInterrupt(
             val messageId: String,
             val interruptedTurnId: String,
         ) : RequestPurpose
 
-        data class UserInterrupt(val turnId: String) : RequestPurpose
+        data class UserInterrupt(val threadId: String, val turnId: String) : RequestPurpose
         data object BundledMarketplaceAdd : RequestPurpose
         data class BundledPluginList(
             val operationId: String,
@@ -5414,6 +6562,8 @@ internal class CodexSessionController(
         REJECTED_BEFORE_TRANSPORT,
         OUTCOME_AMBIGUOUS,
     }
+
+    private data class NativeNotificationHistoryPage(val history: NativeNotificationExternalHistory?)
 
     private data class PendingDispatch(
         val clientMessageId: String,

@@ -39,6 +39,37 @@ class NativeMemoryHealthTest {
         assertEquals(NativeMemoryHealthContract.MIGRATION_SHA384, migration.getString("sha384"))
         assertEquals(migration.getString("gitBlobSha1"), gitBlob(bytes))
     }
+    @Test fun thirdRuntimeRequiresItsExactIdentityAndBothRetainedMigrations() {
+        val request = NativeMemoryHealthRequest(File("/app"), File("/app/codex"),
+            NativeMemoryHealthContract.VERSION_0_155, NativeMemoryHealthContract.ARTIFACT_SHA256_0_155)
+        assertTrue(NativeMemoryHealthContract.supports(request))
+        assertFalse(NativeMemoryHealthContract.supports(request.copy(runtimeVersion = "0.156.0")))
+        assertFalse(NativeMemoryHealthContract.supports(request.copy(runtimeArtifactSha256 = NativeMemoryHealthContract.ARTIFACT_SHA256_0_154)))
+        assertEquals(listOf(NativeMemoryHealthContract.MIGRATION_SHA384,
+            NativeMemoryHealthContract.CONSOLIDATION_MIGRATION_SHA384), NativeMemoryHealthContract.migrationChecksums(request))
+        val first = sourceFile("runtime/evidence/0.155.0/source/0001_memories.sql").readBytes()
+        val second = sourceFile("runtime/evidence/0.155.0/source/0002_consolidation_progress.sql").readBytes()
+        assertEquals(NativeMemoryHealthContract.MIGRATION_SHA384, digest("SHA-384", first))
+        assertEquals(NativeMemoryHealthContract.CONSOLIDATION_MIGRATION_SHA384, digest("SHA-384", second))
+        assertEquals("4e5b3a1e9fd55d8682047afd0a3325536be9f39f", gitBlob(first))
+        assertEquals("ec84e3a127e931b5b6f22fdadd80cc1632d0122f", gitBlob(second))
+    }
+    @Test fun currentRuntimeRequiresExactPublisherIdentityAndUnchangedRetainedMigrations() {
+        val request = NativeMemoryHealthRequest(File("/app"), File("/app/codex"),
+            NativeMemoryHealthContract.VERSION_0_160_1, NativeMemoryHealthContract.ARTIFACT_SHA256_0_160_1)
+        assertTrue(NativeMemoryHealthContract.supports(request))
+        assertFalse(NativeMemoryHealthContract.supports(request.copy(runtimeVersion = "0.160.2")))
+        assertFalse(NativeMemoryHealthContract.supports(request.copy(runtimeArtifactSha256 = NativeMemoryHealthContract.ARTIFACT_SHA256_0_155)))
+        val lock = JSONObject(sourceFile("runtime/runtime.lock.json").readText())
+        assertEquals(NativeMemoryHealthContract.COMMIT_0_160_1, lock.getJSONObject("upstream").getString("commit"))
+        assertEquals(request.runtimeArtifactSha256, lock.getJSONObject("runtime").getString("extractedSha256"))
+        for (name in listOf("0001_memories.sql", "0002_consolidation_progress.sql")) {
+            assertArrayEquals(sourceFile("runtime/evidence/0.155.0/source/$name").readBytes(),
+                sourceFile("runtime/evidence/0.160.1/source/$name").readBytes())
+        }
+        assertEquals(listOf(NativeMemoryHealthContract.MIGRATION_SHA384,
+            NativeMemoryHealthContract.CONSOLIDATION_MIGRATION_SHA384), NativeMemoryHealthContract.migrationChecksums(request))
+    }
     @Test fun secondRuntimeTopLevelNoticesMatchExistingAssetsWithoutClaimingPublicClosure() {
         val proof = JSONObject(sourceFile("release/third-party/runtime-0.154.0/source-compatibility.json").readText())
         assertFalse(proof.getBoolean("publicReady"))

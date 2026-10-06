@@ -1,5 +1,8 @@
 package ai.hans.standard.setup
 
+import ai.hans.standard.R
+import ai.hans.standard.localization.HansTextResolver
+
 /**
  * Root-free recovery for Android's sideloaded-app "Restricted settings" gate.
  *
@@ -207,31 +210,19 @@ internal object RestrictedSettingsRecoveryPolicy {
 }
 
 internal object RestrictedSettingsRecoveryCopy {
-    const val POSITIVE_LABEL = "App-Info öffnen"
-    const val NOT_NOW_LABEL = "Nicht jetzt"
-    const val REQUIRED_MENU_ACTION = "Eingeschränkte Einstellungen zulassen"
-
-    fun explanation(capability: RestrictedSettingsCapability): String =
-        "Android 13 oder neuer kann diesen Zugriff bei einer per Kabel installierten App " +
-            "zusätzlich blockieren. Öffne die App-Info, tippe dort oben rechts auf das Menü " +
-            "und – falls vorhanden – auf „$REQUIRED_MENU_ACTION“. Manche Hersteller zeigen " +
-            "diesen Punkt nicht. Hans ändert die Einstellung nicht selbst. Danach öffnet Hans " +
-            "einmal ${capability.normalSettingsLabel()} und prüft den tatsächlich wirksamen Zugriff."
-
-    fun manualRequired(capability: RestrictedSettingsCapability): String =
-        "Der Zugriff ist weiterhin nicht aktiv. Die Herstelleroberfläche bietet " +
-            "„$REQUIRED_MENU_ACTION“ möglicherweise nicht an oder die Freigabe wurde " +
-            "abgelehnt. Hans behauptet deshalb keinen Zugriff. Du kannst " +
-            "${capability.normalSettingsLabel()} später in der Hans-Einrichtung erneut öffnen."
-
-    fun verified(capability: RestrictedSettingsCapability): String = when (capability) {
-        RestrictedSettingsCapability.ACCESSIBILITY -> "App-Steuerung ist tatsächlich aktiv."
-        RestrictedSettingsCapability.NOTIFICATION_LISTENER ->
-            "Benachrichtigungszugriff ist tatsächlich aktiv."
+    fun positiveLabel(text: HansTextResolver) = text.text(R.string.integration_restricted_app_info)
+    fun notNowLabel(text: HansTextResolver) = text.text(R.string.integration_restricted_not_now)
+    fun requiredMenuAction(text: HansTextResolver) = text.text(R.string.integration_restricted_allow)
+    fun explanation(capability: RestrictedSettingsCapability, text: HansTextResolver): String =
+        text.text(R.string.integration_restricted_explanation, requiredMenuAction(text), capability.normalSettingsLabel(text))
+    fun manualRequired(capability: RestrictedSettingsCapability, text: HansTextResolver): String =
+        text.text(R.string.integration_restricted_manual, requiredMenuAction(text), capability.normalSettingsLabel(text))
+    fun verified(capability: RestrictedSettingsCapability, text: HansTextResolver): String = when (capability) {
+        RestrictedSettingsCapability.ACCESSIBILITY -> text.text(R.string.integration_restricted_app_control_active)
+        RestrictedSettingsCapability.NOTIFICATION_LISTENER -> text.text(R.string.integration_restricted_notification_active)
     }
-
-    private fun RestrictedSettingsCapability.normalSettingsLabel(): String = when (this) {
-        RestrictedSettingsCapability.ACCESSIBILITY -> "die Bedienungshilfen"
-        RestrictedSettingsCapability.NOTIFICATION_LISTENER -> "den Benachrichtigungszugriff"
+    private fun RestrictedSettingsCapability.normalSettingsLabel(text: HansTextResolver): String = when (this) {
+        RestrictedSettingsCapability.ACCESSIBILITY -> text.text(R.string.integration_restricted_accessibility_page)
+        RestrictedSettingsCapability.NOTIFICATION_LISTENER -> text.text(R.string.integration_restricted_notification_page)
     }
 }

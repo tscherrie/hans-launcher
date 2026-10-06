@@ -17,5 +17,12 @@
             android:hardwareAccelerated="true"
             android:screenOrientation="portrait"
             android:theme="@style/Theme.Hans" />
+        <!-- Debug-only target-process fixture for the shared locale lifecycle callback. -->
+        <activity
+            android:name="ai.hans.standard.ui.LocaleConfigurationProbeActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:configChanges="locale|layoutDirection"
+            android:theme="@style/Theme.Hans" />
     </application>
 </manifest>

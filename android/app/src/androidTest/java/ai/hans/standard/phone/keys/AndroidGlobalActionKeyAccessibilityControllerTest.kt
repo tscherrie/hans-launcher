@@ -17,6 +17,26 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class AndroidGlobalActionKeyAccessibilityControllerTest {
     @Test
+    fun legacyHoldPreferenceUsesTaskVoicePressWithoutRewritingStoredMapping() {
+        val fixture = fixture("legacy-hold")
+        val stored = mapping(mappingId = "dictation", scanCode = 172, keyCode = 280)
+            .copy(trigger = ActionKeyTrigger.HOLD_TO_TALK)
+        try {
+            fixture.store.save(stored)
+            fixture.controller.connect()
+            assertTrue(fixture.controller.onObservedKeyEvent(event()))
+            assertTrue(fixture.commands.isEmpty())
+            assertTrue(fixture.controller.onObservedKeyEvent(
+                event(phase = ObservableKeyPhase.UP, eventTimeMillis = 180),
+            ))
+            assertEquals(listOf(ActionKeyCommand.ToggleDictation), fixture.commands)
+            assertEquals(listOf(stored), fixture.store.read().mappings)
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
     fun frameworkFilteringTracksEffectiveMappingsAndCaptureLeaseWithoutDisablingEither() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val suffix = UUID.randomUUID().toString()

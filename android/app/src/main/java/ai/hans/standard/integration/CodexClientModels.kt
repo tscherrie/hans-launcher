@@ -51,6 +51,7 @@ enum class ClientProblemCode {
     SELECTION_UPDATE,
     THREAD_RECOVERY,
     DISPATCH_REJECTED,
+    INTERRUPT_REJECTED,
     DISPATCH_AMBIGUOUS,
     LOCAL_PERSISTENCE,
 }
@@ -225,6 +226,21 @@ internal fun List<ClientTimelineItem>.latestVisibleChatTimelineId(): String? = a
     .maxByOrNull(ClientTimelineItem::order)
     ?.id
 
+enum class ClientWorkInterruptPhase {
+    IDLE,
+    /** Work is being accepted/recovered, but no current interruptible turn is proven yet. */
+    AWAITING_TURN,
+    AVAILABLE,
+    /** The request was sent; only its correlated result may end the active turn. */
+    PENDING,
+}
+
+data class ClientWorkInterruptSnapshot(
+    val phase: ClientWorkInterruptPhase = ClientWorkInterruptPhase.IDLE,
+    /** Changes per accepted local attempt, including a rejection coalesced before a UI frame. */
+    val revision: Long = 0,
+)
+
 data class CodexClientSnapshot(
     val runtimePhase: ClientRuntimePhase,
     val sessionPhase: ClientSessionPhase,
@@ -251,9 +267,18 @@ data class CodexClientSnapshot(
     val migrationReadiness: CodexMigrationReadiness = CodexMigrationReadiness(),
     /** Latest requested next-turn settings, not yet acknowledged by the App Server. */
     val pendingSettingsSelection: DispatchSelection? = null,
+    /** Runtime-owned cancellation availability, never inferred from a streaming transcript. */
+    val workInterrupt: ClientWorkInterruptSnapshot = ClientWorkInterruptSnapshot(),
     /** Optional incoming Desktop access; pairing material is process-memory only. */
     val remoteControl: ai.hans.standard.remotecontrol.RemoteControlSnapshot =
         ai.hans.standard.remotecontrol.RemoteControlSnapshot(),
+    /** Existing app-private task workspace, provisioned by the session store. */
+    val remoteControlProjectPath: String? = null,
+    /** Content-free remote work lease; does not select the remote conversation in the local UI. */
+    val remotePhoneToolsActive: Boolean = false,
+    val remotePhoneToolsAvailable: Boolean = false,
+    /** Content-free revision of passive persisted-history proof; never a polling clock. */
+    val agentChannelHistoryRevision: Long = 0,
 )
 
 data class CodexMigrationReadiness(

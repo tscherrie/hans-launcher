@@ -24,6 +24,30 @@ class HansDictationPreviewTest {
     fun after() = HansDictationRuntime.resetIdle()
 
     @Test
+    fun muteKeepsVoiceOwnershipAndPreviewAndResetsOnlyForTheMatchingSession() {
+        HansDictationRuntime.publish(RecordingState.AwaitingAudioFocus(first, 0))
+        HansDictationRuntime.confirmInputMuted(first, true)
+        assertTrue(HansDictationRuntime.snapshotUi().inputMuted)
+        listen(first)
+        HansDictationRuntime.publishPartial(first, "Mein Auftrag")
+        val lifecycle = HansDictationRuntime.snapshot()
+        assertTrue(HansDictationRuntime.snapshotUi().inputMuted)
+        HansDictationRuntime.confirmInputMuted(second, false)
+        assertTrue(HansDictationRuntime.snapshotUi().inputMuted)
+        HansDictationRuntime.confirmInputMuted(first, false)
+        assertFalse(HansDictationRuntime.snapshotUi().inputMuted)
+        assertEquals(lifecycle, HansDictationRuntime.snapshot())
+        assertEquals("Mein Auftrag", HansDictationRuntime.snapshotUi().provisionalTranscript)
+        HansDictationRuntime.confirmInputMuted(first, true)
+        HansDictationRuntime.completeNativeSession(first)
+        HansDictationRuntime.confirmInputMuted(first, true)
+        assertFalse(HansDictationRuntime.snapshotUi().inputMuted)
+        assertFalse(HansDictationRuntime.snapshot().recordingActive)
+        listen(second)
+        assertFalse(HansDictationRuntime.snapshotUi().inputMuted)
+    }
+
+    @Test
     fun partialsReplaceThePreviewWithoutChangingRecordingLifecycleOrConfirmingDelay() {
         listen(first)
         val lifecycle = HansDictationRuntime.snapshot()

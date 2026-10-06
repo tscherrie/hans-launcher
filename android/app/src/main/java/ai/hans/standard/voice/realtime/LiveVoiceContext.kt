@@ -230,6 +230,7 @@ class BoundedLiveVoiceInstructionsProvider(
     private val setupWorkflowProvider: () -> LiveVoiceSetupWorkflowContext? = { null },
     private val confirmedProfileSummaryProvider: () -> String? = { null },
     private val builder: LiveVoiceContextBuilder = LiveVoiceContextBuilder(),
+    private val languageProvider: () -> LiveVoiceLanguage = { LiveVoiceLanguage.ENGLISH },
 ) : LiveVoiceInstructionsProvider {
     override fun buildInstructions(): String = buildSessionContext().instructions
 
@@ -238,14 +239,16 @@ class BoundedLiveVoiceInstructionsProvider(
         val setup = setupWorkflowProvider()
         val capabilities = capabilitySummaryProvider()
         val confirmedProfile = confirmedProfileSummaryProvider()
+        val language = languageProvider()
         return LiveVoiceSessionContext(
             instructions = builder.build(
-                baseInstructions = baseInstructionsProvider(),
+                baseInstructions = baseInstructionsProvider() + "\n" + language.conversationInstructions,
                 snapshot = snapshot,
                 capabilitySummary = capabilities,
                 setupWorkflow = setup,
                 confirmedProfileSummary = confirmedProfile,
             ),
+            language = language,
             taskRouting = if (setup?.active == true) {
                 LiveVoiceTaskRouting.REQUIRED
             } else {
@@ -261,7 +264,7 @@ class BoundedLiveVoiceInstructionsProvider(
             // The persona and its welcome belong to session creation. Streaming runtime
             // updates carry only current facts, from the same captured inputs as startup.
             refreshInstructions = builder.build(
-                baseInstructions = ACTIVE_CALL_CONTEXT_RULES,
+                baseInstructions = ACTIVE_CALL_CONTEXT_RULES + "\n" + language.conversationInstructions,
                 snapshot = snapshot,
                 capabilitySummary = capabilities,
                 setupWorkflow = setup,

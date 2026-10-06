@@ -10,6 +10,20 @@ import org.junit.Test
 
 class OpenAiRealtimeProtocolTest {
     @Test
+    fun legacyRealtimeKeepsQuotaAndSpendingFailuresActionable() {
+        mapOf("credit_balance_exhausted" to "quota_exhausted",
+            "organization_spend_limit_exceeded" to "spending_limit_reached",
+            "project_spend_limit_exceeded" to "project_spending_limit_reached").forEach { (api, safe) ->
+            val event = OpenAiRealtimeProtocol.parseServerEvent(
+                """{"type":"error","error":{"code":"$api","type":"insufficient_quota","message":"sk-secret"}}""",
+            ) as RealtimeServerEvent.Failure
+            assertEquals("realtime_$safe", event.failure.code)
+            assertFalse(event.failure.retryable)
+            assertFalse(event.toString().contains("sk-secret"))
+        }
+    }
+
+    @Test
     fun liveVoiceReceivesTheConcreteHansConversationalOverlay() {
         val liveInstructions = liveVoiceInstructions().readText()
         val sessionInstructions = JSONObject(

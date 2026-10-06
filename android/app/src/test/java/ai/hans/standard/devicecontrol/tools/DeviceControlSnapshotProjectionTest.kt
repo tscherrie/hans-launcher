@@ -67,7 +67,7 @@ class DeviceControlSnapshotProjectionTest {
             node(7, text = null, description = ""),
             node(99, text = "0 1 2 3", description = null),
         )
-        val json = JSONObject(assertLegacyEquivalent(snapshot(nodes)).contentText)
+        val json = expandCompactSnapshotForTest(JSONObject(assertLegacyEquivalent(snapshot(nodes)).contentText))
         val projected = json.getJSONArray("nodes")
         assertEquals(42, projected.getJSONObject(0).getJSONObject("handle").getInt("nodeOrdinal"))
         assertEquals("[7,99]", projected.getJSONObject(0).getJSONArray("children").toString())

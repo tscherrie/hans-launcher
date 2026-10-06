@@ -259,6 +259,8 @@ interface IncrementalSttSession {
     /**
      * Accepts ordered fixed PCM chunks. Implementations may transcribe every
      * chunk immediately, but must not expose a user message from partial text.
+     * A native Live adapter may itself delegate work while audio arrives. Its final
+     * transcript is display-only and its host MUST NOT submit it to Codex again.
      */
     fun submitChunk(chunk: PcmAudioChunk, callback: (Result<Unit>) -> Unit)
 
@@ -271,7 +273,7 @@ interface IncrementalSttSession {
 interface DictationRecordingListener {
     fun onRecordingStateChanged(state: RecordingState)
 
-    /** The only API that releases a complete dictation to the conversation layer. */
+    /** Completed capture/transcription. Native Live hosts must not re-dispatch this text. */
     fun onUserMessageReady(recordingId: RecordingId, transcript: String)
 
     fun onStartRejected(activeRecordingId: RecordingId)

@@ -1,10 +1,18 @@
 package ai.hans.standard.ui
 
+import ai.hans.standard.R
+import ai.hans.standard.localization.HansTextResolver
+import ai.hans.standard.localization.AndroidHansTextResolver
+import ai.hans.standard.localization.rememberHansTextResolver
+import androidx.compose.ui.res.stringResource
+
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -43,13 +51,13 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import ai.hans.standard.R
 import ai.hans.standard.voice.audio.SpeechAudioRoute
 import ai.hans.standard.voice.audio.SpeechAudioRouteState
 
 /** Owned above launcher navigation so leaving Chat cannot discard a call's presentation. */
 @Composable
 internal fun rememberLiveCallMinimized(liveActive: Boolean): MutableState<Boolean> {
+    val uiText = rememberHansTextResolver()
     val minimized = rememberSaveable(liveActive) { mutableStateOf(false) }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     DisposableEffect(lifecycle, liveActive) {
@@ -77,8 +85,12 @@ internal fun LiveVoiceCallScreen(
     audioRoute: SpeechAudioRouteState = SpeechAudioRouteState(),
     onAudioRouteRequested: (SpeechAudioRoute) -> Unit = {},
     onMinimize: () -> Unit = {},
+    speechFailure: SpeechFailureUiState? = null,
+    onOpenSpeechFailureHelp: (ai.hans.standard.voice.feedback.OpenAiSpeechRemediation) -> Unit = {},
+    onDismissSpeechFailure: (Long) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
+    val uiText = rememberHansTextResolver()
     // Back changes only presentation. The visible compact bar keeps microphone/stop controls
     // available; only the red call button requests a hang-up.
     BackHandler(enabled = true, onBack = onMinimize)
@@ -92,24 +104,39 @@ internal fun LiveVoiceCallScreen(
             modifier = Modifier.fillMaxSize().padding(horizontal = 28.dp, vertical = 24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Text("Hans", style = MaterialTheme.typography.displayMedium)
-            Text(
-                text = callStatusLabel(status, inputMuted),
-                modifier = Modifier.padding(top = 6.dp).testTag("live_call_status"),
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(Modifier.weight(1f))
-            Image(
-                painter = painterResource(R.drawable.hans_call_avatar),
-                contentDescription = "Hans",
-                modifier = Modifier
-                    .size(252.dp)
-                    .clip(CircleShape)
-                    .border(2.dp, MaterialTheme.colorScheme.outline, CircleShape)
-                    .testTag("live_call_avatar"),
-            )
-            Spacer(Modifier.weight(1f))
+            Column(
+                // Keep call controls outside the scrollable, height-bounded error region.
+                // Error details replace the large avatar on small screens and at large font scales.
+                modifier = if (speechFailure != null) {
+                    Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())
+                        .testTag("live_call_failure_scroll")
+                } else Modifier,
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Text("Hans", style = MaterialTheme.typography.displayMedium)
+                Text(
+                    text = callStatusLabel(status, inputMuted, uiText),
+                    modifier = Modifier.padding(top = 6.dp).testTag("live_call_status"),
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                speechFailure?.let { failure ->
+                    SpeechFailureNotice(failure, onOpenSpeechFailureHelp, onDismissSpeechFailure)
+                }
+            }
+            if (speechFailure == null) {
+                Spacer(Modifier.weight(1f))
+                Image(
+                    painter = painterResource(R.drawable.hans_call_avatar),
+                    contentDescription = "Hans",
+                    modifier = Modifier
+                        .size(252.dp)
+                        .clip(CircleShape)
+                        .border(2.dp, MaterialTheme.colorScheme.outline, CircleShape)
+                        .testTag("live_call_avatar"),
+                )
+                Spacer(Modifier.weight(1f))
+            }
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -118,11 +145,12 @@ internal fun LiveVoiceCallScreen(
             ) {
                 LiveCallControl(
                     tag = "live_call_mute",
-                    label = if (inputMuted) "Mikrofon an" else "Stumm",
+                    modifier = if (speechFailure != null) Modifier.weight(1f) else Modifier,
+                    label = if (inputMuted) uiText.text(R.string.ui_microphone_on_0db06a) else uiText.text(R.string.ui_muted_d9b25d),
                     contentDescription = if (inputMuted) {
-                        "Mikrofon ist stumm. Mikrofon einschalten"
+                        uiText.text(R.string.ui_microphone_is_muted_unmute_microphone_31d458)
                     } else {
-                        "Mikrofon stummschalten"
+                        uiText.text(R.string.ui_mute_microphone_b01aff)
                     },
                     enabled = status.canChangeMute,
                     selected = inputMuted,
@@ -134,8 +162,9 @@ internal fun LiveVoiceCallScreen(
                 )
                 LiveCallControl(
                     tag = "live_call_speaker",
-                    label = "Lautsprecher",
-                    contentDescription = liveSpeakerDescription(audioRoute.effective),
+                    modifier = if (speechFailure != null) Modifier.weight(1f) else Modifier,
+                    label = uiText.text(R.string.ui_speaker_8cb912),
+                    contentDescription = liveSpeakerDescription(audioRoute.effective, uiText),
                     enabled = status.canChangeMute && audioRoute.active &&
                         liveSpeakerTarget(audioRoute.effective) in audioRoute.available,
                     selected = audioRoute.effective == SpeechAudioRoute.SPEAKER,
@@ -144,8 +173,9 @@ internal fun LiveVoiceCallScreen(
                 )
                 LiveCallControl(
                     tag = "live_call_hang_up",
-                    label = "Auflegen",
-                    contentDescription = "Gespräch mit Hans beenden",
+                    modifier = if (speechFailure != null) Modifier.weight(1f) else Modifier,
+                    label = uiText.text(R.string.ui_hang_up_f481f5),
+                    contentDescription = uiText.text(R.string.ui_end_call_with_hans_f20872),
                     enabled = true,
                     selected = false,
                     containerColor = MaterialTheme.colorScheme.error,
@@ -168,6 +198,7 @@ internal fun LiveVoiceCallBar(
     onExpand: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val uiText = rememberHansTextResolver()
     Surface(
         modifier = modifier.fillMaxWidth().testTag("live_call_bar"),
         color = MaterialTheme.colorScheme.surface,
@@ -180,7 +211,7 @@ internal fun LiveVoiceCallBar(
             Column(modifier = Modifier.weight(1f)) {
                 Text("Hans", style = MaterialTheme.typography.titleMedium)
                 Text(
-                    callStatusLabel(status, inputMuted),
+                    callStatusLabel(status, inputMuted, uiText),
                     modifier = Modifier.testTag("live_call_bar_status"),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -189,14 +220,14 @@ internal fun LiveVoiceCallBar(
                 )
             }
             TextButton(onClick = onExpand, modifier = Modifier.testTag("live_call_expand")) {
-                Text("Öffnen")
+                Text(stringResource(R.string.ui_open_bc385a))
             }
             LiveCallCompactControl(
                 tag = "live_call_bar_mute",
                 contentDescription = if (inputMuted) {
-                    "Mikrofon ist stumm. Mikrofon einschalten"
+                    uiText.text(R.string.ui_microphone_is_muted_unmute_microphone_31d458)
                 } else {
-                    "Mikrofon stummschalten"
+                    uiText.text(R.string.ui_mute_microphone_b01aff)
                 },
                 enabled = status.canChangeMute,
                 selected = inputMuted,
@@ -209,7 +240,7 @@ internal fun LiveVoiceCallBar(
             Spacer(Modifier.size(8.dp))
             LiveCallCompactControl(
                 tag = "live_call_bar_hang_up",
-                contentDescription = "Gespräch mit Hans beenden",
+                contentDescription = uiText.text(R.string.ui_end_call_with_hans_f20872),
                 enabled = true,
                 selected = false,
                 icon = painterResource(R.drawable.ic_live_hang_up),
@@ -240,6 +271,7 @@ private fun LiveCallCompactControl(
         MaterialTheme.colorScheme.onSurfaceVariant
     },
 ) {
+    val uiText = rememberHansTextResolver()
     Box(
         modifier = Modifier
             .size(48.dp)
@@ -272,6 +304,7 @@ private fun LiveCallControl(
     selected: Boolean,
     icon: Painter,
     onClick: () -> Unit,
+    modifier: Modifier = Modifier,
     containerColor: Color = if (selected) {
         MaterialTheme.colorScheme.onSurface
     } else {
@@ -283,7 +316,8 @@ private fun LiveCallControl(
         MaterialTheme.colorScheme.onSurfaceVariant
     },
 ) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+    val uiText = rememberHansTextResolver()
+    Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
         Box(
             modifier = Modifier
                 .size(76.dp)
@@ -321,11 +355,11 @@ private fun LiveCallControl(
 private fun liveSpeakerTarget(effective: SpeechAudioRoute): SpeechAudioRoute =
     if (effective == SpeechAudioRoute.SPEAKER) SpeechAudioRoute.EARPIECE else SpeechAudioRoute.SPEAKER
 
-private fun liveSpeakerDescription(effective: SpeechAudioRoute): String = when (effective) {
-    SpeechAudioRoute.SPEAKER -> "Tonausgabe: Lautsprecher. Zur Hörmuschel wechseln"
-    SpeechAudioRoute.EARPIECE -> "Tonausgabe: Hörmuschel. Lautsprecher einschalten"
-    SpeechAudioRoute.EXTERNAL -> "Tonausgabe: Headset / Bluetooth. Lautsprecher einschalten"
-    SpeechAudioRoute.UNKNOWN -> "Tonausgabe noch nicht bestätigt. Lautsprecher einschalten"
+private fun liveSpeakerDescription(effective: SpeechAudioRoute, uiText: HansTextResolver): String = when (effective) {
+    SpeechAudioRoute.SPEAKER -> uiText.text(R.string.ui_audio_output_speaker_switch_to_earpiece_b95789)
+    SpeechAudioRoute.EARPIECE -> uiText.text(R.string.ui_audio_output_earpiece_turn_on_speaker_20499f)
+    SpeechAudioRoute.EXTERNAL -> uiText.text(R.string.ui_audio_output_headset_bluetooth_turn_on_speaker_0435ce)
+    SpeechAudioRoute.UNKNOWN -> uiText.text(R.string.ui_audio_output_not_yet_confirmed_turn_on_speaker_e3d6ca)
 }
 
 private val LiveVoiceUiStatus.canChangeMute: Boolean
@@ -336,14 +370,14 @@ private val LiveVoiceUiStatus.canChangeMute: Boolean
         LiveVoiceUiStatus.WAITING_FOR_TASK,
     )
 
-private fun callStatusLabel(status: LiveVoiceUiStatus, inputMuted: Boolean): String = when {
-    status == LiveVoiceUiStatus.CONNECTING -> "Wird angerufen …"
-    status == LiveVoiceUiStatus.RECONNECTING -> "Verbindung wird wiederhergestellt …"
-    status == LiveVoiceUiStatus.FAILED -> "Verbindung unterbrochen"
-    inputMuted -> "Stumm"
-    status == LiveVoiceUiStatus.LISTENING -> "Verbunden"
-    status == LiveVoiceUiStatus.USER_SPEAKING -> "Hans hört zu"
-    status == LiveVoiceUiStatus.HANS_SPEAKING -> "Hans spricht"
-    status == LiveVoiceUiStatus.WAITING_FOR_TASK -> "Hans kümmert sich darum"
-    else -> status.label
+private fun callStatusLabel(status: LiveVoiceUiStatus, inputMuted: Boolean, uiText: HansTextResolver): String = when {
+    status == LiveVoiceUiStatus.CONNECTING -> uiText.text(R.string.ui_calling_8cc2d7)
+    status == LiveVoiceUiStatus.RECONNECTING -> uiText.text(R.string.ui_reconnecting_a4f94c)
+    status == LiveVoiceUiStatus.FAILED -> uiText.text(R.string.ui_connection_interrupted_80731c)
+    inputMuted -> uiText.text(R.string.ui_muted_d9b25d)
+    status == LiveVoiceUiStatus.LISTENING -> uiText.text(R.string.ui_connected_033818)
+    status == LiveVoiceUiStatus.USER_SPEAKING -> uiText.text(R.string.ui_hans_is_listening_3d4eed)
+    status == LiveVoiceUiStatus.HANS_SPEAKING -> uiText.text(R.string.ui_hans_is_speaking_c0c599)
+    status == LiveVoiceUiStatus.WAITING_FOR_TASK -> uiText.text(R.string.ui_hans_is_working_on_it_95d1be)
+    else -> uiText.text(status.labelResource)
 }

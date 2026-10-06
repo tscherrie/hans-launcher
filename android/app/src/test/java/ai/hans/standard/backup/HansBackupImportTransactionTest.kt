@@ -547,6 +547,9 @@ class HansBackupImportTransactionTest {
         override fun saveLiveVoice(voice: String) = maintenance.withStateAccess {
             value.copy(liveVoice = voice).also { value = it }
         }
+        override fun saveCodexLiveVoice(voice: String) = maintenance.withStateAccess {
+            value.copy(codexLiveVoice = voice).also { value = it }
+        }
         override fun saveInputControls(dictationKeyTrigger: ActionKeyTrigger, cameraHoldToTalkEnabled: Boolean) =
             maintenance.withStateAccess {
                 value.copy(dictationKeyTrigger = dictationKeyTrigger, cameraHoldToTalkEnabled = cameraHoldToTalkEnabled)

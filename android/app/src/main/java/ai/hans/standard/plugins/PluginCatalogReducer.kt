@@ -1,5 +1,7 @@
 package ai.hans.standard.plugins
 
+import ai.hans.standard.R
+
 import ai.hans.standard.codex.CrossCorrelationException
 import ai.hans.standard.codex.FrameLimitException
 import ai.hans.standard.codex.ProtocolLimits
@@ -244,9 +246,9 @@ internal class PluginCatalogReducer {
                 pluginId = ui.pluginId,
                 serverId = ui.serverId,
                 kind = PluginConnectionActionKind.CONNECT_REMOTE_MCP,
-                title = ui.title,
-                message = ui.message,
-                actionLabel = ui.actionLabel,
+                titleResource = ui.titleResource,
+                messageResource = ui.messageResource,
+                actionLabelResource = ui.actionLabelResource,
             ),
         )
         bumpRevision()
@@ -279,10 +281,9 @@ internal class PluginCatalogReducer {
                 pluginId = request.activationIdentity.pluginId,
                 serverId = request.activationIdentity.serverId,
                 kind = PluginConnectionActionKind.REVIEW_REMOTE_MCP_POLICY,
-                title = "Werkzeugzugriffe prüfen",
-                message = "Lege für jedes Werkzeug Lese- oder Änderungszugriff fest. " +
-                    "Änderungen werden ausschließlich vom verbundenen Server bestätigt.",
-                actionLabel = "Zugriffe prüfen",
+                titleResource = R.string.presentation_plugin_policy_title,
+                messageResource = R.string.presentation_plugin_policy_message,
+                actionLabelResource = R.string.presentation_plugin_policy_action,
                 policyReview = review,
             ),
         )
@@ -320,9 +321,9 @@ internal class PluginCatalogReducer {
                             pluginId = ui.pluginId,
                             serverId = ui.serverId,
                             kind = PluginConnectionActionKind.CONNECT_REMOTE_MCP,
-                            title = ui.title,
-                            message = ui.message,
-                            actionLabel = ui.actionLabel,
+                            titleResource = ui.titleResource,
+                            messageResource = ui.messageResource,
+                            actionLabelResource = ui.actionLabelResource,
                         )
                     },
                 )
@@ -342,9 +343,9 @@ internal class PluginCatalogReducer {
                 pluginId = ui.pluginId,
                 serverId = ui.serverId,
                 kind = PluginConnectionActionKind.RETRY_INSTALL,
-                title = ui.title,
-                message = ui.message,
-                actionLabel = ui.actionLabel,
+                titleResource = ui.titleResource,
+                messageResource = ui.messageResource,
+                actionLabelResource = ui.actionLabelResource,
             ),
         )
         bumpRevision()
@@ -372,9 +373,9 @@ internal class PluginCatalogReducer {
                 pluginId = request.activationIdentity.pluginId,
                 serverId = request.activationIdentity.serverId,
                 kind = PluginConnectionActionKind.RETRY_INSTALL,
-                title = "Zugriffe gespeichert",
-                message = "Die Installation wurde noch nicht fortgesetzt.",
-                actionLabel = "Installation erneut versuchen",
+                titleResource = R.string.presentation_plugin_policy_saved,
+                messageResource = R.string.presentation_plugin_install_not_resumed,
+                actionLabelResource = R.string.presentation_plugin_retry_install,
             ),
         )
         bumpRevision()

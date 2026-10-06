@@ -7,7 +7,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** Guardrails against silently drifting away from the vendored 0.154.0 v2 schema. */
+/** Guardrails against silently drifting away from the vendored 0.155.0 v2 schema. */
 class PinnedSchemaContractTest {
     private val definitions: JSONObject by lazy {
         JSONObject(schemaFile().readText()).getJSONObject("definitions")
@@ -89,6 +89,15 @@ class PinnedSchemaContractTest {
         assertTrue(
             !definitions.getJSONObject("ThreadMemoryModeSetResponse").has("required"),
         )
+    }
+
+    @Test
+    fun freshThreadPersistenceReadUsesPinnedSchemaWithoutChangingHistoryMode() {
+        assertEquals(setOf("threadId"), required("ThreadReadParams"))
+        assertTrue(definitions.getJSONObject("ThreadReadParams").getJSONObject("properties").has("includeTurns"))
+        assertEquals(setOf("thread"), required("ThreadReadResponse"))
+        assertEquals(listOf("legacy", "paginated"), definitions.getJSONObject("ThreadHistoryMode")
+            .getJSONArray("enum").let { values -> (0 until values.length()).map(values::getString) })
     }
 
     @Test

@@ -24,6 +24,7 @@ internal object AndroidNotificationExtractor {
                 ongoing = statusBarNotification.isOngoing,
                 clearable = statusBarNotification.isClearable,
                 actions = notification.safeActions(),
+                agentChannelSource = ai.hans.standard.notifications.agentchannel.AndroidWhatsAppNotificationSource.extract(statusBarNotification),
             ),
             observedAtEpochMillis = observedAtEpochMillis,
         )

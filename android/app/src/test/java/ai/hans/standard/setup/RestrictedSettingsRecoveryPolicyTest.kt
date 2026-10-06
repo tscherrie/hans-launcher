@@ -1,5 +1,7 @@
 package ai.hans.standard.setup
 
+import ai.hans.standard.localization.TestResourceTextResolver
+
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -157,10 +159,10 @@ class RestrictedSettingsRecoveryPolicyTest {
     @Test
     fun visibleCopyNamesTheOptionalOemActionAndNeverClaimsItExists() {
         RestrictedSettingsCapability.entries.forEach { capability ->
-            val explanation = RestrictedSettingsRecoveryCopy.explanation(capability)
-            val manual = RestrictedSettingsRecoveryCopy.manualRequired(capability)
+            val explanation = RestrictedSettingsRecoveryCopy.explanation(capability, text = TestResourceTextResolver(java.util.Locale.GERMAN))
+            val manual = RestrictedSettingsRecoveryCopy.manualRequired(capability, text = TestResourceTextResolver(java.util.Locale.GERMAN))
 
-            assertTrue(explanation.contains(RestrictedSettingsRecoveryCopy.REQUIRED_MENU_ACTION))
+            assertTrue(explanation.contains(RestrictedSettingsRecoveryCopy.requiredMenuAction(TestResourceTextResolver(java.util.Locale.GERMAN))))
             assertTrue(explanation.contains("falls vorhanden"))
             assertTrue(explanation.contains("Manche Hersteller zeigen diesen Punkt nicht"))
             assertTrue(manual.contains("möglicherweise nicht"))

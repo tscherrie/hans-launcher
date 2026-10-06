@@ -2,45 +2,45 @@
   "schemaVersion": 1,
   "upstream": {
     "repository": "https://github.com/openai/codex.git",
-    "tag": "rust-v0.154.0",
-    "commit": "6b9826e3aa83b1a5947db50f4332cb9c65f1b340",
-    "releasedAt": "2026-09-09T22:35:38Z"
+    "tag": "rust-v0.160.1",
+    "commit": "d27764b82f7118f674371e6d6e76271d9d606edb",
+    "releasedAt": "2026-10-05T18:29:37Z"
   },
   "runtime": {
-    "version": "0.154.0",
+    "version": "0.160.1",
     "abi": "arm64-v8a",
     "minimumAndroidApi": 31,
     "releaseAsset": "codex-app-server-aarch64-unknown-linux-musl.tar.gz",
-    "releaseUrl": "https://github.com/openai/codex/releases/download/rust-v0.154.0/codex-app-server-aarch64-unknown-linux-musl.tar.gz",
-    "archiveBytes": 71881581,
-    "archiveSha256": "68d30a1cce7ce070d52e0855bcd1ec27d6c4d8e64ab9dfac5b1a09ec08de094f",
+    "releaseUrl": "https://github.com/openai/codex/releases/download/rust-v0.160.1/codex-app-server-aarch64-unknown-linux-musl.tar.gz",
+    "archiveBytes": 78714214,
+    "archiveSha256": "74a1e85f8cd301156689dbf06e0e7635f3f71e58106ea46b62f0df9e9514bdd1",
     "extractedName": "codex-app-server-aarch64-unknown-linux-musl",
-    "extractedBytes": 176980120,
-    "extractedSha256": "0c2495cedd0e01fd6ba1e9d949b637f55ac283e6019b998024c010788da8c508",
+    "extractedBytes": 192921672,
+    "extractedSha256": "a949b9fd5a00d4c0be2243d04073d666293c3633355b51e687365839fa528170",
     "apkLibraryName": "libcodex_app_server.so"
   },
   "codeModeHost": {
-    "version": "0.154.0",
+    "version": "0.160.1",
     "abi": "arm64-v8a",
     "releaseAsset": "codex-code-mode-host-aarch64-unknown-linux-musl.tar.gz",
-    "releaseUrl": "https://github.com/openai/codex/releases/download/rust-v0.154.0/codex-code-mode-host-aarch64-unknown-linux-musl.tar.gz",
-    "archiveBytes": 24347420,
-    "archiveSha256": "20aefa302c2022b496e32911bf954a5f76c7fd749c6bdb9fbd711e32b66dcbfa",
+    "releaseUrl": "https://github.com/openai/codex/releases/download/rust-v0.160.1/codex-code-mode-host-aarch64-unknown-linux-musl.tar.gz",
+    "archiveBytes": 25999294,
+    "archiveSha256": "e5e027e6689efda2e3570aa600179f0ebb18632803350e152ed6c9b97dcf9741",
     "extractedName": "codex-code-mode-host-aarch64-unknown-linux-musl",
-    "extractedBytes": 63381656,
-    "extractedSha256": "f31e1c5ffbbca7884aff2f0f8795d3da197f4aafb114033a399dfc17a5119031",
+    "extractedBytes": 66921472,
+    "extractedSha256": "fbccde22982e3e679678e203a9c18eee8342fb04b096063d05159f1f80df4fd8",
     "apkLibraryName": "libcodex_code_mode_host.so"
   },
   "schemaGenerator": {
     "releaseAsset": "codex-aarch64-unknown-linux-musl.tar.gz",
-    "releaseUrl": "https://github.com/openai/codex/releases/download/rust-v0.154.0/codex-aarch64-unknown-linux-musl.tar.gz",
-    "archiveBytes": 91768360,
-    "archiveSha256": "583b48df32804213bdcd338c2e5adb06b34340821fa757a726cc0a524fa33c27",
-    "extractedBytes": 227482840,
-    "extractedSha256": "9b7c1c7abdc26fc3c4f47c77656a8e9121def5483dbae830ef1ee561758448a9",
+    "releaseUrl": "https://github.com/openai/codex/releases/download/rust-v0.160.1/codex-aarch64-unknown-linux-musl.tar.gz",
+    "archiveBytes": 101633470,
+    "archiveSha256": "f54dc5852042445bf41da3aa31156f3cb02f52c5a1a04074de73dc5598f7e1f7",
+    "extractedBytes": 248966648,
+    "extractedSha256": "fbbaec80443919f86dd63648a0b62759cf6f1d0e09310602fde96885e0bceb3e",
     "command": "app-server generate-json-schema --experimental",
     "combinedV2Schema": "evidence/codex_app_server_protocol.v2.schemas.json",
-    "combinedV2SchemaBytes": 723247,
-    "combinedV2SchemaSha256": "7b9e7d385fffef8d428cc5490b56ce9c393bd3ed7bc7ccd730956387e723ec05"
+    "combinedV2SchemaBytes": 751818,
+    "combinedV2SchemaSha256": "e77b7d1436a78f431a74b2cb263a862e92ae40d70411bc63835b47ab2168827c"
   }
 }

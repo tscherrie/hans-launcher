@@ -124,6 +124,75 @@ fun interface PythonStreamListener {
 interface PythonExecutionHandle {
     /** Non-blocking and idempotent. True means the request was still cancellable. */
     fun cancel(): Boolean
+
+    /** Physical worker AND child-capability completion; a result/cancel receipt alone is not this. */
+    fun onQuiescent(listener: () -> Unit): Boolean = false
+}
+
+/** Only a confirmed worker/Binder death may provide this separate physical termination input. */
+internal interface PythonWorkerTerminationAware {
+    fun workerTerminated()
+}
+
+/** Bounded RAM-only receipt. Observers never run under the state monitor. */
+internal class PythonQuiescenceReceipt {
+    private val lock = Any()
+    private var done = false
+    private val listeners = mutableListOf<() -> Unit>()
+
+    fun onQuiescent(listener: () -> Unit): Boolean {
+        val notify = synchronized(lock) {
+            if (done) true else {
+                if (listeners.size >= 8) return false
+                listeners += listener
+                false
+            }
+        }
+        if (notify) runCatching(listener)
+        return true
+    }
+
+    fun complete() {
+        val notify = synchronized(lock) {
+            if (done) return
+            done = true
+            listeners.toList().also { listeners.clear() }
+        }
+        notify.forEach { runCatching(it) }
+    }
+}
+
+/** A callback-before-handle result and an independently verified physical receipt must both join. */
+internal class PythonPhysicalExecutionReceipt {
+    private val lock = Any()
+    private val receipt = PythonQuiescenceReceipt()
+    private var callbackDone = false
+    private var physicalDone = false
+    private var published = false
+    private var unknownSupport = false
+
+    val hasUnknownSupport: Boolean get() = synchronized(lock) { unknownSupport }
+    fun onQuiescent(listener: () -> Unit): Boolean = receipt.onQuiescent(listener)
+    fun callbackFinished() {
+        synchronized(lock) { callbackDone = true }
+        drain()
+    }
+    fun notDispatched() {
+        synchronized(lock) { published = true; physicalDone = true }
+        drain()
+    }
+    fun publish(handle: PythonExecutionHandle) {
+        synchronized(lock) { published = true }
+        val supported = runCatching { handle.onQuiescent {
+            synchronized(lock) { physicalDone = true }
+            drain()
+        } }.getOrDefault(false)
+        synchronized(lock) { unknownSupport = !supported }
+        drain()
+    }
+    private fun drain() {
+        if (synchronized(lock) { published && callbackDone && physicalDone }) receipt.complete()
+    }
 }
 
 internal class LocalPythonExecutionHandle(
@@ -160,6 +229,9 @@ data class PythonCapabilityRequest(
 
 interface PythonCapabilityHandle {
     fun cancel()
+
+    /** False explicitly means physical completion is unknown; cancellation is never proof. */
+    fun onQuiescent(listener: () -> Unit): Boolean = false
 }
 
 fun interface PythonCapabilityGateway {
@@ -172,7 +244,13 @@ fun interface PythonCapabilityGateway {
     companion object {
         val DENY_ALL = PythonCapabilityGateway { request, completion ->
             completion(PythonRuntimeContract.capabilityFailure(request, "capability_unavailable"))
-            object : PythonCapabilityHandle { override fun cancel() = Unit }
+            object : PythonCapabilityHandle {
+                override fun cancel() = Unit
+                override fun onQuiescent(listener: () -> Unit): Boolean {
+                    listener()
+                    return true
+                }
+            }
         }
     }
 }

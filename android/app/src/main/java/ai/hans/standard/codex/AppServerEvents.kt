@@ -1,5 +1,7 @@
 package ai.hans.standard.codex
 
+import ai.hans.standard.diagnostics.HistoricalDynamicToolFailureClassifier
+import ai.hans.standard.diagnostics.ToolFailureDiagnostic
 import org.json.JSONObject
 
 enum class AccountAuthMode(val wireValue: String) {
@@ -110,6 +112,8 @@ sealed interface StreamItem {
         override val id: String,
         val tool: String,
         val status: ToolStatus,
+        /** Fixed diagnostic enums only; never retain the native tool's content/arguments. */
+        val failureDiagnostic: ToolFailureDiagnostic? = null,
     ) : StreamItem {
         override val type: String = "dynamicToolCall"
     }
@@ -478,6 +482,7 @@ private fun parseStreamItem(value: JSONObject): StreamItem {
                 id = id,
                 tool = JsonContract.requiredString(value, "tool", 512),
                 status = parseToolStatus(value, allowDeclined = false),
+                failureDiagnostic = HistoricalDynamicToolFailureClassifier.classify(value),
             )
         }
         else -> StreamItem.Other(id, type, value.toString())

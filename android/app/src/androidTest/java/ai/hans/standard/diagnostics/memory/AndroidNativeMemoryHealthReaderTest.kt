@@ -75,6 +75,50 @@ class AndroidNativeMemoryHealthReaderTest {
         assertEquals(NativeMemoryHealthResult.Unsupported(NativeMemoryUnsupportedReason.SCHEMA), reader.read(current))
         assertArrayEquals(before, file().readBytes())
     }
+    private fun thirdRuntimeRequest() = request.copy(runtimeVersion = NativeMemoryHealthContract.VERSION_0_155,
+        runtimeArtifactSha256 = NativeMemoryHealthContract.ARTIFACT_SHA256_0_155)
+    @Test fun currentPublisherRuntimeUsesUnchangedReadOnlyMigrationsWithoutChangingDatabase() {
+        thirdRuntimeDatabase().use(::insert)
+        val before = file().readBytes()
+        val current = request.copy(runtimeVersion = NativeMemoryHealthContract.VERSION_0_160_1,
+            runtimeArtifactSha256 = NativeMemoryHealthContract.ARTIFACT_SHA256_0_160_1)
+        assertEquals(reader.read(thirdRuntimeRequest()), reader.read(current))
+        assertTrue(reader.read(current) is NativeMemoryHealthResult.Available)
+        assertArrayEquals(before, file().readBytes())
+    }
+    private fun thirdRuntimeDatabase(): SQLiteDatabase = database().also { db ->
+        db.execSQL("CREATE TABLE consolidation_progress(singleton INTEGER PRIMARY KEY CHECK(singleton=1),max_thread_count INTEGER NOT NULL DEFAULT 0)")
+        db.execSQL("INSERT INTO consolidation_progress(singleton) VALUES(1)")
+        db.execSQL("INSERT INTO _sqlx_migrations(version,description,success,checksum,execution_time) VALUES(2,'consolidation progress',1,X'${NativeMemoryHealthContract.CONSOLIDATION_MIGRATION_SHA384}',1)")
+    }
+    @Test fun thirdRuntimeReadsMetadataAfterExactAdditiveMigrationWithoutChangingDatabase() {
+        thirdRuntimeDatabase().use(::insert)
+        val before = file().readBytes()
+        val result = reader.read(thirdRuntimeRequest()) as NativeMemoryHealthResult.Available
+        assertEquals(1L, result.snapshot.stage1Count)
+        assertEquals(2L, result.snapshot.totalUsageCount)
+        assertFalse(result.toString().contains("PRIVATE"))
+        assertEquals(NativeMemoryHealthResult.Unsupported(NativeMemoryUnsupportedReason.SCHEMA), reader.read(request))
+        assertArrayEquals(before, file().readBytes())
+    }
+    @Test fun thirdRuntimeRejectsMissingSecondMigration() {
+        database().close()
+        val before = file().readBytes()
+        assertEquals(NativeMemoryHealthResult.Unsupported(NativeMemoryUnsupportedReason.SCHEMA), reader.read(thirdRuntimeRequest()))
+        assertArrayEquals(before, file().readBytes())
+    }
+    @Test fun thirdRuntimeRejectsWrongSecondMigrationChecksum() {
+        thirdRuntimeDatabase().use { it.execSQL("UPDATE _sqlx_migrations SET checksum=X'00' WHERE version=2") }
+        val before = file().readBytes()
+        assertEquals(NativeMemoryHealthResult.Unsupported(NativeMemoryUnsupportedReason.SCHEMA), reader.read(thirdRuntimeRequest()))
+        assertArrayEquals(before, file().readBytes())
+    }
+    @Test fun thirdRuntimeRejectsUnknownThirdMigration() {
+        thirdRuntimeDatabase().use { it.execSQL("INSERT INTO _sqlx_migrations(version,description,success,checksum,execution_time) VALUES(3,'unknown',1,X'00',1)") }
+        val before = file().readBytes()
+        assertEquals(NativeMemoryHealthResult.Unsupported(NativeMemoryUnsupportedReason.SCHEMA), reader.read(thirdRuntimeRequest()))
+        assertArrayEquals(before, file().readBytes())
+    }
     @Test fun committedWalIsReadWithoutCheckpointingOrChangingMainFile() {
         database().use { writer ->
             assertTrue(writer.enableWriteAheadLogging())

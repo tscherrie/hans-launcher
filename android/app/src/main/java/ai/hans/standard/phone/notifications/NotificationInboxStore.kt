@@ -44,6 +44,11 @@ class NotificationInboxStore internal constructor(
     private val beforeRetentionMutation: () -> Unit = {},
     /** Deterministic test seam after the canonical process-wide query boundary is acquired. */
     private val afterQueryPrivacyBoundaryAcquired: () -> Unit = {},
+    /** Explicit All/WhatsApp forget only; raw retention/recovery must never revoke enrollment. */
+    private val clearAgentChannelPrivateData: () -> Boolean = {
+        (context.applicationContext as? ai.hans.standard.HansApplication)
+            ?.whatsAppAgentChannel?.clearPrivateData() == true
+    },
 ) : Closeable, NotificationInboxQuerySource, NotificationInboxManagementSource {
     private val fixedRetentionLimit = retentionLimit?.coerceIn(1, LEGACY_MAX_RETENTION)
     private val helper = NotificationInboxOpenHelper(
@@ -216,6 +221,11 @@ class NotificationInboxStore internal constructor(
      * Durable SQLite outbox for the crash boundary between Inbox commit and Queue/Center update.
      * Rows are replayed in source sequence order while the authoritative snapshot gate is closed.
      */
+    internal fun maxExistingSequence(): Long = synchronized(NotificationPrivacyMutationCoordinator.lock) {
+        helper.readableDatabase.rawQuery("SELECT COALESCE(MAX($COL_SEQUENCE), 0) FROM $TABLE_EVENTS", null)
+            .use { cursor -> check(cursor.moveToFirst()); cursor.getLong(0) }
+    }
+
     internal fun pendingTriageOutbox(limit: Int = MAX_TRIAGE_OUTBOX_BATCH): List<NotificationInboxEvent> =
         synchronized(NotificationPrivacyMutationCoordinator.lock) {
             if (privacyPurgeFence.isRequired()) return@synchronized emptyList()
@@ -250,6 +260,19 @@ class NotificationInboxStore internal constructor(
                 "SELECT 1 FROM $TABLE_TRIAGE_OUTBOX WHERE $COL_OUTBOX_SEQUENCE = ? LIMIT 1",
                 arrayOf(sequence.toString()),
             ).use { cursor -> !cursor.moveToFirst() }
+        }
+
+    /** Exact, bounded migration lookup; does not prune/re-enter the hook ledger. */
+    internal fun findEventForHookMigration(sequence: Long): NotificationInboxEvent? =
+        synchronized(NotificationPrivacyMutationCoordinator.lock) {
+            if (sequence <= 0 || privacyPurgeFence.isRequired() || !privacyRepository.status().policyAvailable)
+                return@synchronized null
+            helper.readableDatabase.rawQuery("SELECT $EVENT_COLUMNS FROM $TABLE_EVENTS WHERE $COL_SEQUENCE = ? LIMIT 1",
+                arrayOf(sequence.toString())).use { cursor ->
+                if (!cursor.moveToFirst()) null else cursor.readEvent().takeIf {
+                    privacyRepository.captureDecision(it.snapshot.packageName) == NotificationCaptureDecision.Allowed
+                }
+            }
         }
 
     /** Must be called off the main thread. Results are ordered by durable receipt sequence. */
@@ -632,6 +655,11 @@ class NotificationInboxStore internal constructor(
     /** The archive/index deletion already committed before this method is reached. */
     private fun applyFactPrivacyIntent(intent: NotificationFactPrivacyIntent): Int {
         val allDataForget = intent.scope == NotificationFactPrivacyScope.All
+        if (allDataForget || (intent.scope as? NotificationFactPrivacyScope.Package)?.packageName == "com.whatsapp") {
+            // The durable fact privacy intent is still pending until this callback AND all other
+            // stores have purged. Recovery retries it; a normal retention purge never reaches here.
+            check(clearAgentChannelPrivateData()) { "notification_agent_channel_privacy_purge_incomplete" }
+        }
         if (allDataForget) {
             // A strictly verified All purge can repair an unreadable Queue-v4 document. Raw
             // clearAll() intentionally cannot: an unreadable outbox is not an empty outbox.
@@ -950,6 +978,9 @@ class NotificationInboxStore internal constructor(
         put(COL_ONGOING, if (ongoing) 1 else 0)
         put(COL_CLEARABLE, if (clearable) 1 else 0)
         put(COL_ACTIONS_JSON, NotificationActionJsonCodec.encode(actions))
+        put(COL_AGENT_CHANNEL_JSON, agentChannelSource?.let {
+            ai.hans.standard.notifications.agentchannel.AgentChannelSourceCodec.encode(it)
+        })
     }
 
     private fun Cursor.readEvent(): NotificationInboxEvent = NotificationInboxEvent(
@@ -973,6 +1004,8 @@ class NotificationInboxStore internal constructor(
         ongoing = getInt(startIndex + 9) != 0,
         clearable = getInt(startIndex + 10) != 0,
         actions = NotificationActionJsonCodec.decode(getString(startIndex + 11)),
+        agentChannelSource = if (isNull(startIndex + 12)) null else
+            ai.hans.standard.notifications.agentchannel.AgentChannelSourceCodec.decode(getString(startIndex + 12)),
     )
 
     companion object {
@@ -1002,6 +1035,7 @@ class NotificationInboxStore internal constructor(
         private const val COL_ONGOING = "ongoing"
         private const val COL_CLEARABLE = "clearable"
         private const val COL_ACTIONS_JSON = "actions_json"
+        private const val COL_AGENT_CHANNEL_JSON = "agent_channel_json"
         private const val COL_ACTIVE = "active"
         private const val COL_FINGERPRINT = "fingerprint"
         private const val COL_LAST_SEQUENCE = "last_sequence"
@@ -1010,8 +1044,8 @@ class NotificationInboxStore internal constructor(
 
         private const val SNAPSHOT_COLUMNS = "$COL_PACKAGE, $COL_ANDROID_KEY, $COL_POST_TIME, " +
             "$COL_NOTIFICATION_WHEN, $COL_TITLE, $COL_TEXT, $COL_SUBTEXT, $COL_CATEGORY, " +
-            "$COL_CHANNEL, $COL_ONGOING, $COL_CLEARABLE, $COL_ACTIONS_JSON"
-        private const val SNAPSHOT_COLUMN_COUNT = 12
+            "$COL_CHANNEL, $COL_ONGOING, $COL_CLEARABLE, $COL_ACTIONS_JSON, $COL_AGENT_CHANNEL_JSON"
+        private const val SNAPSHOT_COLUMN_COUNT = 13
         private const val EVENT_COLUMNS = "$COL_SEQUENCE, $COL_KIND, $COL_OBSERVED_AT, " +
             "$COL_REMOVAL_REASON, $SNAPSHOT_COLUMNS"
         private val STATE_QUERY_COLUMNS = arrayOf(
@@ -1027,6 +1061,7 @@ class NotificationInboxStore internal constructor(
             COL_ONGOING,
             COL_CLEARABLE,
             COL_ACTIONS_JSON,
+            COL_AGENT_CHANNEL_JSON,
             COL_ACTIVE,
             COL_FINGERPRINT,
             COL_LAST_SEQUENCE,
@@ -1067,7 +1102,8 @@ class NotificationInboxStore internal constructor(
                     $COL_CHANNEL TEXT NOT NULL,
                     $COL_ONGOING INTEGER NOT NULL,
                     $COL_CLEARABLE INTEGER NOT NULL,
-                    $COL_ACTIONS_JSON TEXT NOT NULL
+                    $COL_ACTIONS_JSON TEXT NOT NULL,
+                    $COL_AGENT_CHANNEL_JSON TEXT
                 )
                 """.trimIndent(),
             )
@@ -1090,6 +1126,7 @@ class NotificationInboxStore internal constructor(
                     $COL_ONGOING INTEGER NOT NULL,
                     $COL_CLEARABLE INTEGER NOT NULL,
                     $COL_ACTIONS_JSON TEXT NOT NULL,
+                    $COL_AGENT_CHANNEL_JSON TEXT,
                     $COL_ACTIVE INTEGER NOT NULL,
                     $COL_FINGERPRINT TEXT NOT NULL,
                     $COL_LAST_SEQUENCE INTEGER NOT NULL
@@ -1104,11 +1141,11 @@ class NotificationInboxStore internal constructor(
         }
 
         override fun onUpgrade(database: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-            if (oldVersion == 1 && newVersion == 2) {
-                createTriageOutboxTable(database)
-                return
-            }
-            throw SQLiteException("Notification inbox migration missing: $oldVersion -> $newVersion")
+            if (oldVersion !in 1..2 || newVersion != 3)
+                throw SQLiteException("Notification inbox migration missing: $oldVersion -> $newVersion")
+            if (oldVersion < 2) createTriageOutboxTable(database)
+            database.execSQL("ALTER TABLE $TABLE_EVENTS ADD COLUMN $COL_AGENT_CHANNEL_JSON TEXT")
+            database.execSQL("ALTER TABLE $TABLE_STATE ADD COLUMN $COL_AGENT_CHANNEL_JSON TEXT")
         }
 
         override fun onDowngrade(database: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -1118,7 +1155,7 @@ class NotificationInboxStore internal constructor(
         }
 
         companion object {
-            private const val SCHEMA_VERSION = 2
+            private const val SCHEMA_VERSION = 3
 
             private fun createTriageOutboxTable(database: SQLiteDatabase) {
                 database.execSQL(
@@ -1151,7 +1188,9 @@ private class AndroidNotificationTriageDataPurger(
         if (NotificationTriagePrivacyIntegration.clearAll()) return true
         val queueCleared = fallbackQueue().clearAll()
         val centerCleared = NotificationTriageIntegration.clearValidatedSuggestions()
-        return queueCleared && centerCleared
+        val hooksCleared = (appContext.applicationContext as? ai.hans.standard.HansApplication)
+            ?.notificationEvents?.clearPrivateData() ?: fallbackHooks().clearPrivateData()
+        return queueCleared && centerCleared && hooksCleared
     }
 
     override fun purgeExcluded(): Boolean {
@@ -1160,8 +1199,16 @@ private class AndroidNotificationTriageDataPurger(
         // The validated store is intentionally package-blind; conservatively invalidate every
         // pending summary and require that durable privacy generation to advance successfully.
         val centerCleared = NotificationTriageIntegration.clearValidatedSuggestions()
-        return queuePurged && centerCleared
+        val hooksPurged = (appContext.applicationContext as? ai.hans.standard.HansApplication)
+            ?.notificationEvents?.purgeExcluded() ?: fallbackHooks().purgeExcluded {
+                privacyRepository.captureDecision(it) == NotificationCaptureDecision.Allowed
+            }
+        return queuePurged && centerCleared && hooksPurged
     }
+
+    private fun fallbackHooks() = ai.hans.standard.notifications.hooks.NotificationEventLedger(
+        ai.hans.standard.notifications.hooks.AtomicFileNotificationEventStorage(appContext),
+    )
 
     private fun fallbackQueue(): NotificationTriageQueue = NotificationTriageQueue(
         storage = AtomicFileNotificationTriageStorage(appContext),

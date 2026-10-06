@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="dictation_tile_label">Hans Diktat</string>
+    <string name="dictation_tile_start">Aufnahme starten</string>
+    <string name="dictation_tile_stop">Aufnahme beenden</string>
+</resources>

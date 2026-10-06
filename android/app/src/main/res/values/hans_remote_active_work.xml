@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <string name="remote_active_work_title">Desktop-Fernzugriff</string>
-    <string name="remote_active_work_description">Hans hält den angeforderten Desktop-Fernzugriff bereit. Freigabe hier beenden.</string>
-    <string name="remote_active_work_stop">Fernzugriff beenden</string>
+<resources xmlns:tools="http://schemas.android.com/tools" tools:locale="en">
+    <string name="remote_active_work_title">Desktop remote access</string>
+    <string name="remote_active_work_description">Hans is keeping the requested desktop remote access available. End access here.</string>
+    <string name="remote_active_work_stop">End remote access</string>
 </resources>

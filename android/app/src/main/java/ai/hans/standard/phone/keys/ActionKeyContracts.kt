@@ -18,7 +18,7 @@ enum class KeySemanticAction {
 }
 
 enum class HansModelPreset(val model: String, val effort: String) {
-    LUNA_MAX(model = "gpt-5.6-luna", effort = "max"),
+    LUNA_MAX(model = "gpt-6-luna", effort = "max"),
     ASTRA_ULTRA(model = "gpt-6-astra", effort = "ultra"),
 }
 

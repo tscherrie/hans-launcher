@@ -22,7 +22,7 @@ class SettingsModelEffortCapabilitiesTest {
     fun standaloneSettingsRefreshCatalogOnRuntimeGroupOpenNotComposition() {
         var refreshes = 0
         val state = mutableStateOf(SettingsUiState())
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 SettingsScreen(
                     state = state.value,
@@ -56,7 +56,7 @@ class SettingsModelEffortCapabilitiesTest {
             selectedModelId = "gpt-5.6-luna",
             selectedReasoningEffortId = "medium",
         ))
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 SettingsScreen(
                     state = state.value,
@@ -96,7 +96,7 @@ class SettingsModelEffortCapabilitiesTest {
     @Test
     fun astraCanBeRequestedWithoutOptimisticallyChangingConfirmedSelection() {
         val selected = mutableListOf<String>()
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 SettingsScreen(
                     state = SettingsUiState(
@@ -109,7 +109,7 @@ class SettingsModelEffortCapabilitiesTest {
         }
 
         compose.onNodeWithTag("settings_group_runtime").performScrollTo().performClick()
-        compose.onNodeWithTag("model_gpt-6-astra").performScrollTo().assertTextEquals("Astra").performClick()
+        compose.onNodeWithTag("model_gpt-6-astra").performScrollTo().assertTextEquals("Astra 6").performClick()
         assertEquals(listOf("gpt-6-astra"), selected)
         compose.onNodeWithTag("model_gpt-6-astra").assertIsNotSelected()
         compose.onNodeWithTag("model_gpt-5.6-luna").assertIsSelected()
@@ -118,7 +118,7 @@ class SettingsModelEffortCapabilitiesTest {
     @Test
     fun onlyAdvertisedEffortsAreRenderedAndSelectable() {
         val selected = mutableListOf<String>()
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 SettingsScreen(
                     state = SettingsUiState(
@@ -147,9 +147,31 @@ class SettingsModelEffortCapabilitiesTest {
     }
 
     @Test
+    fun currentRuntimeModelChoicesAreClickableWithoutOfferingUnavailableVersionsOrChangingMarkers() {
+        val requests = mutableListOf<String>()
+        val advertised = ModelUiOption.HANS_MODELS.filter { it.id in setOf("gpt-6-luna", "gpt-6.1-sol") }
+        compose.setGermanContent {
+            MaterialTheme {
+                SettingsScreen(SettingsUiState(models = advertised, selectedModelId = "gpt-6-luna",
+                    reasoningEfforts = listOf(ReasoningEffortUiOption.HIGH), selectedReasoningEffortId = "high"),
+                    callbacks(onModel = requests::add))
+            }
+        }
+        compose.onNodeWithTag("settings_group_runtime").performScrollTo().performClick()
+        compose.onNodeWithTag("model_gpt-6.1-sol").performScrollTo().assertTextEquals("Sol 6.1").performClick()
+        compose.onNodeWithTag("model_gpt-6-luna").assertIsSelected()
+        compose.onNodeWithTag("model_gpt-6.1-sol").assertIsNotSelected()
+        compose.onNodeWithTag("model_gpt-5.6-luna").assertDoesNotExist()
+        compose.onNodeWithTag("model_gpt-6-sol").assertDoesNotExist()
+        compose.onNodeWithTag("model_gpt-6-astra").assertDoesNotExist()
+        compose.onNodeWithTag("effort_ultra").assertDoesNotExist()
+        assertEquals(listOf("gpt-6.1-sol"), requests)
+    }
+
+    @Test
     fun advertisedFastModeRendersStandardAndFastChoices() {
         val selected = mutableListOf<Boolean>()
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 SettingsScreen(
                     state = SettingsUiState(
@@ -177,7 +199,7 @@ class SettingsModelEffortCapabilitiesTest {
     @Test
     fun codexUpdateShowsBundledVersionConfirmedStateAndSingleAction() {
         var updateRequests = 0
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 SettingsScreen(
                     state = SettingsUiState(
@@ -192,7 +214,7 @@ class SettingsModelEffortCapabilitiesTest {
             }
         }
 
-        compose.onNodeWithTag("settings_group_runtime").performScrollTo().performClick()
+        compose.onNodeWithTag("settings_group_maintenance").performScrollTo().performClick()
         compose.onNodeWithTag("codex_runtime_version")
             .performScrollTo()
             .assertTextEquals("Installiert: Codex 9.8.7-test")
@@ -206,7 +228,7 @@ class SettingsModelEffortCapabilitiesTest {
             )
         compose.onNodeWithTag("codex_update")
             .performScrollTo()
-            .assertTextEquals("Codex aktualisieren")
+            .assertTextEquals("Hans aktualisieren")
             .performClick()
         assertEquals(1, updateRequests)
     }
@@ -214,7 +236,7 @@ class SettingsModelEffortCapabilitiesTest {
     @Test
     fun configuredCodexUpdateExplainsTheSignedHansDeliveryAndFiresOnce() {
         var updateRequests = 0
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 SettingsScreen(
                     state = SettingsUiState(
@@ -229,7 +251,7 @@ class SettingsModelEffortCapabilitiesTest {
             }
         }
 
-        compose.onNodeWithTag("settings_group_runtime").performScrollTo().performClick()
+        compose.onNodeWithTag("settings_group_maintenance").performScrollTo().performClick()
         compose.onNodeWithTag("codex_update_delivery")
             .performScrollTo()
             .assertTextEquals(

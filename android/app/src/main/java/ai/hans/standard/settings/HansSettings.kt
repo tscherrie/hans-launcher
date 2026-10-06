@@ -7,6 +7,7 @@ import ai.hans.standard.backup.HansBackupProcessState
 import ai.hans.standard.codex.CodexServiceTier
 import ai.hans.standard.phone.keys.ActionKeyTrigger
 import ai.hans.standard.voice.realtime.LiveVoiceApiVoiceResolver
+import ai.hans.standard.voice.realtime.CodexLiveVoiceVoiceResolver
 
 enum class ActiveTurnInputMode(val wireValue: String) {
     STEER("steer"),
@@ -38,6 +39,8 @@ data class HansSettings(
     val cameraHoldToTalkEnabled: Boolean = false,
     /** Captured once when the next Live conversation starts; never changes an active call. */
     val liveVoice: String = DEFAULT_LIVE_VOICE,
+    /** Codex/ChatGPT has a separate voice catalogue; preserve the old API preference. */
+    val codexLiveVoice: String = DEFAULT_CODEX_LIVE_VOICE,
 ) {
     init {
         require(model in SUPPORTED_MODELS) { "Unsupported Hans model" }
@@ -49,6 +52,7 @@ data class HansSettings(
         }
         require(voice in SUPPORTED_VOICES) { "Unsupported voice id" }
         require(liveVoice in SUPPORTED_LIVE_VOICES) { "Unsupported Live voice id" }
+        require(codexLiveVoice in SUPPORTED_CODEX_LIVE_VOICES) { "Unsupported Codex Live voice id" }
         require(speechRate in MIN_SPEECH_RATE..MAX_SPEECH_RATE) {
             "Speech rate is outside the supported range"
         }
@@ -61,16 +65,21 @@ data class HansSettings(
         const val FAST_SERVICE_TIER = CodexServiceTier.FAST
         const val DEFAULT_VOICE = "fable"
         const val DEFAULT_LIVE_VOICE = LiveVoiceApiVoiceResolver.DEFAULT_VOICE
+        const val DEFAULT_CODEX_LIVE_VOICE = CodexLiveVoiceVoiceResolver.DEFAULT_VOICE
         const val DEFAULT_SPEECH_RATE = 1.25f
         const val MIN_SPEECH_RATE = 0.5f
         const val MAX_SPEECH_RATE = 2.0f
 
-        val MODEL_ORDER: List<String> = listOf(
-            "gpt-5.6-luna",
+        /** Current product choices first; runtime model/list still decides actual availability. */
+        val CURRENT_MODEL_ORDER: List<String> = listOf(
+            "gpt-6-luna",
             "gpt-5.6-terra",
-            "gpt-5.6-sol",
+            "gpt-6.1-sol",
             "gpt-6-astra",
         )
+        /** Keep valid saved selections and backup compatibility; never silently migrate them. */
+        val LEGACY_MODEL_ORDER: List<String> = listOf("gpt-5.6-luna", "gpt-5.6-sol", "gpt-6-sol")
+        val MODEL_ORDER: List<String> = CURRENT_MODEL_ORDER + LEGACY_MODEL_ORDER
         val SUPPORTED_MODELS: Set<String> = MODEL_ORDER.toSet()
 
         val REASONING_EFFORT_ORDER: List<String> = listOf(
@@ -107,6 +116,8 @@ data class HansSettings(
         /** Exact Live wire catalogue, deliberately separate from the Speech/TTS list above. */
         val SUPPORTED_LIVE_VOICES: Set<String>
             get() = LiveVoiceApiVoiceResolver.supportedVoices
+        val SUPPORTED_CODEX_LIVE_VOICES: Set<String>
+            get() = CodexLiveVoiceVoiceResolver.supportedVoices
     }
 }
 
@@ -129,6 +140,8 @@ interface HansSettingsStore {
     /** Persist a preference for future Live calls without touching Speech/TTS or active audio. */
     fun saveLiveVoice(voice: String): HansSettings
 
+    fun saveCodexLiveVoice(voice: String): HansSettings
+
     fun saveInputControls(
         dictationKeyTrigger: ActionKeyTrigger,
         cameraHoldToTalkEnabled: Boolean,
@@ -141,6 +154,7 @@ interface HansSettingsStore {
     fun saveRestoredNonDispatchPreferences(restored: HansSettings): HansSettings {
         saveVoice(restored.voice, restored.speechRate, restored.readAloudMode)
         saveLiveVoice(restored.liveVoice)
+        saveCodexLiveVoice(restored.codexLiveVoice)
         return saveInputControls(
             restored.dictationKeyTrigger,
             restored.cameraHoldToTalkEnabled,
@@ -230,6 +244,17 @@ class SharedPreferencesHansSettingsStore(
         updated
     }
 
+    override fun saveCodexLiveVoice(voice: String): HansSettings = maintenance.withStateAccess {
+        val updated = read().copy(codexLiveVoice = voice)
+        check(
+            preferences.edit()
+                .putInt(KEY_SCHEMA_VERSION, SCHEMA_VERSION)
+                .putString(KEY_CODEX_LIVE_VOICE, updated.codexLiveVoice)
+                .commit(),
+        ) { "Could not persist Codex Live voice settings" }
+        updated
+    }
+
     override fun saveRestoredNonDispatchPreferences(restored: HansSettings): HansSettings =
         maintenance.withStateAccess {
         val current = read()
@@ -246,6 +271,7 @@ class SharedPreferencesHansSettingsStore(
                 .putString(KEY_SERVICE_TIER, current.serviceTier)
                 .putString(KEY_VOICE, updated.voice)
                 .putString(KEY_LIVE_VOICE, updated.liveVoice)
+                .putString(KEY_CODEX_LIVE_VOICE, updated.codexLiveVoice)
                 .putFloat(KEY_SPEECH_RATE, updated.speechRate)
                 .putString(KEY_READ_ALOUD_MODE, updated.readAloudMode.wireValue)
                 .putString(KEY_DICTATION_KEY_TRIGGER, updated.dictationKeyTrigger.name)
@@ -273,6 +299,10 @@ class SharedPreferencesHansSettingsStore(
                     .getOrNull()
                     ?.takeIf { it in HansSettings.SUPPORTED_LIVE_VOICES }
                     ?: HansSettings.DEFAULT_LIVE_VOICE,
+                codexLiveVoice = runCatching { preferences.getString(KEY_CODEX_LIVE_VOICE, null) }
+                    .getOrNull()
+                    ?.takeIf { it in HansSettings.SUPPORTED_CODEX_LIVE_VOICES }
+                    ?: HansSettings.DEFAULT_CODEX_LIVE_VOICE,
                 speechRate = preferences.getFloat(
                     KEY_SPEECH_RATE,
                     HansSettings.DEFAULT_SPEECH_RATE,
@@ -300,6 +330,7 @@ class SharedPreferencesHansSettingsStore(
         const val KEY_SERVICE_TIER = "service_tier"
         const val KEY_VOICE = "voice"
         const val KEY_LIVE_VOICE = "live_voice"
+        const val KEY_CODEX_LIVE_VOICE = "codex_live_voice"
         const val KEY_SPEECH_RATE = "speech_rate"
         const val KEY_READ_ALOUD_MODE = "read_aloud_mode"
         const val KEY_DICTATION_KEY_TRIGGER = "dictation_key_trigger"

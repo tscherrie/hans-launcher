@@ -123,6 +123,8 @@ data class HansSetupStepRecord(
 enum class HansSetupDictationEvidence {
     LISTENING,
     SENT,
+    /** Own spoken input and a correlated native Voice reply; not completed agent work. */
+    NATIVE_LIVE_COMPLETED,
     FAILED,
 }
 
@@ -263,6 +265,16 @@ class SetupProfileTurnActionGuard {
     }
 }
 
+/** Kept in the serialized enum for upgrades, never offered or actionable in current setup. */
+internal val HANS_SETUP_RETIRED_STEPS: Set<HansSetupStep> = setOf(
+    HansSetupStep.HARDWARE_LIVE_TEST,
+    HansSetupStep.CAMERA_HOLD_CHOICE,
+    HansSetupStep.CAMERA_HOLD_LIVE_TEST,
+    HansSetupStep.SPEECH_CREDENTIAL_CONSENT,
+    HansSetupStep.SPEECH_CREDENTIAL_ACCESS,
+    HansSetupStep.VOICE_DICTATION_TEST,
+)
+
 internal val HANS_SETUP_ORDER: List<HansSetupStep> = listOf(
     HansSetupStep.INTRO,
     HansSetupStep.INPUT_CHOICE,
@@ -270,8 +282,6 @@ internal val HANS_SETUP_ORDER: List<HansSetupStep> = listOf(
     HansSetupStep.MICROPHONE_CONSENT,
     HansSetupStep.MICROPHONE_ACCESS,
     HansSetupStep.CAMERA_CAPTURE_TEST,
-    HansSetupStep.CAMERA_HOLD_CHOICE,
-    HansSetupStep.CAMERA_HOLD_LIVE_TEST,
     HansSetupStep.APP_NOTIFICATIONS_CONSENT,
     HansSetupStep.APP_NOTIFICATIONS_ACCESS,
     HansSetupStep.NOTIFICATION_LISTENER_CONSENT,
@@ -280,21 +290,18 @@ internal val HANS_SETUP_ORDER: List<HansSetupStep> = listOf(
     HansSetupStep.ACCESSIBILITY_CONSENT,
     HansSetupStep.ACCESSIBILITY_ACCESS,
     HansSetupStep.ACCESSIBILITY_LIVE_TEST,
-    // Global hardware-key delivery is an Accessibility receipt. Keep the
-    // functional key test behind both access and its own semantic live proof.
-    HansSetupStep.HARDWARE_LIVE_TEST,
     HansSetupStep.HOME_ROLE_CONSENT,
     HansSetupStep.HOME_ROLE,
-    HansSetupStep.SPEECH_CREDENTIAL_CONSENT,
-    HansSetupStep.SPEECH_CREDENTIAL_ACCESS,
-    HansSetupStep.VOICE_DICTATION_TEST,
     HansSetupStep.MODEL_REASONING,
     HansSetupStep.OPTIONAL_CAPABILITIES,
     HansSetupStep.PERSONAL_PROFILE,
     HansSetupStep.REVIEW,
     HansSetupStep.COMPLETE,
 ).also { order ->
-    check(order.toSet() == HansSetupStep.entries.toSet()) { "setup_order_incomplete" }
+    check(order.toSet() + HANS_SETUP_RETIRED_STEPS == HansSetupStep.entries.toSet()) {
+        "setup_order_incomplete"
+    }
+    check(order.none { it in HANS_SETUP_RETIRED_STEPS }) { "setup_retired_step_reintroduced" }
 }
 
 internal fun requireSetupCode(value: String) {

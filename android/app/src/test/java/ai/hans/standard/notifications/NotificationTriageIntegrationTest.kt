@@ -8,6 +8,29 @@ import org.junit.Test
 
 class NotificationTriageIntegrationTest {
     @Test
+    fun nativeEventsJoinRegularWorkAndWakeWhenVoiceEndsWithoutWaitingForCodexIdle() {
+        var wakes = 0
+        val registration = NotificationTriageIntegration.attachNotificationEventWakeup { wakes++ }
+        try {
+            NotificationTriageIntegration.setInteractiveActivity(NotificationInteractiveActivity.CODEX_TURN_OR_TOOL, true)
+            assertTrue(NotificationTriageIntegration.isNotificationEventIntakeAllowed())
+            NotificationTriageIntegration.setInteractiveActivity(NotificationInteractiveActivity.LIVE_VOICE, true)
+            assertFalse(NotificationTriageIntegration.isNotificationEventIntakeAllowed())
+            NotificationTriageIntegration.setInteractiveActivity(NotificationInteractiveActivity.LIVE_VOICE, false)
+            assertTrue(NotificationTriageIntegration.isNotificationEventIntakeAllowed())
+            assertFalse(NotificationTriageIntegration.isInteractiveIdle())
+            assertEquals(3, wakes)
+            NotificationTriageIntegration.setInteractiveActivity(NotificationInteractiveActivity.LIVE_VOICE, false)
+            assertEquals(3, wakes)
+            NotificationTriageIntegration.setInteractiveActivity(NotificationInteractiveActivity.DICTATION, true)
+            assertFalse(NotificationTriageIntegration.isNotificationEventIntakeAllowed())
+        } finally {
+            NotificationInteractiveActivity.values().forEach { NotificationTriageIntegration.setInteractiveActivity(it, false) }
+            registration.close()
+        }
+    }
+
+    @Test
     fun failedOutputResumeImmediatelyReclosesAuthorityAndRestoresQuarantine() {
         var quarantines = 0
         val registration = NotificationTriageIntegration.attachValidatedSuggestionController(

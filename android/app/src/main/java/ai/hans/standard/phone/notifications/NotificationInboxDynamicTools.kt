@@ -69,6 +69,7 @@ data class NotificationAllDataClearResult(
 
 object NotificationInboxDynamicToolCatalog {
     const val NAMESPACE = "android_notifications"
+    const val REPORT_EVENT = "report_event"
 
     val namespace = DynamicToolNamespaceSpec(
         name = NAMESPACE,
@@ -189,6 +190,40 @@ object NotificationInboxDynamicToolCatalog {
         ),
     )
 
+    /** The default catalog stays unchanged; only a host with a report boundary opts in. */
+    fun namespace(reportAvailable: Boolean): DynamicToolNamespaceSpec = if (reportAvailable) {
+        namespace.copy(
+            description = namespace.description +
+                " Present source-bound important event reports in the current Hans chat.",
+            tools = namespace.tools + function(
+                name = REPORT_EVENT,
+                description =
+                    "Present a concise, important notification summary and concrete call to " +
+                        "action in the current Hans chat, with permitted speech queued if " +
+                        "available. Requires the exact eventId from an accepted push_event in " +
+                        "this native thread/turn. Never authorizes other actions or starts a call. " +
+                        "A queued speech receipt does not prove playback or audibility.",
+                properties = JSONObject()
+                    .put(
+                        "eventId",
+                        JSONObject().put("type", "string").put("minLength", 1)
+                            .put("maxLength", NotificationEventReportLimits.MAX_ID_CHARACTERS)
+                            .put("pattern", "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"),
+                    )
+                    .put(
+                        "text",
+                        JSONObject().put("type", "string").put("minLength", 1)
+                            .put("maxLength", NotificationEventReportLimits.MAX_TEXT_CHARACTERS)
+                            .put("description", "Exact summary and call to action, at most 4096 UTF-8 bytes; never truncated.")
+                            .put("pattern", "^[^\\u0000-\\u0009\\u000b-\\u001f\\u007f-\\u009f]+$"),
+                    ),
+                required = listOf("eventId", "text"),
+            ),
+        )
+    } else {
+        namespace
+    }
+
     private fun function(
         name: String,
         description: String,
@@ -290,9 +325,10 @@ class NotificationInboxDynamicToolExecutor(
         source as? NotificationInboxManagementSource,
     private val confirmationProvider: DynamicToolConfirmationProvider =
         DynamicToolConfirmationProvider.NONE,
+    private val reportPort: NotificationEventReportPort? = null,
 ) : DynamicToolExecutor {
     override val specs: List<DynamicToolNamespaceSpec> =
-        listOf(NotificationInboxDynamicToolCatalog.namespace)
+        listOf(NotificationInboxDynamicToolCatalog.namespace(reportAvailable = reportPort != null))
 
     override fun execute(
         call: DynamicToolCallParams,
@@ -335,6 +371,9 @@ class NotificationInboxDynamicToolExecutor(
     ): DynamicToolExecutionResult {
         if (call.namespace != NotificationInboxDynamicToolCatalog.NAMESPACE) {
             return failureResult(call, "unknown_notification_tool_namespace")
+        }
+        if (call.tool == NotificationInboxDynamicToolCatalog.REPORT_EVENT) {
+            return executeReport(call, gate)
         }
         require(call.argumentsJson.toByteArray(StandardCharsets.UTF_8).size <= MAX_ARGUMENT_BYTES)
         val arguments = JSONObject(call.argumentsJson)
@@ -408,6 +447,74 @@ class NotificationInboxDynamicToolExecutor(
         }
         require(output.toString().toByteArray(StandardCharsets.UTF_8).size <= MAX_OUTPUT_BYTES)
         return DynamicToolExecutionResult(output.toString(), success = true)
+    }
+
+    private fun executeReport(
+        call: DynamicToolCallParams,
+        gate: DynamicToolExecutionGate,
+    ): DynamicToolExecutionResult {
+        val port = reportPort ?: return failureResult(call, "unknown_notification_tool")
+        val arguments = runCatching {
+            require(call.argumentsJson.toByteArray(StandardCharsets.UTF_8).size <= MAX_ARGUMENT_BYTES)
+            val parsed = JSONObject(call.argumentsJson)
+            require(parsed.keys().asSequence().all { it in setOf("eventId", "text") })
+            val eventId = parsed.opt("eventId") as? String ?: error("event_id_type")
+            val text = parsed.opt("text") as? String ?: error("text_type")
+            require(validReportId(eventId))
+            require(text.isNotBlank())
+            require(validUnicode(text))
+            require(text.codePointCount(0, text.length) in
+                1..NotificationEventReportLimits.MAX_TEXT_CHARACTERS)
+            require(text.toByteArray(StandardCharsets.UTF_8).size <=
+                NotificationEventReportLimits.MAX_TEXT_UTF8_BYTES)
+            require(text.none { it.isISOControl() && it != '\n' })
+            eventId to text
+        }.getOrElse {
+            return failureResult(call, "notification_report_arguments_invalid")
+        }
+        // Waiting for the actual ACK is not an effect. The host invokes this gate only after
+        // its wait and fresh authority checks, immediately before committing delivery.
+        return when (val result = port.report(
+            call, arguments.first, arguments.second, gate::markExternalEffectStarted,
+        )) {
+            is NotificationEventReportResult.Rejected -> failureResult(call, result.errorCode)
+            is NotificationEventReportResult.Presented -> {
+                if (!validReportId(result.reportId)) {
+                    return failureResult(call, "notification_report_receipt_invalid")
+                }
+                DynamicToolExecutionResult(
+                    contentText = JSONObject()
+                        .put("status", "presented")
+                        .put("inChat", true)
+                        .put("reportId", result.reportId)
+                        .put("speechStatus", if (result.speechQueued) "queued" else "not_queued")
+                        .put("replay", result.replay)
+                        .toString(),
+                    success = true,
+                )
+            }
+        }
+    }
+
+    private fun validReportId(value: String): Boolean = value.isNotBlank() &&
+        validUnicode(value) &&
+        value.codePointCount(0, value.length) <= NotificationEventReportLimits.MAX_ID_CHARACTERS &&
+        value.none(Char::isISOControl)
+
+    /** Do not silently replace malformed UTF-16 when calculating or passing UTF-8 content. */
+    private fun validUnicode(value: String): Boolean {
+        var index = 0
+        while (index < value.length) {
+            val character = value[index]
+            if (character.isHighSurrogate()) {
+                if (index + 1 >= value.length || !value[index + 1].isLowSurrogate()) return false
+                index += 2
+            } else {
+                if (character.isLowSurrogate()) return false
+                index++
+            }
+        }
+        return true
     }
 
     private fun cancelled(call: DynamicToolCallParams): DynamicToolExecutionResult =

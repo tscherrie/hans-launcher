@@ -20,6 +20,8 @@ class ModelShortcutDiagnosticsTest {
         assertEquals(249, payload.getInt("scanCode"))
         assertEquals("hans_foreground_only", payload.getString("scope"))
         assertEquals("gpt-6-astra/ultra", payload.getString("highPreset"))
+        assertEquals("gpt-6-luna/max", payload.getString("lowPreset"))
+        assertEquals("gpt-5.6-luna/max", payload.getString("lowPresetFallback"))
         assertFalse(encoded.contains(KeyTestFixtures.DEVICE.descriptorSha256))
         assertFalse(encoded.contains("runtimeDeviceId"))
         assertFalse(encoded.contains("vendorId"))

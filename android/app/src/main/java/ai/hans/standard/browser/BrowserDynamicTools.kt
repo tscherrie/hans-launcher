@@ -142,6 +142,7 @@ class BrowserDynamicToolExecutor(
         }
         if (!scheduled) gate.complete(failureResult(call, "browser_executor_rejected"))
         return object : DynamicToolExecutionHandle {
+            override fun onQuiescent(listener: () -> Unit): Boolean = gate.onQuiescent(listener)
             override fun cancel(): DynamicToolCancellationDisposition {
                 runCatching { activeHttpCall.get()?.cancel() }
                 return gate.cancel()

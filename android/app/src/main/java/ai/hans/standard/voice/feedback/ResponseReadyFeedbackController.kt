@@ -1,5 +1,7 @@
 package ai.hans.standard.voice.feedback
 
+import ai.hans.standard.localization.HansTextResolver
+
 import ai.hans.standard.codex.TurnStatus
 import ai.hans.standard.integration.ClientRuntimePhase
 import ai.hans.standard.integration.ClientSessionPhase
@@ -29,6 +31,7 @@ class ResponseReadyFeedbackController(
     private val haptics: ResponseReadyHaptics,
     private val executor: Executor = Executor { it.run() },
     private val maxTrackedResponses: Int = DEFAULT_MAX_TRACKED_RESPONSES,
+    private val text: HansTextResolver,
 ) : AutoCloseable {
     private val lock = Any()
     private val codexTurns = LinkedHashSet<CodexAnswer>()
@@ -131,6 +134,7 @@ class ResponseReadyFeedbackController(
                         HansSetupOutputSanitizer.sanitizeAssistantText(
                             item.text,
                             item.turnId != null && item.turnId in snapshot.setupTurnIds,
+                            text,
                         ),
                         complete = item.complete,
                     ).plainText.isNotBlank()

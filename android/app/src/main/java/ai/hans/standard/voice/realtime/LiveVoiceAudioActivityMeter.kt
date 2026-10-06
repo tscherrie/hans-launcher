@@ -2,10 +2,18 @@ package ai.hans.standard.voice.realtime
 
 /**
  * Bounded PCM16 activity evidence, not speech recognition or physical speaker-drain proof.
- * Runs only when farewell monitoring is enabled and retains no audio. Each call represents
- * one observed PCM frame; missing callbacks are never interpreted as silence.
+ * Runs only when active-call monitoring is enabled and retains no audio. Each call represents
+ * one observed PCM frame; missing callbacks are never interpreted as silence. Telephone
+ * farewell failures remain sticky. Continuous dictation can explicitly opt into fresh-frame
+ * recovery after the previous measurement has first been reported unreliable.
  */
-internal class LiveVoiceAudioActivityMeter(private val direction: LiveVoiceAudioDirection) {
+internal class LiveVoiceAudioActivityMeter(
+    private val direction: LiveVoiceAudioDirection,
+    /** Farewell monitoring begins inside a spoken tail; continuous dictation does not. */
+    private val requireInitialInputQuiet: Boolean = true,
+    /** Continuous sessions may begin a NEW measurement after an explicitly invalidated one. */
+    private val recoverAfterUnreliable: Boolean = false,
+) {
     private var lastObservedAtNanos: Long? = null
     private var lastNotificationAtNanos: Long? = null
     private var loudNanos = 0L
@@ -14,6 +22,7 @@ internal class LiveVoiceAudioActivityMeter(private val direction: LiveVoiceAudio
     private var initialQuietObserved = false
     private var initialInputNonQuietNanos = 0L
     private var monitoringFailed = false
+    private var recoveryAfterNanos: Long? = null
 
     fun reset() {
         lastObservedAtNanos = null
@@ -24,6 +33,7 @@ internal class LiveVoiceAudioActivityMeter(private val direction: LiveVoiceAudio
         initialQuietObserved = false
         initialInputNonQuietNanos = 0L
         monitoringFailed = false
+        recoveryAfterNanos = null
     }
 
     fun observe(
@@ -33,17 +43,19 @@ internal class LiveVoiceAudioActivityMeter(private val direction: LiveVoiceAudio
         sampleRate: Int,
         observedAtNanos: Long,
     ): LiveVoiceAudioActivity? {
-        if (monitoringFailed) return null
+        val frameNanos = validFrameDuration(pcm, audioFormat, channelCount, sampleRate)
+        if (monitoringFailed) {
+            // Emit one invalidation, not an event per unsupported frame. Only a fresh valid
+            // frame may restart continuous monitoring. Neither the gap nor its boundary
+            // frame supplies quiet/attack duration to the new measurement.
+            if (!recoverAfterUnreliable || frameNanos == null ||
+                observedAtNanos <= requireNotNull(recoveryAfterNanos)
+            ) return null
+            reset()
+        }
         val previous = lastObservedAtNanos
         if (previous != null && observedAtNanos <= previous) return unreliable(observedAtNanos)
-        // Android AudioFormat.ENCODING_PCM_16BIT = 2. No Android dependency in this policy.
-        if (audioFormat != PCM_16_BIT || channelCount !in 1..2 || sampleRate !in 8_000..192_000 ||
-            pcm.isEmpty() || pcm.size > MAX_FRAME_BYTES || pcm.size % (2 * channelCount) != 0
-        ) {
-            return unreliable(observedAtNanos)
-        }
-        val frameNanos = (pcm.size / (2 * channelCount)).toLong() * NANOS_PER_SECOND / sampleRate
-        if (frameNanos !in 1..MAX_FRAME_NANOS) return unreliable(observedAtNanos)
+        if (frameNanos == null) return unreliable(observedAtNanos)
         if (previous != null && observedAtNanos - previous > MAX_CALLBACK_GAP_NANOS) {
             return unreliable(observedAtNanos)
         }
@@ -68,7 +80,7 @@ internal class LiveVoiceAudioActivityMeter(private val direction: LiveVoiceAudio
         // Ignore the microphone tail of the farewell that armed this monitor. The session
         // requires this quiet evidence before closing. Bound the ignored non-quiet tail:
         // continued/ambiguous input must invalidate the candidate even before a quiet edge.
-        if (direction == LiveVoiceAudioDirection.INPUT && !initialQuietObserved) {
+        if (direction == LiveVoiceAudioDirection.INPUT && requireInitialInputQuiet && !initialQuietObserved) {
             if (!quiet) {
                 initialInputNonQuietNanos += frameNanos
                 if (initialInputNonQuietNanos >= MAX_INITIAL_INPUT_TAIL_NANOS) {
@@ -115,9 +127,19 @@ internal class LiveVoiceAudioActivityMeter(private val direction: LiveVoiceAudio
 
     private fun unreliable(observedAtNanos: Long): LiveVoiceAudioActivity {
         monitoringFailed = true
+        recoveryAfterNanos = maxOf(observedAtNanos, lastObservedAtNanos ?: observedAtNanos)
         loudNanos = 0L
         quietNanos = 0L
         return LiveVoiceAudioActivity(direction, speechActive, observedAtNanos, reliable = false)
+    }
+
+    private fun validFrameDuration(pcm: ByteArray, format: Int, channels: Int, rate: Int): Long? {
+        // Android AudioFormat.ENCODING_PCM_16BIT = 2. No Android dependency in this policy.
+        if (format != PCM_16_BIT || channels !in 1..2 || rate !in 8_000..192_000 ||
+            pcm.isEmpty() || pcm.size > MAX_FRAME_BYTES || pcm.size % (2 * channels) != 0
+        ) return null
+        val duration = (pcm.size / (2 * channels)).toLong() * NANOS_PER_SECOND / rate
+        return duration.takeIf { it in 1..MAX_FRAME_NANOS }
     }
 
     private companion object {

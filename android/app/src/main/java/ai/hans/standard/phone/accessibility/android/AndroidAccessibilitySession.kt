@@ -128,6 +128,9 @@ sealed interface AccessibilitySensitiveActionApproval {
 interface HansAccessibilitySession {
     val sessionId: AccessibilitySessionId
 
+    /** A cross-turn handoff must discard command and post-action authority, not just pixels. */
+    fun invalidateRetainedEvidence(): Boolean = false
+
     fun currentSnapshot(): SemanticUiSnapshot?
 
     /**
@@ -137,6 +140,16 @@ interface HansAccessibilitySession {
      * Test and fallback sessions remain read-only by default.
      */
     fun refreshSnapshot(): SemanticUiSnapshot? = currentSnapshot()
+
+    /** Fresh capture then event-driven, bounded read-only wait; no implicit action or retry. */
+    fun awaitSnapshot(
+        timeoutMillis: Long,
+        cancelled: () -> Boolean,
+        predicate: (SemanticUiSnapshot) -> Boolean,
+    ): SemanticUiSnapshot? = null
+
+    /** Wake an active read-only wait after the caller sets its cancellation flag. */
+    fun wakeSnapshotWaiters() = Unit
 
     /**
      * Retains the exact snapshot just projected by inspect_ui for a following find/node action.
@@ -184,6 +197,13 @@ interface HansAccessibilitySession {
         callback: AccessibilityCommandCallback,
     ): Boolean
 
+    /** Cancellation is rechecked on the command worker immediately before domain execution. */
+    fun submitGuarded(
+        command: AccessibilityCommand,
+        cancelled: () -> Boolean,
+        callback: AccessibilityCommandCallback,
+    ): Boolean = false
+
     /**
      * Runs the approved retry atomically before later queued commands. Live sessions accept this
      * only from their own serial command worker; the default preserves simple test doubles.
@@ -193,6 +213,24 @@ interface HansAccessibilitySession {
         approval: AccessibilityUserApproval,
         callback: AccessibilityCommandCallback,
     ): Boolean = submit(command, approval, callback)
+}
+
+/** Process-wide epoch also reaches fallback stores owned by superseded plugin/runtime leases. */
+object HansPhoneToolEvidence {
+    private val generation = AtomicLong(0)
+
+    fun epoch(): Long = generation.get()
+
+    fun invalidateRetainedEvidence() {
+        generation.updateAndGet { previous ->
+            check(previous < Long.MAX_VALUE) { "Phone UI evidence epoch exhausted" }
+            previous + 1
+        }
+        val session = HansAccessibilitySessions.current()
+        check(session == null || session.invalidateRetainedEvidence()) {
+            "Phone UI evidence could not be invalidated"
+        }
+    }
 }
 
 /** Process-local discovery only; the AccessibilityService publishes no Binder API. */
@@ -279,6 +317,13 @@ internal class BoundedAccessibilityCommandSession(
     private val receiptSnapshot: (UiSnapshotCorrelation) -> SemanticUiSnapshot? = { null },
     private val retainReceiptForCommands: (UiSnapshotCorrelation) -> Boolean = { false },
     private val withdrawReceiptForCommands: (UiSnapshotCorrelation) -> Unit = {},
+    private val invalidateEvidence: () -> Unit = { error("Evidence invalidation unavailable") },
+    private val awaitFreshSnapshot: (
+        Long,
+        () -> Boolean,
+        (SemanticUiSnapshot) -> Boolean,
+    ) -> SemanticUiSnapshot? = { _, _, _ -> null },
+    private val wakeSnapshotWait: () -> Unit = {},
 ) : HansAccessibilitySession, AutoCloseable {
     private val closed = AtomicBoolean(false)
     private val commandWorker = AtomicReference<Thread?>()
@@ -298,11 +343,28 @@ internal class BoundedAccessibilityCommandSession(
 
     override fun currentSnapshot(): SemanticUiSnapshot? = snapshot()
 
+    override fun invalidateRetainedEvidence(): Boolean =
+        !closed.get() && runCatching(invalidateEvidence).isSuccess
+
     override fun refreshSnapshot(): SemanticUiSnapshot? = if (closed.get()) {
         null
     } else {
         runCatching(refresh).getOrNull()
     }
+
+    override fun awaitSnapshot(
+        timeoutMillis: Long,
+        cancelled: () -> Boolean,
+        predicate: (SemanticUiSnapshot) -> Boolean,
+    ): SemanticUiSnapshot? {
+        if (closed.get() || timeoutMillis !in 1..EventDrivenSemanticSnapshotWaiter.MAX_WAIT_MILLIS) return null
+        val stopped = { closed.get() || runCatching(cancelled).getOrDefault(true) }
+        if (stopped()) return null
+        return runCatching { awaitFreshSnapshot(timeoutMillis, stopped, predicate) }.getOrNull()
+            ?.takeIf { !stopped() && it.correlation.sessionId == sessionId }
+    }
+
+    override fun wakeSnapshotWaiters() { runCatching(wakeSnapshotWait) }
 
     override fun retainSnapshotForCommands(correlation: UiSnapshotCorrelation): Boolean =
         !closed.get() && runCatching { retainForCommands(correlation) }.getOrDefault(false)
@@ -359,12 +421,25 @@ internal class BoundedAccessibilityCommandSession(
     ): Boolean {
         if (closed.get()) return false
         return try {
-            commandExecutor.execute {
-                commandWorker.compareAndSet(null, Thread.currentThread())
-                val result = runCatching { executor.execute(command, approval) }
-                    .getOrElse { unexpectedFailure(command.idempotencyKey) }
-                runCatching { callback.onResult(result) }
-            }
+            commandExecutor.execute(QueuedCommand(command, approval, callback))
+            true
+        } catch (_: RuntimeException) {
+            false
+        }
+    }
+
+    override fun submitGuarded(
+        command: AccessibilityCommand,
+        cancelled: () -> Boolean,
+        callback: AccessibilityCommandCallback,
+    ): Boolean {
+        if (closed.get()) return false
+        if (runCatching(cancelled).getOrDefault(true)) {
+            runCatching { callback.onResult(commandCancelled(command.idempotencyKey)) }
+            return true
+        }
+        return try {
+            commandExecutor.execute(QueuedCommand(command, null, callback, cancelled))
             true
         } catch (_: RuntimeException) {
             false
@@ -385,9 +460,76 @@ internal class BoundedAccessibilityCommandSession(
 
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
-        commandExecutor.shutdownNow()
+        wakeSnapshotWaiters()
+        // shutdownNow proves only that its returned tasks never started. Running tasks retain
+        // their real callback; interrupting them is not itself a physical-completion receipt.
+        val notStarted = commandExecutor.shutdownNow()
         commandWorker.set(null)
+        notStarted.forEach { (it as? QueuedCommand)?.closeBeforeRun() }
     }
+
+    private inner class QueuedCommand(
+        private val command: AccessibilityCommand,
+        private val approval: AccessibilityUserApproval?,
+        private val callback: AccessibilityCommandCallback,
+        private val cancelled: (() -> Boolean)? = null,
+    ) : Runnable {
+        private val claimed = AtomicBoolean(false)
+
+        override fun run() {
+            if (!claimed.compareAndSet(false, true)) return
+            // Covers a worker which took a task just before shutdownNow drained the queue.
+            if (closed.get()) {
+                deliverSessionClosed()
+                return
+            }
+            commandWorker.compareAndSet(null, Thread.currentThread())
+            if (cancelled != null && runCatching(cancelled).getOrDefault(true)) {
+                runCatching { callback.onResult(commandCancelled(command.idempotencyKey)) }
+                return
+            }
+            // A guarded caller may probe another lifecycle while close runs concurrently.
+            // Do not enter the domain after that probe if this session has already ended.
+            if (cancelled != null && closed.get()) {
+                deliverSessionClosed()
+                return
+            }
+            val result = runCatching { executor.execute(command, approval) }
+                .getOrElse { unexpectedFailure(command.idempotencyKey) }
+            runCatching { callback.onResult(result) }
+        }
+
+        fun closeBeforeRun() {
+            if (claimed.compareAndSet(false, true)) deliverSessionClosed()
+        }
+
+        private fun deliverSessionClosed() {
+            runCatching { callback.onResult(sessionClosed(command.idempotencyKey)) }
+        }
+    }
+
+    private fun sessionClosed(key: AccessibilityIdempotencyKey): AccessibilityExecutionResult =
+        notExecuted(key, "accessibility_session_closed")
+
+    private fun commandCancelled(key: AccessibilityIdempotencyKey): AccessibilityExecutionResult =
+        notExecuted(key, "accessibility_command_cancelled")
+
+    private fun notExecuted(key: AccessibilityIdempotencyKey, code: String): AccessibilityExecutionResult =
+        AccessibilityExecutionResult(
+            idempotencyKey = key,
+            status = AccessibilityExecutionStatus.REJECTED,
+            replayed = false,
+            observation = null,
+            postcondition = AccessibilityPostcondition(
+                kind = AccessibilityPostconditionKind.REQUEST_NOT_EXECUTED,
+                status = AccessibilityPostconditionStatus.FAILED,
+                detailCode = code,
+                before = null,
+                after = null,
+                trust = UiDataTrust.LOCAL_SYSTEM,
+            ),
+            errorCode = code,
+        )
 
     private fun unexpectedFailure(key: AccessibilityIdempotencyKey): AccessibilityExecutionResult =
         AccessibilityExecutionResult(

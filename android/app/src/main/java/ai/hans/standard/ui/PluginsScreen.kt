@@ -1,5 +1,11 @@
 package ai.hans.standard.ui
 
+import ai.hans.standard.R
+import ai.hans.standard.localization.HansTextResolver
+import ai.hans.standard.localization.AndroidHansTextResolver
+import ai.hans.standard.localization.rememberHansTextResolver
+import androidx.compose.ui.res.stringResource
+
 import ai.hans.standard.plugins.PluginConnectionActionKind
 import ai.hans.standard.plugins.PluginRemoteMcpPolicyDecisionSubmission
 import ai.hans.standard.plugins.PluginRemoteMcpPolicyEffect
@@ -54,6 +60,7 @@ fun PluginsScreen(
     callbacks: PluginsUiCallbacks,
     modifier: Modifier = Modifier,
 ) {
+    val uiText = rememberHansTextResolver()
     val showingDetails = state.selectedPluginId != null
     val navigateBack = if (showingDetails) callbacks.onCloseDetails else callbacks.onBack
     BackHandler(onBack = navigateBack)
@@ -66,7 +73,7 @@ fun PluginsScreen(
         ScreenHeader(
             title = state.selectedPlugin?.name ?: if (showingDetails) "Plugin" else "Plugins",
             onBack = navigateBack,
-            backLabel = if (showingDetails) "Schließen" else "Zurück",
+            backLabel = if (showingDetails) uiText.text(R.string.ui_close_b808f6) else uiText.text(R.string.ui_back_548611),
         )
         HorizontalDivider(color = MaterialTheme.colorScheme.outline)
 
@@ -92,6 +99,7 @@ private fun PluginCatalog(
     callbacks: PluginsUiCallbacks,
     modifier: Modifier = Modifier,
 ) {
+    val uiText = rememberHansTextResolver()
     Column(modifier = modifier) {
         PluginListSelector(
             selected = state.selectedList,
@@ -109,9 +117,9 @@ private fun PluginCatalog(
         ) {
             Text(
                 if (state.marketplaceRefreshing) {
-                    "Marketplaces werden aktualisiert …"
+                    uiText.text(R.string.ui_refreshing_marketplaces_511714)
                 } else {
-                    "Marketplaces aktualisieren"
+                    uiText.text(R.string.ui_refresh_marketplaces_0f281f)
                 },
             )
         }
@@ -128,7 +136,7 @@ private fun PluginCatalog(
         }
         if (state.pluginReadPending) {
             Text(
-                text = "Plugin-Details werden noch geladen …",
+                text = stringResource(R.string.ui_plugin_details_are_still_loading_c4d14a),
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 18.dp, vertical = 8.dp)
@@ -215,6 +223,7 @@ private fun RemoteMcpPolicyReviewAction(
     onSubmit: (PluginRemoteMcpPolicyReviewSubmission) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val uiText = rememberHansTextResolver()
     val review = action.policyReview ?: return
     var showReview by remember(
         action.pluginId,
@@ -252,13 +261,13 @@ private fun RemoteMcpPolicyReviewAction(
             ) {
                 Column(Modifier.padding(18.dp)) {
                     Text(
-                        "Werkzeugwirkung einstufen",
+                        stringResource(R.string.ui_classify_tool_effects_570f6f),
                         style = MaterialTheme.typography.headlineSmall,
                         fontWeight = FontWeight.SemiBold,
                     )
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        "Stufe die Wirkung jedes Werkzeugs selbst ein. Angaben des Servers sind nur Hinweise und werden nie automatisch übernommen.",
+                        stringResource(R.string.ui_classify_each_tool_s_effects_yourself_server_dec_bc70bc),
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         style = MaterialTheme.typography.bodyMedium,
                     )
@@ -281,9 +290,9 @@ private fun RemoteMcpPolicyReviewAction(
                                     append(": ")
                                     append(
                                         if (effect == PluginRemoteMcpPolicyEffect.MUTATING) {
-                                            "Erfolg wird vom verbundenen Server bestätigt; Hans beobachtet keine unabhängige Android-Nachwirkung."
+                                            uiText.text(R.string.ui_success_is_confirmed_by_the_connected_server_han_aeb8f4)
                                         } else {
-                                            "Das ist keine technische Schreibsperre. Wähle dies nur, wenn du dem Werkzeug vertraust, nichts zu verändern."
+                                            uiText.text(R.string.ui_this_is_not_a_technical_write_restriction_select_c92d06)
                                         },
                                     )
                                 },
@@ -325,7 +334,7 @@ private fun RemoteMcpPolicyReviewAction(
                                     )
                                     tool.description?.takeIf(String::isNotBlank)?.let { description ->
                                         Text(
-                                            "Serverbeschreibung (unbestätigt): $description",
+                                            stringResource(R.string.ui_server_description_unverified_value_8e5c77, description),
                                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                                             style = MaterialTheme.typography.bodySmall,
                                             modifier = Modifier.testTag(
@@ -334,7 +343,7 @@ private fun RemoteMcpPolicyReviewAction(
                                         )
                                     }
                                     Text(
-                                        remoteMcpDeclaredHintsText(tool.declaredHints),
+                                        remoteMcpDeclaredHintsText(tool.declaredHints, uiText),
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         style = MaterialTheme.typography.bodySmall,
                                     )
@@ -343,7 +352,7 @@ private fun RemoteMcpPolicyReviewAction(
                                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                                     ) {
                                         PolicyEffectButton(
-                                            label = "Als lesend vertrauen",
+                                            label = uiText.text(R.string.ui_trust_as_read_only_a0f2a1),
                                             selected = selectedEffect ==
                                                 PluginRemoteMcpPolicyEffect.READ_ONLY,
                                             enabled = !submissionPending,
@@ -357,7 +366,7 @@ private fun RemoteMcpPolicyReviewAction(
                                                 .testTag("remote_mcp_read_only_${tool.name}"),
                                         )
                                         PolicyEffectButton(
-                                            label = "Darf verändern",
+                                            label = uiText.text(R.string.ui_may_make_changes_2391a4),
                                             selected = selectedEffect ==
                                                 PluginRemoteMcpPolicyEffect.MUTATING,
                                             enabled = !submissionPending,
@@ -401,7 +410,7 @@ private fun RemoteMcpPolicyReviewAction(
                             .fillMaxWidth()
                             .testTag("approve_remote_mcp_policy"),
                     ) {
-                        Text(if (submissionPending) "Wird geprüft …" else "Zugriffe speichern")
+                        Text(if (submissionPending) uiText.text(R.string.ui_checking_490232) else uiText.text(R.string.ui_save_access_rules_3f5d14))
                     }
                     Spacer(Modifier.height(8.dp))
                     OutlinedButton(
@@ -411,7 +420,7 @@ private fun RemoteMcpPolicyReviewAction(
                             .fillMaxWidth()
                             .testTag("cancel_remote_mcp_policy"),
                     ) {
-                        Text("Abbrechen")
+                        Text(stringResource(R.string.ui_cancel_f7ff11))
                     }
                 }
             }
@@ -427,6 +436,7 @@ private fun PolicyEffectButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val uiText = rememberHansTextResolver()
     if (selected) {
         Button(onClick = onClick, enabled = enabled, modifier = modifier) { Text(label) }
     } else {
@@ -436,15 +446,16 @@ private fun PolicyEffectButton(
 
 private fun remoteMcpDeclaredHintsText(
     hints: ai.hans.standard.plugins.PluginRemoteMcpDeclaredHintsSnapshot,
+    uiText: HansTextResolver,
 ): String {
     val parts = buildList {
-        hints.readOnly?.let { add(if (it) "laut Server nur lesend" else "laut Server nicht nur lesend") }
-        hints.destructive?.let { add(if (it) "möglicherweise zerstörerisch" else "nicht als zerstörerisch markiert") }
-        hints.idempotent?.let { add(if (it) "wiederholbar" else "nicht als wiederholbar markiert") }
-        hints.openWorld?.let { add(if (it) "kann externe Daten nutzen" else "ohne offene Außenwelt markiert") }
+        hints.readOnly?.let { add(if (it) uiText.text(R.string.ui_read_only_according_to_the_server_4e680f) else uiText.text(R.string.ui_not_read_only_according_to_the_server_439387)) }
+        hints.destructive?.let { add(if (it) uiText.text(R.string.ui_potentially_destructive_e27435) else uiText.text(R.string.ui_not_marked_as_destructive_4b46b4)) }
+        hints.idempotent?.let { add(if (it) uiText.text(R.string.ui_repeatable) else uiText.text(R.string.ui_not_marked_as_repeatable_bd8955)) }
+        hints.openWorld?.let { add(if (it) uiText.text(R.string.ui_may_use_external_data_0a945c) else uiText.text(R.string.ui_marked_as_not_open_world_e11ae8)) }
     }
-    return if (parts.isEmpty()) "Der Server liefert keine Wirkungshinweise." else
-        "Serverhinweis: ${parts.joinToString(" · ")}"
+    return if (parts.isEmpty()) uiText.text(R.string.ui_the_server_provides_no_effect_hints_868f01) else
+        uiText.text(R.string.ui_server_hint, parts.joinToString(" · "))
 }
 
 @Composable
@@ -454,6 +465,7 @@ private fun RemoteMcpConnectionAction(
     enabled: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
+    val uiText = rememberHansTextResolver()
     Surface(
         modifier = modifier
             .fillMaxWidth()
@@ -494,6 +506,7 @@ private fun PluginDetails(
     callbacks: PluginsUiCallbacks,
     modifier: Modifier = Modifier,
 ) {
+    val uiText = rememberHansTextResolver()
     val pluginId = state.selectedPluginId ?: return
     val detail = state.selectedPlugin
     when {
@@ -503,7 +516,7 @@ private fun PluginDetails(
             modifier = modifier,
         )
         state.selectedPluginLoading -> StaticPluginDetailNotice(
-            text = "Plugin-Details werden geladen …",
+            text = uiText.text(R.string.ui_loading_plugin_details_09cdf2),
             testTag = "plugin_details_loading",
             modifier = modifier,
         )
@@ -513,7 +526,7 @@ private fun PluginDetails(
         ) {
             Text(
                 text = state.selectedPluginErrorMessage.ifBlank {
-                    "Die Plugin-Details sind nicht verfügbar."
+                    uiText.text(R.string.ui_plugin_details_are_unavailable_b73a37)
                 },
                 modifier = Modifier.testTag("plugin_details_error"),
                 color = MaterialTheme.colorScheme.error,
@@ -525,7 +538,7 @@ private fun PluginDetails(
                     .fillMaxWidth()
                     .testTag("retry_plugin_details"),
             ) {
-                Text("Erneut laden")
+                Text(stringResource(R.string.ui_reload_1b8b90))
             }
         }
     }
@@ -537,6 +550,7 @@ private fun StaticPluginDetailNotice(
     testTag: String,
     modifier: Modifier = Modifier,
 ) {
+    val uiText = rememberHansTextResolver()
     Text(
         text = text,
         modifier = modifier
@@ -553,6 +567,7 @@ private fun PluginDetailContent(
     callbacks: PluginsUiCallbacks,
     modifier: Modifier = Modifier,
 ) {
+    val uiText = rememberHansTextResolver()
     var confirmUninstall by remember(detail.id) { mutableStateOf(false) }
     val mutationPending = detail.skillChangePending ||
         detail.uninstallPending ||
@@ -589,8 +604,8 @@ private fun PluginDetailContent(
                         )
                     }
                     Text(
-                        text = "${detail.hookCount} Hooks · ${detail.mcpServerCount} MCP-Server · " +
-                            "${detail.scheduledTaskCount} Automationen",
+                        text = stringResource(R.string.ui_value_hooks_value_mcp_servers_d1a170, detail.hookCount, detail.mcpServerCount) +
+                            uiText.text(R.string.ui_value_automations_bcaf87, detail.scheduledTaskCount),
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         style = MaterialTheme.typography.bodyMedium,
                     )
@@ -601,19 +616,19 @@ private fun PluginDetailContent(
                                 .fillMaxWidth()
                                 .testTag("open_plugin_share_link"),
                         ) {
-                            Text("Plugin-Link öffnen")
+                            Text(stringResource(R.string.ui_open_plugin_link_6153e1))
                         }
                     }
                 }
             }
 
             item(key = "apps_heading") {
-                DetailSectionHeading("Apps und Verbindungen")
+                DetailSectionHeading(uiText.text(R.string.ui_apps_and_connections_7b4773))
             }
             if (detail.apps.isEmpty()) {
                 item(key = "apps_empty") {
                     Text(
-                        "Dieses Plugin meldet keine Apps.",
+                        stringResource(R.string.ui_this_plugin_reports_no_apps_fe075f),
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
@@ -629,7 +644,7 @@ private fun PluginDetailContent(
             if (detail.skills.isEmpty()) {
                 item(key = "skills_empty") {
                     Text(
-                        "Dieses Plugin meldet keine Skills.",
+                        stringResource(R.string.ui_this_plugin_reports_no_skills_8a3945),
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
@@ -682,6 +697,7 @@ private fun PluginMutationFooter(
     mutationPending: Boolean,
     onRequestUninstall: () -> Unit,
 ) {
+    val uiText = rememberHansTextResolver()
     Surface(
         modifier = Modifier
             .fillMaxWidth()
@@ -694,16 +710,16 @@ private fun PluginMutationFooter(
         ) {
             if (detail.skillChangePending) {
                 StaticOperationNotice(
-                    "Die Skill-Änderung wird bestätigt …",
+                    uiText.text(R.string.ui_confirming_the_skill_change_883c99),
                     "skill_change_pending",
                 )
             }
             if (detail.uninstallPending || detail.uninstallConfirmationPending) {
                 StaticOperationNotice(
                     if (detail.uninstallPending) {
-                        "Die Deinstallation wird angefragt …"
+                        uiText.text(R.string.ui_requesting_uninstall_48c979)
                     } else {
-                        "Die Deinstallation wird im Plugin-Katalog bestätigt …"
+                        uiText.text(R.string.ui_confirming_uninstall_in_the_plugin_catalog_82d652)
                     },
                     "plugin_uninstall_pending",
                 )
@@ -719,7 +735,7 @@ private fun PluginMutationFooter(
                     contentColor = MaterialTheme.colorScheme.error,
                 ),
             ) {
-                Text("Plugin deinstallieren")
+                Text(stringResource(R.string.ui_uninstall_plugin_9a3079))
             }
         }
     }
@@ -731,6 +747,7 @@ private fun PluginUninstallConfirmation(
     onConfirm: () -> Unit,
     onCancel: () -> Unit,
 ) {
+    val uiText = rememberHansTextResolver()
     Dialog(onDismissRequest = onCancel) {
         Surface(
             modifier = Modifier
@@ -742,7 +759,7 @@ private fun PluginUninstallConfirmation(
         ) {
             Column(modifier = Modifier.padding(20.dp)) {
                 Text(
-                    text = "Plugin deinstallieren?",
+                    text = stringResource(R.string.ui_uninstall_plugin_ff2901),
                     style = MaterialTheme.typography.headlineSmall,
                     fontWeight = FontWeight.SemiBold,
                 )
@@ -753,7 +770,7 @@ private fun PluginUninstallConfirmation(
                         .verticalScroll(rememberScrollState()),
                 ) {
                     Text(
-                        text = "$pluginName wird erst nach deiner Bestätigung entfernt.",
+                        text = stringResource(R.string.ui_value_will_be_removed_only_after_you_confirm_1afccc, pluginName),
                         style = MaterialTheme.typography.bodyLarge,
                     )
                 }
@@ -768,7 +785,7 @@ private fun PluginUninstallConfirmation(
                         contentColor = MaterialTheme.colorScheme.onError,
                     ),
                 ) {
-                    Text("Deinstallieren")
+                    Text(stringResource(R.string.ui_uninstall_22d6c6))
                 }
                 Spacer(Modifier.height(8.dp))
                 OutlinedButton(
@@ -777,7 +794,7 @@ private fun PluginUninstallConfirmation(
                         .fillMaxWidth()
                         .testTag("cancel_plugin_uninstall"),
                 ) {
-                    Text("Abbrechen")
+                    Text(stringResource(R.string.ui_cancel_f7ff11))
                 }
             }
         }
@@ -786,6 +803,7 @@ private fun PluginUninstallConfirmation(
 
 @Composable
 private fun DetailSectionHeading(text: String) {
+    val uiText = rememberHansTextResolver()
     Text(
         text = text,
         fontWeight = FontWeight.SemiBold,
@@ -798,6 +816,7 @@ private fun PluginAppRow(
     app: PluginAppUiModel,
     onOpenLink: (String) -> Unit,
 ) {
+    val uiText = rememberHansTextResolver()
     Surface(
         modifier = Modifier
             .fillMaxWidth()
@@ -824,10 +843,10 @@ private fun PluginAppRow(
                         .fillMaxWidth()
                         .testTag("connect_plugin_app_${app.id}")
                         .semantics {
-                            contentDescription = "Mit ${app.name} verbinden"
+                            contentDescription = uiText.text(R.string.ui_connect_to_value_11cc40, app.name)
                         },
                 ) {
-                    Text("Verbinden")
+                    Text(stringResource(R.string.ui_connect_0eefbb))
                 }
             }
         }
@@ -840,6 +859,7 @@ private fun PluginSkillRow(
     enabled: Boolean,
     onEnabledChanged: (Boolean) -> Unit,
 ) {
+    val uiText = rememberHansTextResolver()
     Surface(
         modifier = Modifier
             .fillMaxWidth()
@@ -879,6 +899,7 @@ private fun PluginSkillRow(
 
 @Composable
 private fun StaticOperationNotice(text: String, testTag: String) {
+    val uiText = rememberHansTextResolver()
     Text(
         text = text,
         modifier = Modifier.testTag(testTag),
@@ -892,8 +913,9 @@ private fun StaticOperationNotice(text: String, testTag: String) {
 internal fun ScreenHeader(
     title: String,
     onBack: () -> Unit,
-    backLabel: String = "Zurück",
+    backLabel: String? = null,
 ) {
+    val uiText = rememberHansTextResolver()
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -904,7 +926,7 @@ internal fun ScreenHeader(
             onClick = onBack,
             modifier = Modifier.testTag("navigate_back"),
         ) {
-            Text(backLabel)
+            Text(backLabel ?: stringResource(R.string.ui_back_548611))
         }
         Text(
             text = title,
@@ -920,14 +942,15 @@ private fun PluginListSelector(
     onSelected: (PluginListKind) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val uiText = rememberHansTextResolver()
     Row(
         modifier = modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         PluginListKind.entries.forEach { kind ->
             val label = when (kind) {
-                PluginListKind.INSTALLED -> "Installiert"
-                PluginListKind.AVAILABLE -> "Verfügbar"
+                PluginListKind.INSTALLED -> uiText.text(R.string.ui_installed_ec9a9b)
+                PluginListKind.AVAILABLE -> uiText.text(R.string.ui_available_3aa552)
             }
             if (selected == kind) {
                 Button(
@@ -954,6 +977,7 @@ private fun PluginListSelector(
 
 @Composable
 private fun EmptyPluginList(kind: PluginListKind) {
+    val uiText = rememberHansTextResolver()
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -961,14 +985,14 @@ private fun EmptyPluginList(kind: PluginListKind) {
     ) {
         Text(
             text = when (kind) {
-                PluginListKind.INSTALLED -> "Noch keine Plugins installiert"
-                PluginListKind.AVAILABLE -> "Keine weiteren Plugins verfügbar"
+                PluginListKind.INSTALLED -> uiText.text(R.string.ui_no_plugins_installed_yet_1eaea0)
+                PluginListKind.AVAILABLE -> uiText.text(R.string.ui_no_additional_plugins_available_72aa62)
             },
             style = MaterialTheme.typography.headlineSmall,
         )
         Spacer(Modifier.height(8.dp))
         Text(
-            text = "Die Liste wird direkt aus der Codex-Runtime übernommen.",
+            text = stringResource(R.string.ui_this_list_comes_directly_from_the_codex_runtime_c5cb89),
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             style = MaterialTheme.typography.bodyLarge,
         )
@@ -983,6 +1007,7 @@ private fun PluginCard(
     actionsBlocked: Boolean,
     onAction: () -> Unit,
 ) {
+    val uiText = rememberHansTextResolver()
     Surface(
         modifier = Modifier
             .fillMaxWidth()
@@ -1009,7 +1034,7 @@ private fun PluginCard(
             if (plugin.statusLabel.isNotBlank() || isOperating) {
                 Spacer(Modifier.height(9.dp))
                 Text(
-                    text = if (isOperating) "Wird angewendet …" else plugin.statusLabel,
+                    text = if (isOperating) uiText.text(R.string.ui_applying_9cd183) else plugin.statusLabel,
                     fontWeight = FontWeight.SemiBold,
                     style = MaterialTheme.typography.labelMedium,
                 )
@@ -1024,8 +1049,8 @@ private fun PluginCard(
             ) {
                 Text(
                     when (kind) {
-                        PluginListKind.INSTALLED -> "Verwalten"
-                        PluginListKind.AVAILABLE -> "Installieren"
+                        PluginListKind.INSTALLED -> uiText.text(R.string.ui_manage_9e2096)
+                        PluginListKind.AVAILABLE -> uiText.text(R.string.ui_install_f56804)
                     },
                 )
             }

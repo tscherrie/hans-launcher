@@ -109,7 +109,7 @@ class ActionKeyDispatcherTest {
         )
         assertEquals("gpt-6-astra", HansModelPreset.ASTRA_ULTRA.model)
         assertEquals("ultra", HansModelPreset.ASTRA_ULTRA.effort)
-        assertEquals("gpt-5.6-luna", HansModelPreset.LUNA_MAX.model)
+        assertEquals("gpt-6-luna", HansModelPreset.LUNA_MAX.model)
         assertEquals("max", HansModelPreset.LUNA_MAX.effort)
         // Existing serialized keyboard mappings must remain readable after the preset update.
         assertEquals(

@@ -1,5 +1,8 @@
 package ai.hans.standard.ui
 
+import ai.hans.standard.localization.TestResourceTextResolver
+import java.util.Locale
+
 import ai.hans.standard.settings.HansSettings
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -7,6 +10,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class RemoteWorkerUiProjectionTest {
+    private val localizationText by lazy { TestResourceTextResolver(Locale.GERMAN) }
+
     @Test
     fun passiveRemoteWorkerStateIsProjectedWithoutInventingEffectiveness() {
         val localState = RemoteWorkerSettingsUiState(
@@ -25,8 +30,7 @@ class RemoteWorkerUiProjectionTest {
         val projected = HansClientUiProjector.project(
             client = null,
             local = HansLocalUiState(remoteWorker = localState),
-            settings = HansSettings(),
-        ).settings.remoteWorker
+            settings = HansSettings(), text = localizationText).settings.remoteWorker
 
         assertEquals(localState, projected)
         assertTrue(projected.requestedEnabled)

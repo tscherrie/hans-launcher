@@ -1,5 +1,7 @@
 package ai.hans.standard.voice.android
 
+import ai.hans.standard.R
+
 import ai.hans.standard.voice.DictationForegroundServiceCore
 import ai.hans.standard.voice.RecordingForegroundHost
 import ai.hans.standard.voice.RecordingId
@@ -34,6 +36,11 @@ abstract class BaseDictationForegroundService : Service() {
     final override fun onCreate() {
         super.onCreate()
         recordingForegroundHost = AndroidRecordingForegroundHost(this)
+    }
+
+    final override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        if (::recordingForegroundHost.isInitialized) recordingForegroundHost.refreshLocale()
     }
 
     protected abstract fun createServiceCore(
@@ -142,17 +149,17 @@ class AndroidRecordingForegroundHost(
     private val service: Service,
 ) : RecordingForegroundHost {
     private val notificationManager = service.getSystemService(NotificationManager::class.java)
-    private var lastStatus: String? = null
+    private var lastStatus: Int? = null
 
     // This reusable abstract shell cannot itself be declared in the manifest.
     // Every concrete subclass must declare foregroundServiceType="microphone".
     @SuppressLint("ForegroundServiceType")
     override fun showRecordingForeground(state: RecordingState) {
         val status = when (state) {
-            is RecordingState.AwaitingAudioFocus -> "Preparing microphone"
-            is RecordingState.Recording -> "Listening"
-            is RecordingState.Stopping -> "Finishing audio"
-            is RecordingState.Finalizing -> "Finalizing dictation"
+            is RecordingState.AwaitingAudioFocus -> R.string.integration_preparing_microphone_ea59a34
+            is RecordingState.Recording -> R.string.integration_listening_49c4605
+            is RecordingState.Stopping -> R.string.integration_finishing_audio_2a44c37
+            is RecordingState.Finalizing -> R.string.integration_finalizing_dictation_6716ccc
             else -> return
         }
         // Initial promotion is handled synchronously by acknowledgeForegroundServiceStart(),
@@ -164,23 +171,17 @@ class AndroidRecordingForegroundHost(
     /** Synchronously fulfils Android's foreground-start contract before any fallible work. */
     @SuppressLint("ForegroundServiceType")
     fun acknowledgeForegroundServiceStart() {
-        showForegroundStatus("Preparing microphone")
+        showForegroundStatus(R.string.integration_preparing_microphone_ea59a34)
     }
 
     @SuppressLint("ForegroundServiceType")
-    private fun showForegroundStatus(status: String) {
+    @Synchronized
+    private fun showForegroundStatus(status: Int) {
         if (status == lastStatus) return
         ensureChannel()
         service.startForeground(
             NOTIFICATION_ID,
-            Notification.Builder(service, CHANNEL_ID)
-                .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-                .setContentTitle("Hans dictation")
-                .setContentText(status)
-                .setCategory(Notification.CATEGORY_SERVICE)
-                .setOngoing(true)
-                .setOnlyAlertOnce(true)
-                .build(),
+            buildNotification(status),
             ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE,
         )
         // Commit only after startForeground succeeds. A failed promotion must remain retryable
@@ -188,6 +189,7 @@ class AndroidRecordingForegroundHost(
         lastStatus = status
     }
 
+    @Synchronized
     override fun leaveRecordingForeground() {
         if (lastStatus == null) return
         lastStatus = null
@@ -196,15 +198,32 @@ class AndroidRecordingForegroundHost(
         }
     }
 
+    /** Event-driven translation refresh only; never opens or restarts the microphone. */
+    @Synchronized
+    fun refreshLocale() {
+        ignoreExpectedRuntimeFailure {
+            ensureChannel()
+            lastStatus?.let { notificationManager.notify(NOTIFICATION_ID, buildNotification(it)) }
+        }
+    }
+
+    private fun buildNotification(status: Int): Notification = Notification.Builder(service, CHANNEL_ID)
+        .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+        .setContentTitle(service.getString(R.string.integration_hans_dictation_cea468e))
+        .setContentText(service.getString(status))
+        .setCategory(Notification.CATEGORY_SERVICE)
+        .setOngoing(true)
+        .setOnlyAlertOnce(true)
+        .build()
+
     private fun ensureChannel() {
-        if (notificationManager.getNotificationChannel(CHANNEL_ID) != null) return
         notificationManager.createNotificationChannel(
             NotificationChannel(
                 CHANNEL_ID,
-                "Dictation recording",
+                service.getString(R.string.integration_dictation_recording_d18015c),
                 NotificationManager.IMPORTANCE_LOW,
             ).apply {
-                description = "Shows when Hans is recording a dictation"
+                description = service.getString(R.string.integration_shows_when_hans_is_recording_a_dictation_17f635d)
                 setSound(null, null)
                 enableVibration(false)
             },

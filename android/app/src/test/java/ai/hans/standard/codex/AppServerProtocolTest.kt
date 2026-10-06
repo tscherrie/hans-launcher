@@ -9,9 +9,40 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AppServerProtocolTest {
+    @Test fun notificationExternalFactsUseEmptyUserInputAndNativeToolAuthorityWithoutOverrides() {
+        val output = "{\"schema\":\"hans.notification.external-event.v1\",\"eventId\":\"event-1\"}"
+        val request = AppServerRequests.notificationToolOutputTurnStart(RequestId.Number(77), "thread-1", output)
+        val envelope = JSONObject(request.json)
+        assertEquals("turn/start", envelope.getString("method"))
+        val params = envelope.getJSONObject("params")
+        assertEquals(setOf("threadId", "input", "toolOutput"), params.keys().asSequence().toSet())
+        assertEquals(0, params.getJSONArray("input").length())
+        val external = params.getJSONObject("toolOutput")
+        assertEquals(setOf("name", "namespace", "output"), external.keys().asSequence().toSet())
+        assertEquals("push_event", external.getString("name"))
+        assertEquals("hans_notifications", external.getString("namespace"))
+        assertEquals(output, external.getString("output"))
+        val correlator = ResponseCorrelator()
+        correlator.register(request)
+        val receipt = correlator.accept("""{"id":77,"result":{"turn":{"id":"actual-native-turn","status":"inProgress"}}}""")
+        val decoded = ((receipt as CorrelatedResponse.Success).result as ExtensionAppServerResult).payload as NotificationToolOutputTurnResult
+        assertEquals("actual-native-turn", decoded.turnId)
+    }
+
+    @Test fun externalHistoryReadsOnlyBoundedFullNativeItemsWithoutExecutingATurn() {
+        val request = AppServerRequests.notificationExternalHistory(RequestId.Number(78), "thread-1", ExtensionResultDecoder { Unit })
+        val envelope = JSONObject(request.json)
+        assertEquals("thread/turns/list", envelope.getString("method"))
+        val params = envelope.getJSONObject("params")
+        assertEquals("full", params.getString("itemsView"))
+        assertEquals(8, params.getInt("limit"))
+        assertEquals("desc", params.getString("sortDirection"))
+        assertFalse(params.has("input"))
+    }
+
     @Test
     fun contractIsPinnedToTheRuntimeSchemaVersion() {
-        assertEquals("0.154.0", CodexProtocolContract.APP_SERVER_VERSION)
+        assertEquals("0.155.0", CodexProtocolContract.APP_SERVER_VERSION)
         assertEquals("v2", CodexProtocolContract.SCHEMA_GENERATION_MODE)
         assertEquals(DispatchOptions.ASTRA_MEDIUM, DispatchOptions.DEFAULT)
         assertEquals("gpt-6-astra", DispatchOptions.DEFAULT.model)

@@ -612,6 +612,14 @@ class RootFreeAndroidAccessibilityAdapterTest {
             "postcondition_snapshot_unavailable",
         )
 
+        // A pre-action frame retained by event coalescing is still not post-action evidence,
+        // including the exact baseline id (not just an older frame).
+        harness.host.snapshotAfter = snapshot(snapshotId = 5)
+        assertFailure(
+            harness.adapter.click(harness.target, UiPostconditionExpectation.ACTION_ACCEPTED),
+            "postcondition_snapshot_unavailable",
+        )
+
         harness.host.snapshotAfter = snapshot(snapshotId = 6)
         val accepted = harness.adapter.click(
             harness.target,

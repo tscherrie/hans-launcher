@@ -30,7 +30,9 @@ class SettingsRemoteWorkerTest {
             ),
         )
 
-        compose.onNodeWithTag("settings_group_advanced_work").performScrollTo().performClick()
+        compose.onNodeWithTag("settings_group_maintenance").performScrollTo().performClick()
+        compose.onNodeWithTag("remote_worker_id").assertDoesNotExist()
+        compose.onNodeWithTag("remote_worker_configuration_toggle").performScrollTo().performClick()
         compose.onNodeWithTag("remote_worker_state").assertExists()
         compose.onNodeWithTag("remote_worker_effective_state")
             .assertTextContains("Gewünscht: Ein", substring = true)
@@ -65,7 +67,9 @@ class SettingsRemoteWorkerTest {
                 onActivateRemoteWorker = { activations++ },
             ),
         )
-        compose.onNodeWithTag("settings_group_advanced_work").performScrollTo().performClick()
+        compose.onNodeWithTag("settings_group_maintenance").performScrollTo().performClick()
+        compose.onNodeWithTag("remote_worker_id").assertDoesNotExist()
+        compose.onNodeWithTag("remote_worker_configuration_toggle").performScrollTo().performClick()
         compose.onNodeWithTag("remote_worker_requested_enabled").performScrollTo().performClick()
         compose.onNodeWithTag("save_remote_worker")
             .performScrollTo()
@@ -90,7 +94,9 @@ class SettingsRemoteWorkerTest {
                 status = RemoteWorkerSettingsUiStatus.EFFECTIVE,
             ),
         )
-        compose.onNodeWithTag("settings_group_advanced_work").performScrollTo().performClick()
+        compose.onNodeWithTag("settings_group_maintenance").performScrollTo().performClick()
+        compose.onNodeWithTag("remote_worker_id").assertDoesNotExist()
+        compose.onNodeWithTag("remote_worker_configuration_toggle").performScrollTo().performClick()
         compose.onNodeWithTag("remote_worker_effective_state")
             .assertTextContains("Wirksam: Ja", substring = true)
         compose.onNodeWithTag("activate_remote_worker").performScrollTo()
@@ -103,7 +109,7 @@ class SettingsRemoteWorkerTest {
         remoteWorker: RemoteWorkerSettingsUiState,
         callbacks: SettingsUiCallbacks = callbacks(),
     ) {
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 SettingsScreen(
                     state = SettingsUiState(remoteWorker = remoteWorker),

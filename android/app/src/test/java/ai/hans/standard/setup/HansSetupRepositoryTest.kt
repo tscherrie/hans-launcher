@@ -30,7 +30,7 @@ class HansSetupRepositoryTest {
             "not_now",
         )
 
-        assertEquals(false, declined.cameraHoldEnabled)
+        assertEquals(null, declined.cameraHoldEnabled)
         listOf(
             HansSetupStep.MICROPHONE_ACCESS,
             HansSetupStep.HARDWARE_LIVE_TEST,
@@ -57,7 +57,6 @@ class HansSetupRepositoryTest {
         repository.recordSimpleChoice(HansSetupStep.NOTIFICATION_LISTENER_CONSENT, "not_now")
         repository.recordSimpleChoice(HansSetupStep.ACCESSIBILITY_CONSENT, "not_now")
         repository.recordSimpleChoice(HansSetupStep.HOME_ROLE_CONSENT, "not_now")
-        repository.recordSimpleChoice(HansSetupStep.SPEECH_CREDENTIAL_CONSENT, "not_now")
         repository.recordSimpleChoice(HansSetupStep.MODEL_REASONING, "not_now")
         HansSetupOptionalCapability.entries.forEach { capability ->
             assertEquals(capability, repository.read().currentOptionalCapability)
@@ -214,77 +213,60 @@ class HansSetupRepositoryTest {
     }
 
     @Test
-    fun hardwareToggleNeedsMicProofAndActualListeningStopAndSentReceipt() {
+    fun keyMappingDoesNotRequireAForcedRecordingStopOrSentReceipt() {
         val repository = repository()
         reachHardwareLiveTest(repository)
-        val live = repository.beginLiveTest(HansSetupStep.HARDWARE_LIVE_TEST)
-
-        repository.acceptAccessibilityHardwareCommand(live, ActionKeyCommand.ToggleDictation)
-        repository.acceptDictationEvidence(live, HansSetupDictationEvidence.LISTENING)
-        repository.acceptAccessibilityHardwareCommand(live, ActionKeyCommand.ToggleDictation)
-        val verified = repository.acceptDictationEvidence(live, HansSetupDictationEvidence.SENT)
-
-        assertEquals(
-            HansSetupStepStatus.VERIFIED,
-            verified.record(HansSetupStep.HARDWARE_LIVE_TEST).status,
-        )
-        assertEquals(HansSetupStep.HOME_ROLE_CONSENT, verified.currentStep)
+        assertEquals(HansSetupStep.HOME_ROLE_CONSENT, repository.read().currentStep)
+        assertTrue(runCatching { repository.beginLiveTest(HansSetupStep.HARDWARE_LIVE_TEST) }.isFailure)
+        assertTrue(repository.read().record(HansSetupStep.HARDWARE_MAPPING).terminal)
     }
 
     @Test
-    fun directCameraCaptureProofIsIndependentFromCameraHoldDictation() {
+    fun directCameraCaptureProofContinuesWithoutOfferingCameraHold() {
         val repository = repository()
         reachCameraCaptureTest(repository)
         val capture = repository.beginLiveTest(HansSetupStep.CAMERA_CAPTURE_TEST)
         val captured = repository.acceptCameraCapture(capture)
-
-        assertEquals(
-            HansSetupStepStatus.VERIFIED,
-            captured.record(HansSetupStep.CAMERA_CAPTURE_TEST).status,
-        )
-        assertEquals(HansSetupStep.CAMERA_HOLD_CHOICE, captured.currentStep)
-
-        val choice = repository.beginOperation(HansSetupStep.CAMERA_HOLD_CHOICE)
-        val disabled = repository.applyCameraChoice(choice, false)
-        assertEquals(
-            HansSetupStepStatus.SKIPPED,
-            disabled.record(HansSetupStep.CAMERA_HOLD_LIVE_TEST).status,
-        )
-        assertEquals(HansSetupStep.APP_NOTIFICATIONS_CONSENT, disabled.currentStep)
+        assertEquals(HansSetupStepStatus.VERIFIED, captured.record(HansSetupStep.CAMERA_CAPTURE_TEST).status)
+        assertEquals(HansSetupStep.APP_NOTIFICATIONS_CONSENT, captured.currentStep)
+        assertTrue(runCatching { repository.beginOperation(HansSetupStep.CAMERA_HOLD_CHOICE) }.isFailure)
     }
 
     @Test
-    fun cameraHoldLiveTestNeedsCompletedDictationPathAndCapture() {
-        val repository = repository()
-        reachCameraCaptureTest(repository)
-        val capture = repository.beginLiveTest(HansSetupStep.CAMERA_CAPTURE_TEST)
-        repository.acceptCameraCapture(capture)
-        val choice = repository.beginOperation(HansSetupStep.CAMERA_HOLD_CHOICE)
-        repository.applyCameraChoice(choice, true)
-        val live = repository.beginLiveTest(HansSetupStep.CAMERA_HOLD_LIVE_TEST)
-
-        repository.acceptCameraCapture(live)
-        repository.acceptCameraDictation(live, started = true)
-        repository.acceptDictationEvidence(live, HansSetupDictationEvidence.LISTENING)
-        repository.acceptCameraDictation(live, started = false)
-        val verified = repository.acceptDictationEvidence(live, HansSetupDictationEvidence.SENT)
-
-        assertEquals(
-            HansSetupStepStatus.VERIFIED,
-            verified.record(HansSetupStep.CAMERA_HOLD_LIVE_TEST).status,
-        )
+    fun allLegacyPendingVoiceStepsMigrateWithoutReopeningOrInventingPracticeProof() {
+        HANS_SETUP_RETIRED_STEPS.forEach { retired ->
+            val nextStep = when (retired) {
+                HansSetupStep.HARDWARE_LIVE_TEST -> HansSetupStep.HOME_ROLE_CONSENT
+                HansSetupStep.CAMERA_HOLD_CHOICE, HansSetupStep.CAMERA_HOLD_LIVE_TEST ->
+                    HansSetupStep.APP_NOTIFICATIONS_CONSENT
+                else -> HansSetupStep.MODEL_REASONING
+            }
+            val oldRecord = HansSetupStepRecord(HansSetupStepStatus.VERIFYING, 7,
+                "legacy_operation_nonce_123456", "operation_requested", 10, null, true, true)
+            val legacy = documentAt(nextStep).copy(currentStep = retired,
+                inputChoice = HansSetupInputChoice.HARDWARE_HOLD, cameraHoldEnabled = true,
+                effectiveModel = "gpt-6-astra", effectiveReasoningEffort = "medium",
+                steps = documentAt(nextStep).steps + (retired to oldRecord))
+            val storage = MemoryStorage(legacy)
+            val repository = repository(storage = storage)
+            val migrated = repository.startOrResume()
+            assertEquals(nextStep, migrated.currentStep)
+            assertEquals(HansSetupInputChoice.HARDWARE_HOLD, migrated.inputChoice)
+            assertEquals(true, migrated.cameraHoldEnabled)
+            assertEquals("gpt-6-astra", migrated.effectiveModel)
+            assertEquals(legacy.steps - retired, migrated.steps - retired)
+            assertEquals(HansSetupStepStatus.SKIPPED, migrated.record(retired).status)
+            assertEquals(null, migrated.record(retired).operationNonce)
+            assertEquals("setup_step_retired", migrated.record(retired).detailCode)
+            assertTrue(runCatching { repository.beginOperation(retired) }.isFailure)
+            assertEquals(migrated, repository(storage = storage).read())
+        }
     }
 
     @Test
-    fun voiceAndModelWaitForEffectiveReceipts() {
+    fun modelStillWaitsForEffectiveAppServerReceiptWithoutMandatoryVoicePractice() {
         val repository = repository()
         reachVoiceTest(repository)
-        val voice = repository.beginLiveTest(HansSetupStep.VOICE_DICTATION_TEST)
-        repository.acceptVoicePreview(voice, true)
-        repository.acceptDictationEvidence(voice, HansSetupDictationEvidence.LISTENING)
-        assertFalse(repository.read().record(HansSetupStep.VOICE_DICTATION_TEST).terminal)
-        repository.acceptDictationEvidence(voice, HansSetupDictationEvidence.SENT)
-
         val modelToken = repository.beginOperation(HansSetupStep.MODEL_REASONING)
         repository.requestModelSelection(modelToken, "gpt-5.6-luna", "max")
         repository.observeEffectiveSelection("gpt-5.6-sol", "ultra")
@@ -294,6 +276,23 @@ class HansSetupRepositoryTest {
         )
         val confirmed = repository.observeEffectiveSelection("gpt-5.6-luna", "max")
         assertEquals(HansSetupStep.OPTIONAL_CAPABILITIES, confirmed.currentStep)
+    }
+
+    @Test
+    fun legacySentOrNativeReplyCannotVerifyRetiredVoicePractice() {
+        val retired = HansSetupStep.VOICE_DICTATION_TEST
+        val legacy = documentAt(HansSetupStep.MODEL_REASONING).copy(
+            currentStep = retired, steps = documentAt(HansSetupStep.MODEL_REASONING).steps +
+                (retired to HansSetupStepRecord(HansSetupStepStatus.VERIFYING, 1,
+                    "legacy_operation_nonce_123456", "voice_preview_observed", 1, null, true, true)))
+        val repository = repository(storage = MemoryStorage(legacy))
+        val token = HansSetupOperationToken(retired, 1, "legacy_operation_nonce_123456")
+        val before = repository.startOrResume()
+        HansSetupDictationEvidence.entries.forEach { evidence ->
+            assertEquals(before, repository.acceptDictationEvidence(token, evidence))
+        }
+        assertEquals(HansSetupStep.MODEL_REASONING, before.currentStep)
+        assertEquals(HansSetupStepStatus.SKIPPED, before.record(retired).status)
     }
 
     @Test
@@ -513,29 +512,14 @@ class HansSetupRepositoryTest {
     }
 
     @Test
-    fun speechCredentialRequiresConsentAndEffectiveProofAndRemovalReopensVoice() {
-        val repository = repository(
-            storage = MemoryStorage(documentAt(HansSetupStep.SPEECH_CREDENTIAL_CONSENT)),
-        )
-
-        repository.recordSimpleChoice(HansSetupStep.SPEECH_CREDENTIAL_CONSENT, "enable")
-        assertEquals(HansSetupStep.SPEECH_CREDENTIAL_ACCESS, repository.read().currentStep)
-        verifyFresh(repository, HansSetupStep.SPEECH_CREDENTIAL_ACCESS)
-        assertEquals(HansSetupStep.VOICE_DICTATION_TEST, repository.read().currentStep)
-
-        repository.observeSpeechCredentialAvailability(available = false)
-        assertEquals(HansSetupStep.SPEECH_CREDENTIAL_ACCESS, repository.read().currentStep)
-        assertEquals(
-            HansSetupStepStatus.AWAITING_USER,
-            repository.read().record(HansSetupStep.VOICE_DICTATION_TEST).status,
-        )
-
-        val restored = repository.observeSpeechCredentialAvailability(available = true)
-        assertEquals(HansSetupStep.VOICE_DICTATION_TEST, restored.currentStep)
-        assertEquals(
-            HansSetupStepStatus.VERIFIED,
-            restored.record(HansSetupStep.SPEECH_CREDENTIAL_ACCESS).status,
-        )
+    fun apiCredentialChangesCannotReopenKeyFreeSetupOrTouchStoredProgress() {
+        val storage = MemoryStorage(completedSelectionDocument())
+        val repository = repository(storage = storage)
+        val before = repository.read()
+        assertEquals(before, repository.observeSpeechCredentialAvailability(false))
+        assertEquals(before, repository.observeSpeechCredentialAvailability(true))
+        assertTrue(repository.read().complete)
+        assertEquals(0, storage.writeCount)
     }
 
     @Test
@@ -544,22 +528,16 @@ class HansSetupRepositoryTest {
         reachNotificationAccess(repository)
         val stale = repository.beginOperation(HansSetupStep.NOTIFICATION_ACCESS)
         val current = repository.beginOperation(HansSetupStep.NOTIFICATION_ACCESS)
-
         assertTrue(runCatching { repository.markSettingsOpened(stale) }.isFailure)
-        assertEquals(
-            HansSetupStepStatus.SETTINGS_OPENED,
-            repository.markSettingsOpened(current).record(HansSetupStep.NOTIFICATION_ACCESS).status,
-        )
-
-        val hardwareRepository = repository()
-        reachHardwareLiveTest(hardwareRepository)
-        val oldLive = hardwareRepository.beginLiveTest(HansSetupStep.HARDWARE_LIVE_TEST)
-        val currentLive = hardwareRepository.beginLiveTest(HansSetupStep.HARDWARE_LIVE_TEST)
-        hardwareRepository.acceptHardwareCommand(oldLive, ActionKeyCommand.ToggleDictation)
-        hardwareRepository.acceptDictationEvidence(oldLive, HansSetupDictationEvidence.LISTENING)
-        val record = hardwareRepository.read().record(HansSetupStep.HARDWARE_LIVE_TEST)
-        assertEquals(currentLive.generation, record.generation)
-        assertFalse(record.liveStartObserved)
+        assertEquals(HansSetupStepStatus.SETTINGS_OPENED,
+            repository.markSettingsOpened(current).record(HansSetupStep.NOTIFICATION_ACCESS).status)
+        repository.applyFreshProbe(current, HansSetupProbeResult(true, "notification_access_granted"))
+        val oldLive = repository.beginLiveTest(HansSetupStep.NOTIFICATION_LIVE_TEST)
+        val currentLive = repository.beginLiveTest(HansSetupStep.NOTIFICATION_LIVE_TEST)
+        assertTrue(runCatching {
+            repository.applyFreshProbe(oldLive, HansSetupProbeResult(true, "late_live_receipt"))
+        }.isFailure)
+        assertEquals(currentLive.generation, repository.read().record(HansSetupStep.NOTIFICATION_LIVE_TEST).generation)
     }
 
     @Test
@@ -583,61 +561,54 @@ class HansSetupRepositoryTest {
     }
 
     @Test
-    fun activityRecreationReturnsActiveDictationLiveTestsToRetryableAwaitingState() {
-        listOf(
-            HansSetupStep.HARDWARE_LIVE_TEST,
-            HansSetupStep.CAMERA_HOLD_LIVE_TEST,
-            HansSetupStep.VOICE_DICTATION_TEST,
-        ).forEach { step ->
-            val repository = repository(storage = MemoryStorage(documentAt(step)))
-            val token = repository.beginLiveTest(step)
-
-            val recovered = repository.abandonDictationLiveTestForActivityRecreation(token)
-
-            val record = recovered.record(step)
-            assertEquals(step, recovered.currentStep)
-            assertEquals(HansSetupStepStatus.AWAITING_USER, record.status)
-            assertEquals(null, record.operationNonce)
-            assertEquals("dictation_live_test_activity_recreated", record.detailCode)
-            assertFalse(record.liveStartObserved)
-            assertFalse(record.auxiliaryEvidenceObserved)
-            val afterLateEvidence = repository.acceptDictationEvidence(
-                token,
-                HansSetupDictationEvidence.LISTENING,
-            )
-            assertEquals(HansSetupStepStatus.AWAITING_USER, afterLateEvidence.record(step).status)
-            assertEquals(
-                "dictation_live_test_activity_recreated",
-                afterLateEvidence.record(step).detailCode,
-            )
+    fun activityRecreationCannotRestoreRetiredDictationOperations() {
+        listOf(HansSetupStep.HARDWARE_LIVE_TEST, HansSetupStep.CAMERA_HOLD_LIVE_TEST,
+            HansSetupStep.VOICE_DICTATION_TEST).forEach { step ->
+            val base = documentAt(HansSetupStep.MODEL_REASONING)
+            val storage = MemoryStorage(base.copy(currentStep = step,
+                steps = base.steps + (step to HansSetupStepRecord(HansSetupStepStatus.VERIFYING, 2,
+                    "retired_operation_nonce_123456", "operation_requested", 10, null, true, true))))
+            val repository = repository(storage = storage)
+            val token = HansSetupOperationToken(step, 2, "retired_operation_nonce_123456")
+            val before = repository.startOrResume()
+            val writesBefore = storage.writeCount
+            repeat(3) {
+                assertEquals(before, repository.abandonDictationLiveTestForActivityRecreation(token))
+            }
+            assertEquals(writesBefore, storage.writeCount)
+            assertEquals(before, repository.acceptDictationEvidence(token, HansSetupDictationEvidence.LISTENING))
+            assertEquals(HansSetupStep.MODEL_REASONING, before.currentStep)
+            assertEquals(HansSetupStepStatus.SKIPPED, before.record(step).status)
+            assertEquals(null, before.record(step).operationNonce)
         }
     }
 
     @Test
-    fun oldForegroundHardwareProofMigratesBehindAccessibilityAndRequiresGlobalReceipt() {
-        val legacy = documentAt(HansSetupStep.HOME_ROLE_CONSENT).copy(
-            steps = documentAt(HansSetupStep.HOME_ROLE_CONSENT).steps +
-                (
-                    HansSetupStep.HARDWARE_LIVE_TEST to HansSetupStepRecord(
-                        status = HansSetupStepStatus.VERIFIED,
-                        detailCode = "hardware_recording_start_stop_sent_verified",
-                    )
-                    ),
-            inputChoice = HansSetupInputChoice.HARDWARE_TOGGLE,
-        )
-        val repository = repository(storage = MemoryStorage(legacy))
-
+    fun historicalHardwareProofRemainsReadableButNeverReintroducesRetiredStep() {
+        val base = documentAt(HansSetupStep.HOME_ROLE_CONSENT)
+        val oldProof = HansSetupStepRecord(HansSetupStepStatus.VERIFIED,
+            detailCode = "hardware_recording_start_stop_sent_verified")
+        val repository = repository(storage = MemoryStorage(base.copy(
+            steps = base.steps + (HansSetupStep.HARDWARE_LIVE_TEST to oldProof),
+            inputChoice = HansSetupInputChoice.HARDWARE_TOGGLE)))
         val migrated = repository.read()
+        assertEquals(HansSetupStep.HOME_ROLE_CONSENT, migrated.currentStep)
+        assertEquals(oldProof, migrated.record(HansSetupStep.HARDWARE_LIVE_TEST))
+        assertEquals(HansSetupStepStatus.VERIFIED, migrated.record(HansSetupStep.ACCESSIBILITY_LIVE_TEST).status)
+        assertTrue(runCatching { repository.beginLiveTest(HansSetupStep.HARDWARE_LIVE_TEST) }.isFailure)
+    }
 
-        assertEquals(HansSetupStep.HARDWARE_LIVE_TEST, migrated.currentStep)
-        assertEquals(
-            HansSetupStepStatus.AWAITING_USER,
-            migrated.record(HansSetupStep.HARDWARE_LIVE_TEST).status,
-        )
-        assertEquals(
-            HansSetupStepStatus.VERIFIED,
-            migrated.record(HansSetupStep.ACCESSIBILITY_LIVE_TEST).status,
-        )
+    @Test
+    fun newSetupOffersOnlyPressActionKeyOrNoPhysicalKeyNeverAHoldChoice() {
+        val repository = repository()
+        repository.startOrResume()
+        repository.recordSimpleChoice(HansSetupStep.INTRO, "begin")
+        assertTrue(runCatching {
+            repository.recordSimpleChoice(HansSetupStep.INPUT_CHOICE, "hardware_hold")
+        }.isFailure)
+        assertEquals(HansSetupStep.INPUT_CHOICE, repository.read().currentStep)
+        assertEquals(HansSetupStep.HARDWARE_MAPPING,
+            repository.recordSimpleChoice(HansSetupStep.INPUT_CHOICE, "hardware_toggle").currentStep)
     }
 
     private fun reachMicrophoneConsent(
@@ -658,8 +629,6 @@ class HansSetupRepositoryTest {
         repository.recordSimpleChoice(HansSetupStep.MICROPHONE_CONSENT, "enable")
         verifyFresh(repository, HansSetupStep.MICROPHONE_ACCESS)
         repository.recordSimpleChoice(HansSetupStep.CAMERA_CAPTURE_TEST, "not_now")
-        val cameraChoice = repository.beginOperation(HansSetupStep.CAMERA_HOLD_CHOICE)
-        repository.applyCameraChoice(cameraChoice, false)
         repository.recordSimpleChoice(HansSetupStep.APP_NOTIFICATIONS_CONSENT, "not_now")
         repository.recordSimpleChoice(HansSetupStep.NOTIFICATION_LISTENER_CONSENT, "not_now")
         repository.recordSimpleChoice(HansSetupStep.ACCESSIBILITY_CONSENT, "enable")
@@ -676,8 +645,6 @@ class HansSetupRepositoryTest {
     private fun reachNotificationAccess(repository: HansSetupRepository) {
         reachCameraCaptureTest(repository)
         repository.recordSimpleChoice(HansSetupStep.CAMERA_CAPTURE_TEST, "not_now")
-        val cameraChoice = repository.beginOperation(HansSetupStep.CAMERA_HOLD_CHOICE)
-        repository.applyCameraChoice(cameraChoice, false)
         repository.recordSimpleChoice(HansSetupStep.APP_NOTIFICATIONS_CONSENT, "enable")
         verifyFresh(repository, HansSetupStep.APP_NOTIFICATIONS_ACCESS)
         repository.recordSimpleChoice(HansSetupStep.NOTIFICATION_LISTENER_CONSENT, "enable")
@@ -686,14 +653,10 @@ class HansSetupRepositoryTest {
     private fun reachVoiceTest(repository: HansSetupRepository) {
         reachCameraCaptureTest(repository)
         repository.recordSimpleChoice(HansSetupStep.CAMERA_CAPTURE_TEST, "not_now")
-        val cameraChoice = repository.beginOperation(HansSetupStep.CAMERA_HOLD_CHOICE)
-        repository.applyCameraChoice(cameraChoice, false)
         repository.recordSimpleChoice(HansSetupStep.APP_NOTIFICATIONS_CONSENT, "not_now")
         repository.recordSimpleChoice(HansSetupStep.NOTIFICATION_LISTENER_CONSENT, "not_now")
         repository.recordSimpleChoice(HansSetupStep.ACCESSIBILITY_CONSENT, "not_now")
         repository.recordSimpleChoice(HansSetupStep.HOME_ROLE_CONSENT, "not_now")
-        repository.recordSimpleChoice(HansSetupStep.SPEECH_CREDENTIAL_CONSENT, "enable")
-        verifyFresh(repository, HansSetupStep.SPEECH_CREDENTIAL_ACCESS)
     }
 
     private fun verifyFresh(repository: HansSetupRepository, step: HansSetupStep) {

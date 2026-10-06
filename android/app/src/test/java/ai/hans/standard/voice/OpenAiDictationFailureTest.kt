@@ -30,6 +30,10 @@ class OpenAiDictationFailureTest {
             RecordingFailure.OPENAI_RATE_LIMITED,
             openAiDictationFailure("realtime_stt_rate_limited"),
         )
+        assertEquals(RecordingFailure.OPENAI_SPENDING_LIMIT_REACHED,
+            openAiDictationFailure("realtime_stt_spending_limit_reached"))
+        assertEquals(RecordingFailure.OPENAI_PROJECT_SPENDING_LIMIT_REACHED,
+            openAiDictationFailure("realtime_stt_project_spending_limit_reached"))
         listOf(
             "realtime_stt_network_unavailable",
             "realtime_stt_network_timeout",

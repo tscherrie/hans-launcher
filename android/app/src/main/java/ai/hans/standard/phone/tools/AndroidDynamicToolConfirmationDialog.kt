@@ -1,5 +1,8 @@
 package ai.hans.standard.phone.tools
 
+import ai.hans.standard.R
+import ai.hans.standard.localization.AndroidHansTextResolver
+
 import android.app.Activity
 import android.app.AlertDialog
 import androidx.lifecycle.Lifecycle
@@ -70,18 +73,18 @@ class AndroidDynamicToolConfirmationDialog(
                 }
                 try {
                     val builder = AlertDialog.Builder(activity)
-                        .setTitle("Android-Aktion erlauben?")
+                        .setTitle(AndroidHansTextResolver(activity).text(R.string.integration_allow_android_action_8538fd2))
                         .setMessage(messageFor(request.capabilityId, persistentDescriptor))
-                        .setNegativeButton("Ablehnen", null)
+                        .setNegativeButton(AndroidHansTextResolver(activity).text(R.string.integration_decline_7be75ce), null)
                         .setOnCancelListener {
                             decision.compareAndSet(DialogDecision.PENDING, DialogDecision.REJECTED)
                         }
                     if (persistentDescriptor == null) {
-                        builder.setPositiveButton("Einmal erlauben", null)
+                        builder.setPositiveButton(AndroidHansTextResolver(activity).text(R.string.integration_allow_once_90153ce), null)
                     } else {
                         builder
-                            .setNeutralButton("Einmal erlauben", null)
-                            .setPositiveButton("Dauerhaft erlauben", null)
+                            .setNeutralButton(AndroidHansTextResolver(activity).text(R.string.integration_allow_once_90153ce), null)
+                            .setPositiveButton(AndroidHansTextResolver(activity).text(R.string.integration_always_allow_179369f), null)
                     }
                     val dialog = builder.create()
                     dialog.setOnDismissListener {
@@ -205,33 +208,33 @@ class AndroidDynamicToolConfirmationDialog(
     ): String {
         val action = when (capabilityId) {
             CapabilityId.LIST_LAUNCHABLE_APPS ->
-                "Hans möchte die auf diesem Telefon startbaren Apps auflisten."
+                AndroidHansTextResolver(activity).text(R.string.integration_hans_would_like_to_list_the_launchable_apps_on_this_pho_4a0ec03)
             CapabilityId.LAUNCH_APP ->
-                "Hans möchte jetzt eine installierte App sichtbar öffnen."
+                AndroidHansTextResolver(activity).text(R.string.integration_hans_would_like_to_visibly_open_an_installed_app_now_2647e3f)
             CapabilityId.OPEN_VIEW ->
-                "Hans möchte jetzt eine öffentliche Webadresse in einer App öffnen."
+                AndroidHansTextResolver(activity).text(R.string.integration_hans_would_like_to_open_a_public_web_address_in_an_app__562e14f)
             CapabilityId.OPEN_SETTINGS ->
-                "Hans möchte jetzt eine Android-Einstellungsseite öffnen."
+                AndroidHansTextResolver(activity).text(R.string.integration_hans_would_like_to_open_an_android_settings_page_now_638c6df)
             CapabilityId.MANAGE_NOTIFICATION_PRIVACY ->
-                "Hans möchte jetzt deine lokalen Benachrichtigungs-Datenschutzregeln ändern. " +
-                    "Dabei können gespeicherte Push-Daten gelöscht oder künftig mehr Inhalte " +
-                    "aufbewahrt werden."
+                AndroidHansTextResolver(activity).text(R.string.integration_hans_would_like_to_change_your_local_notification_priva_3647697) +
+                    AndroidHansTextResolver(activity).text(R.string.integration_this_may_delete_stored_notification_data_or_retain_more_9026854) +
+                    AndroidHansTextResolver(activity).text(R.string.integration_in_future_307fe1c)
             else ->
-                "Hans möchte jetzt eine sichtbare Android-Aktion ausführen."
+                AndroidHansTextResolver(activity).text(R.string.integration_hans_would_like_to_perform_a_visible_android_action_now_15c7080)
         }
         val durableExplanation = when (persistentDescriptor?.scope) {
             PersistentAndroidConsentScope.INSTALLED_APPS_READ ->
-                "Dauerhaft erlauben lässt Hans künftig ohne weiteren Hans-Dialog prüfen, welche Apps installiert und startbar sind."
+                AndroidHansTextResolver(activity).text(R.string.integration_always_allow_lets_hans_check_which_apps_are_installed_a_63efda5)
             PersistentAndroidConsentScope.OPEN_APP ->
-                "Dauerhaft erlauben lässt Hans künftig installierte Apps sichtbar öffnen."
+                AndroidHansTextResolver(activity).text(R.string.integration_always_allow_lets_hans_visibly_open_installed_apps_in_f_952a936)
             PersistentAndroidConsentScope.OPEN_SAFE_NAVIGATION ->
-                "Dauerhaft erlauben lässt Hans künftig geprüfte Web-, Karten- und Store-Adressen sichtbar öffnen."
+                AndroidHansTextResolver(activity).text(R.string.integration_always_allow_lets_hans_visibly_open_validated_web_map_a_b0a7192)
             PersistentAndroidConsentScope.OPEN_SETTINGS_PAGE ->
-                "Dauerhaft erlauben lässt Hans künftig bekannte öffentliche Android-Einstellungsseiten sichtbar öffnen. Sicherheits- und Berechtigungsdialoge bleiben unter deiner Kontrolle."
+                AndroidHansTextResolver(activity).text(R.string.integration_always_allow_lets_hans_visibly_open_known_public_androi_d784765)
             null -> return action
             else -> return action
         }
-        return "$action $durableExplanation Du kannst die Freigabe jederzeit in Hans widerrufen. Android-Systemberechtigungen bleiben davon getrennt."
+        return AndroidHansTextResolver(activity).text(R.string.integration_1_2_you_can_revoke_this_permission_in_hans_at_any_time__b5c72c5, action, durableExplanation)
     }
 
     private fun isVisibleDialogHost(): Boolean {

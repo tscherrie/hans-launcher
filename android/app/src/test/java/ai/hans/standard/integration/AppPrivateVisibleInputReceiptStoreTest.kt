@@ -3,7 +3,9 @@ package ai.hans.standard.integration
 import ai.hans.standard.codex.CodexInput
 import android.content.SharedPreferences
 import java.lang.reflect.Proxy
+import org.json.JSONArray
 import org.json.JSONObject
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -188,6 +190,163 @@ class AppPrivateVisibleInputReceiptStoreTest {
         assertNull(restartedStore.read("thread-1", "client-1"))
     }
 
+    @Test
+    fun explicitRecoveryPreservesReferenceAndReceiptBytesInOneCommitAcrossRestart() {
+        val retainedReceipt = receipt("selected-thread", "client-1", "visible input")
+        val preferences = InMemorySharedPreferences(mapOf("unrelated" to "untouched"))
+        val store = AppPrivateCodexSessionStore(preferences.proxy, WORKSPACE)
+        store.saveThreadId("selected-thread")
+        store.record(retainedReceipt)
+        val receiptBytes = checkNotNull(preferences.snapshot()[RECEIPTS_KEY]).toByteArray()
+        val commitsBefore = preferences.commitCount
+
+        assertTrue(store.preserveSelectedThreadForExplicitRecovery("selected-thread"))
+
+        assertEquals(commitsBefore + 1, preferences.commitCount)
+        assertEquals(setOf(THREAD_KEY, RECOVERY_KEY), preferences.lastCommittedKeys)
+        val restartedPreferences = InMemorySharedPreferences(preferences.snapshot())
+        val restartedStore = AppPrivateCodexSessionStore(restartedPreferences.proxy, WORKSPACE)
+        assertNull(restartedStore.readThreadId())
+        assertEquals(listOf("selected-thread"), preservedIds(restartedPreferences))
+        assertEquals(retainedReceipt, restartedStore.read("selected-thread", "client-1"))
+        assertArrayEquals(receiptBytes, checkNotNull(restartedPreferences.snapshot()[RECEIPTS_KEY]).toByteArray())
+        assertEquals("untouched", restartedPreferences.snapshot()["unrelated"])
+    }
+
+    @Test
+    fun explicitRecoveryNeverReadsOrRewritesEvenMalformedReceipts() {
+        val rawReceipt = "  opaque malformed receipt bytes: \\u0020  "
+        val preferences = InMemorySharedPreferences(
+            mapOf(THREAD_KEY to "selected-thread", RECEIPTS_KEY to rawReceipt),
+        )
+        val store = AppPrivateCodexSessionStore(preferences.proxy, WORKSPACE)
+
+        assertTrue(store.preserveSelectedThreadForExplicitRecovery("selected-thread"))
+
+        assertArrayEquals(rawReceipt.toByteArray(), checkNotNull(preferences.snapshot()[RECEIPTS_KEY]).toByteArray())
+        assertFalse(RECEIPTS_KEY in preferences.readKeys)
+        assertFalse(RECEIPTS_KEY in preferences.lastCommittedKeys)
+    }
+
+    @Test
+    fun explicitRecoveryCompareAndSetRejectsMissingForeignOrInvalidSelectionWithoutWriting() {
+        listOf(null, "another-thread", "", " ", "control\nthread", "t".repeat(257)).forEach { selected ->
+            val preferences = InMemorySharedPreferences(
+                mapOf(THREAD_KEY to selected, RECOVERY_KEY to "malformed", RECEIPTS_KEY to "opaque"),
+            )
+            val before = preferences.snapshot()
+            val store = AppPrivateCodexSessionStore(preferences.proxy, WORKSPACE)
+            assertFalse(store.preserveSelectedThreadForExplicitRecovery("expected-thread"))
+            assertEquals(before, preferences.snapshot())
+            assertEquals(0, preferences.commitCount)
+        }
+        listOf("", " ", "control\nthread", "t".repeat(257)).forEach { invalid ->
+            val preferences = InMemorySharedPreferences(mapOf(THREAD_KEY to invalid))
+            val store = AppPrivateCodexSessionStore(preferences.proxy, WORKSPACE)
+            assertFalse(store.preserveSelectedThreadForExplicitRecovery(invalid))
+            assertEquals(0, preferences.commitCount)
+        }
+    }
+
+    @Test
+    fun explicitRecoveryAppendsWithoutEvictionAndIsIdempotentForAnExistingReference() {
+        val preferences = InMemorySharedPreferences(
+            mapOf(THREAD_KEY to "selected-thread", RECOVERY_KEY to "[\"earlier-thread\"]"),
+        )
+        val store = AppPrivateCodexSessionStore(preferences.proxy, WORKSPACE)
+        assertTrue(store.preserveSelectedThreadForExplicitRecovery("selected-thread"))
+        assertEquals(listOf("earlier-thread", "selected-thread"), preservedIds(preferences))
+        val commitsAfter = preferences.commitCount
+        assertFalse(store.preserveSelectedThreadForExplicitRecovery("selected-thread"))
+        assertEquals(commitsAfter, preferences.commitCount)
+
+        store.saveThreadId("selected-thread")
+        val priorReferences = preferences.snapshot()[RECOVERY_KEY]
+        assertTrue(store.preserveSelectedThreadForExplicitRecovery("selected-thread"))
+        assertEquals(priorReferences, preferences.snapshot()[RECOVERY_KEY])
+        assertEquals(setOf(THREAD_KEY), preferences.lastCommittedKeys)
+        assertNull(store.readThreadId())
+    }
+
+    @Test
+    fun malformedExplicitRecoveryReferencesFailClosedWithoutLosingSelection() {
+        val malformed = listOf(
+            null, "", "not-json", "{}", "null", "[null]", "[1]", "[true]", "[{}]", "[[]]",
+            "[\"\"]", "[\"  \"]", "[\"bad\\nthread\"]", "[unquoted]", "['single-quotes']",
+            "[\"same\",\"same\"]", "[\"ok\",]", "[\"ok\"] trailing", "[\"ok\"]\u0000",
+            JSONArray(listOf("t".repeat(257))).toString(),
+            JSONArray(List(65) { "thread-$it" }).toString(),
+            " ".repeat(100_000) + "[]",
+            "[".repeat(20_000),
+        )
+        malformed.forEach { raw ->
+            val preferences = InMemorySharedPreferences(
+                mapOf(THREAD_KEY to "selected-thread", RECOVERY_KEY to raw, RECEIPTS_KEY to "opaque"),
+            )
+            val before = preferences.snapshot()
+            val store = AppPrivateCodexSessionStore(preferences.proxy, WORKSPACE)
+            assertFalse(store.preserveSelectedThreadForExplicitRecovery("selected-thread"))
+            assertEquals(before, preferences.snapshot())
+            assertEquals("selected-thread", store.readThreadId())
+            assertEquals(0, preferences.commitCount)
+        }
+    }
+
+    @Test
+    fun explicitRecoveryNeverEvictsAFullReferenceListButExistingReferencesNeedNoAdditionalSlot() {
+        val ids = List(64) { "thread-$it" }
+        val preferences = InMemorySharedPreferences(
+            mapOf(THREAD_KEY to "new-thread", RECOVERY_KEY to JSONArray(ids).toString()),
+        )
+        val store = AppPrivateCodexSessionStore(preferences.proxy, WORKSPACE)
+        val before = preferences.snapshot()
+        assertFalse(store.preserveSelectedThreadForExplicitRecovery("new-thread"))
+        assertEquals(before, preferences.snapshot())
+        assertEquals(0, preferences.commitCount)
+
+        store.saveThreadId(ids.last())
+        assertTrue(store.preserveSelectedThreadForExplicitRecovery(ids.last()))
+        assertEquals(ids, preservedIds(preferences))
+        assertNull(store.readThreadId())
+    }
+
+    @Test
+    fun explicitRecoveryCommitFailureOrThrowPoisonsAllStoresSharingPossiblyModifiedRam() {
+        listOf(false, true).forEach { throws ->
+            val original = mapOf(
+                THREAD_KEY to "selected-thread",
+                RECOVERY_KEY to "[\"earlier-thread\"]",
+                RECEIPTS_KEY to "opaque-receipt",
+                "unrelated" to "untouched",
+            )
+            val preferences = InMemorySharedPreferences(
+                original,
+                failCommits = !throws,
+                throwOnCommit = throws,
+                mutateMemoryOnFailedCommit = true,
+            )
+            val store = AppPrivateCodexSessionStore(preferences.proxy, WORKSPACE)
+            val otherStore = AppPrivateCodexSessionStore(preferences.proxy, WORKSPACE)
+            assertTrue(runCatching { store.preserveSelectedThreadForExplicitRecovery("selected-thread") }.isFailure)
+            assertEquals(original, preferences.snapshot())
+            assertTrue(runCatching { store.readThreadId() }.isFailure)
+            assertTrue(runCatching { otherStore.readThreadId() }.isFailure)
+            assertTrue(runCatching { otherStore.preserveSelectedThreadForExplicitRecovery("selected-thread") }.isFailure)
+            assertTrue(runCatching { otherStore.saveThreadId("replacement-thread") }.isFailure)
+            assertEquals(1, preferences.commitCount)
+            val restartedStore = AppPrivateCodexSessionStore(
+                InMemorySharedPreferences(preferences.snapshot()).proxy,
+                WORKSPACE,
+            )
+            assertEquals("selected-thread", restartedStore.readThreadId())
+        }
+    }
+
+    private fun preservedIds(preferences: InMemorySharedPreferences): List<String> {
+        val array = JSONArray(checkNotNull(preferences.snapshot()[RECOVERY_KEY]))
+        return List(array.length()) { array.getString(it) }
+    }
+
     private fun receipt(threadId: String, clientId: String, visibleText: String) = checkNotNull(
         VisibleInputReceipt.fromInputs(
             threadId = threadId,
@@ -200,9 +359,15 @@ class AppPrivateVisibleInputReceiptStoreTest {
     private class InMemorySharedPreferences(
         preferences: Map<String, String?> = emptyMap(),
         var failCommits: Boolean = false,
+        var throwOnCommit: Boolean = false,
+        var mutateMemoryOnFailedCommit: Boolean = false,
     ) {
         private val values = preferences.toMutableMap()
+        private val durableValues = preferences.toMutableMap()
+        val readKeys = mutableSetOf<String>()
         var commitCount: Int = 0
+            private set
+        var lastCommittedKeys: Set<String> = emptySet()
             private set
 
         val proxy: SharedPreferences = Proxy.newProxyInstance(
@@ -210,7 +375,11 @@ class AppPrivateVisibleInputReceiptStoreTest {
             arrayOf(SharedPreferences::class.java),
         ) { self, method, args ->
             when (method.name) {
-                "getString" -> values[args!![0] as String] ?: args[1]
+                "getString" -> {
+                    val key = args!![0] as String
+                    readKeys += key
+                    values[key] ?: args[1]
+                }
                 "contains" -> values.containsKey(args!![0] as String)
                 "edit" -> editor()
                 "hashCode" -> System.identityHashCode(self)
@@ -220,7 +389,7 @@ class AppPrivateVisibleInputReceiptStoreTest {
             }
         } as SharedPreferences
 
-        fun snapshot(): Map<String, String?> = values.toMap()
+        fun snapshot(): Map<String, String?> = durableValues.toMap()
 
         private fun editor(): SharedPreferences.Editor {
             val puts = mutableMapOf<String, String?>()
@@ -244,11 +413,19 @@ class AppPrivateVisibleInputReceiptStoreTest {
                     }
                     "commit" -> {
                         commitCount += 1
+                        lastCommittedKeys = puts.keys + removals
+                        if (mutateMemoryOnFailedCommit) {
+                            removals.forEach(values::remove)
+                            values.putAll(puts)
+                        }
+                        if (throwOnCommit) error("Synthetic commit failure")
                         if (failCommits) {
                             false
                         } else {
                             removals.forEach(values::remove)
                             values.putAll(puts)
+                            removals.forEach(durableValues::remove)
+                            durableValues.putAll(puts)
                             true
                         }
                     }
@@ -261,5 +438,7 @@ class AppPrivateVisibleInputReceiptStoreTest {
     private companion object {
         const val WORKSPACE = "/synthetic/workspace"
         const val RECEIPTS_KEY = "visible_input_receipts"
+        const val THREAD_KEY = "thread_id"
+        const val RECOVERY_KEY = "explicit_recovery_thread_ids"
     }
 }

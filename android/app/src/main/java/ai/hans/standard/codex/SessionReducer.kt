@@ -1,5 +1,7 @@
 package ai.hans.standard.codex
 
+import ai.hans.standard.diagnostics.ToolFailureDiagnostic
+
 enum class AccountPhase {
     UNKNOWN,
     SIGNED_OUT,
@@ -33,6 +35,8 @@ data class ToolUiSnapshot(
     val status: ToolStatus,
     val output: String?,
     val complete: Boolean,
+    /** Local diagnostic metadata, not user-visible tool output. */
+    val failureDiagnostic: ToolFailureDiagnostic? = null,
 )
 
 data class TurnUiSnapshot(
@@ -302,6 +306,7 @@ class CodexSessionReducer {
             is InitializeResult,
             is ModelListResult,
             ThreadMemoryModeSetResult,
+            is ThreadMaterializeResult,
             ThreadSettingsUpdateResult,
             is SkillsListResult,
             is ExtensionAppServerResult,
@@ -492,6 +497,7 @@ class CodexSessionReducer {
         ).also { thread.tools[item.id] = it }
         tool.label = boundedText(label, 8_192)
         tool.status = status
+        tool.failureDiagnostic = (item as? StreamItem.DynamicTool)?.failureDiagnostic
         if (output != null) {
             tool.output = boundedText(output, ProtocolLimits.MAX_UI_TOOL_OUTPUT_CHARS)
         }
@@ -659,6 +665,7 @@ class CodexSessionReducer {
         var output: String? = null,
         var complete: Boolean = false,
         var order: Long,
+        var failureDiagnostic: ToolFailureDiagnostic? = null,
     ) {
         fun snapshot(): ToolUiSnapshot = ToolUiSnapshot(
             itemId = itemId,
@@ -668,6 +675,7 @@ class CodexSessionReducer {
             status = status,
             output = output,
             complete = complete,
+            failureDiagnostic = failureDiagnostic,
         )
     }
 }

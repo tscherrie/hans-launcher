@@ -107,11 +107,1034 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import ai.hans.standard.diagnostics.PerformanceEvent
+import ai.hans.standard.diagnostics.PerformancePhase
 
 class CodexSessionControllerTest {
+    @Test fun nativeNotificationSubmissionCreatesNoUserMessageAndWaitsForActualNativeAcceptance() {
+        val h = readyHarness(desktopRemoteAccessEnabled = false)
+        val message = nativeNotification("event-1")
+        val receipts = mutableListOf<NativeNotificationDispatchReceipt>()
+        var sealed = false
+        h.runtime.onSend = { _, request ->
+            if (request.opt("method") == "turn/start") assertTrue("seal must precede transport", sealed)
+        }
+        val result = h.controller.dispatchNotificationEvent(message, "thread-1", { sealed = true; true }, receipts::add)
+        assertEquals(NativeNotificationDispatchResult.Submitted("thread-1", "event-1"), result)
+        assertTrue(receipts.isEmpty())
+        val request = h.runtime.takeRequest("turn/start")
+        assertEquals(0, request.getJSONObject("params").getJSONArray("input").length())
+        assertFalse(request.getJSONObject("params").has("clientUserMessageId"))
+        assertTrue(h.controller.snapshot().outboundTimeline.isEmpty())
+        assertTrue(h.controller.snapshot().timeline.none { it.role == ClientTimelineRole.USER })
+        assertNull(h.store.read("thread-1", "event-1"))
+        h.event(turnStarted("native-turn"), 6)
+        h.respond(request, turnStartResult("thread-1", "native-turn"), 7)
+        assertEquals(listOf(NativeNotificationDispatchReceipt.Accepted("thread-1", "native-turn")), receipts)
+        assertEquals(ClientSessionPhase.BUSY, h.controller.snapshot().sessionPhase)
+        assertFalse(h.controller.snapshot().remoteControl.mayUsePhoneToolsRemotely)
+        assertNotNull(h.controller.dispatch(listOf(CodexInput.Text("Ja bitte"))))
+        val steer = h.runtime.takeRequest("turn/steer")
+        assertEquals("native-turn", steer.getJSONObject("params").getString("expectedTurnId"))
+    }
+
+    @Test fun nativeHookJoinsActiveTurnWithoutChangingSelectionOrInterruptingUser() {
+        val h = readyHarness()
+        h.startTurn("existing-turn", 6)
+        val selection = h.controller.snapshot().confirmedSelection
+        val writes = h.settings.confirmedWrites
+        val receipts = mutableListOf<NativeNotificationDispatchReceipt>()
+        assertTrue(h.controller.dispatchNotificationEvent(nativeNotification("event-1"), "thread-1", { true }, receipts::add)
+            is NativeNotificationDispatchResult.Submitted)
+        val request = h.runtime.takeRequest("turn/start")
+        val params = request.getJSONObject("params")
+        assertEquals(setOf("threadId", "input", "toolOutput"), params.keys().asSequence().toSet())
+        assertNull(h.runtime.findRequest("turn/steer"))
+        assertNull(h.runtime.findRequest("turn/interrupt"))
+        h.respond(request, turnStartResult("thread-1", "existing-turn"), 7)
+        assertEquals(selection, h.controller.snapshot().confirmedSelection)
+        assertEquals(writes, h.settings.confirmedWrites)
+        assertEquals(1, h.controller.snapshot().outboundTimeline.size)
+        assertEquals(listOf(NativeNotificationDispatchReceipt.Accepted("thread-1", "existing-turn")), receipts)
+    }
+
+    @Test fun nativeHookRejectsWrongThreadPendingUserOrRevokedLeaseBeforeTransport() {
+        val h = readyHarness()
+        var seals = 0
+        val receipts = mutableListOf<NativeNotificationDispatchReceipt>()
+        assertEquals(NativeNotificationDispatchResult.RejectedBeforeTransport,
+            h.controller.dispatchNotificationEvent(nativeNotification("event-1"), "other-thread", { seals++; true }, receipts::add))
+        assertEquals(0, seals)
+        assertEquals(NativeNotificationDispatchResult.RejectedBeforeTransport,
+            h.controller.dispatchNotificationEvent(nativeNotification("event-1"), "thread-1", { seals++; false }, receipts::add))
+        assertNull(h.runtime.findRequest("turn/start"))
+        h.controller.dispatch(listOf(CodexInput.Text("User first")))
+        h.runtime.takeRequest("turn/start")
+        assertEquals(NativeNotificationDispatchResult.RejectedBeforeTransport,
+            h.controller.dispatchNotificationEvent(nativeNotification("event-1"), "thread-1", { seals++; true }, receipts::add))
+        assertEquals(1, seals)
+        assertNull(h.runtime.findRequest("turn/start"))
+        assertTrue(receipts.isEmpty())
+    }
+
+    @Test fun ambiguousNativeSendIsNeverReplayedWithoutPositiveNativeEvidence() {
+        val h = readyHarness()
+        val receipts = mutableListOf<NativeNotificationDispatchReceipt>()
+        h.runtime.failNextSend = true
+        val result = h.controller.dispatchNotificationEvent(nativeNotification("event-1"), "thread-1", { true }, receipts::add)
+        assertEquals(NativeNotificationDispatchResult.TransportOutcomeAmbiguous, result)
+        assertEquals(0, h.runtime.restartCalls)
+        assertEquals(NativeNotificationDispatchResult.RejectedBeforeTransport,
+            h.controller.dispatchNotificationEvent(nativeNotification("event-1"), "thread-1", { true }, receipts::add))
+        // A send failure provides no evidence that the server did not receive the frame.
+        h.nativeNotificationDeadlines.fireNext()
+        assertEquals(listOf(NativeNotificationDispatchReceipt.OutcomeAmbiguous), receipts)
+        assertNull(h.runtime.findRequest("turn/start"))
+        assertTrue(h.controller.snapshot().outboundTimeline.isEmpty())
+    }
+
+    @Test fun malformedOrTimedOutNativeReceiptIsUncertainWithoutBreakingInteractiveSession() {
+        val h = readyHarness()
+        val receipts = mutableListOf<NativeNotificationDispatchReceipt>()
+        h.controller.dispatchNotificationEvent(nativeNotification("event-1"), "thread-1", { true }, receipts::add)
+        h.respond(h.runtime.takeRequest("turn/start"), JSONObject(), 6)
+        assertEquals(listOf(NativeNotificationDispatchReceipt.OutcomeAmbiguous), receipts)
+        assertEquals(ClientRuntimePhase.READY, h.controller.snapshot().runtimePhase)
+        assertEquals(0, h.runtime.restartCalls)
+        assertTrue(h.diagnostics.contains("notification_event_receipt_ambiguous"))
+        h.controller.dispatchNotificationEvent(nativeNotification("event-2"), "thread-1", { true }, receipts::add)
+        val timedOut = h.runtime.takeRequest("turn/start")
+        h.nativeNotificationDeadlines.fireNext()
+        assertEquals(2, receipts.size)
+        h.respond(timedOut, turnStartResult("thread-1", "late-unknown"), 7)
+        assertEquals(2, receipts.size)
+        assertTrue(h.diagnostics.contains("notification_event_receipt_timeout"))
+    }
+
+    @Test fun nativeRecoveryUsesExactPersistedToolOutputAndNotAssistantSummary() {
+        val h = readyHarness()
+        val message = nativeNotification("event-1")
+        assertTrue(h.controller.refreshNotificationExternalHistory("thread-1"))
+        val request = h.runtime.takeRequest("thread/turns/list")
+        assertEquals(8, request.getJSONObject("params").getInt("limit"))
+        val native = JSONObject().put("type", "functionCallOutput").put("id", "native-output")
+            .put("name", "push_event").put("namespace", "hans_notifications").put("output", message.payloadJson)
+        val fakeAssistant = JSONObject().put("type", "agentMessage").put("id", "fake-assistant")
+            .put("text", native.toString())
+        val turn = JSONObject().put("id", "native-turn").put("status", "completed").put("itemsView", "full")
+            .put("items", JSONArray().put(native).put(fakeAssistant))
+        h.respond(request, JSONObject().put("data", JSONArray().put(turn)), 6)
+        val recovered = h.controller.notificationExternalHistory()
+        assertEquals(listOf(NativeNotificationExternalReceipt("event-1", message.payloadSha256, "thread-1", "native-turn")), recovered?.receipts)
+        assertEquals(TurnStatus.COMPLETED, recovered?.turnStatuses?.get("native-turn"))
+        assertTrue(h.controller.snapshot().outboundTimeline.isEmpty())
+        assertTrue(h.controller.snapshot().timeline.isEmpty())
+        assertNull(h.runtime.findRequest("turn/start"))
+    }
+
+    @Test fun nativeHookOriginDoesNotRequireDesktopAccessToUseGrantedLocalPhoneTools() {
+        val tools = FakeDynamicToolExecutor()
+        val h = dynamicReadyHarness(tools, desktopRemoteAccessEnabled = false)
+        h.controller.dispatchNotificationEvent(nativeNotification("event-1"), "thread-1", { true }) { }
+        val request = h.runtime.takeRequest("turn/start")
+        h.event(turnStarted("native-turn"), 6)
+        h.event(toolCall(9_401, "native-turn", "before-native-receipt"), 7)
+        assertTrue("A pending request does not prove which turn started", tools.calls.isEmpty())
+        assertEquals("remote_control_consent_not_active", h.runtime.takeResponse(9_401)
+            .getJSONObject("error").getString("message"))
+        h.respond(request, turnStartResult("thread-1", "native-turn"), 8)
+        h.event(toolCall(9_402, "native-turn", "after-native-receipt"), 9)
+        assertEquals(1, tools.calls.size)
+        assertFalse(h.controller.snapshot().remoteControl.mayUsePhoneToolsRemotely)
+    }
+
+    @Test fun nativeHooksWaitForCurrentStopButHistoricalStopDoesNotDisableFutureHooks() {
+        val h = readyHarness()
+        h.startTurn("old-turn", 6)
+        assertTrue(h.controller.interrupt())
+        val interrupt = h.runtime.takeRequest("turn/interrupt")
+        assertEquals(NativeNotificationDispatchResult.RejectedBeforeTransport,
+            h.controller.dispatchNotificationEvent(nativeNotification("event-1"), "thread-1", { true }) { })
+        h.respond(interrupt, JSONObject(), 7)
+        assertEquals(ClientSessionPhase.READY, h.controller.snapshot().sessionPhase)
+        assertTrue(h.controller.dispatchNotificationEvent(nativeNotification("event-1"), "thread-1", { true }) { }
+            is NativeNotificationDispatchResult.Submitted)
+        assertNotNull(h.runtime.takeRequest("turn/start"))
+    }
+
+    @Test fun nativeHooksCannotReclassifyUnsolicitedRemoteWorkAsAuthorizedLocalPhoneWork() {
+        val tools = FakeDynamicToolExecutor()
+        val h = dynamicReadyHarness(tools, desktopRemoteAccessEnabled = false)
+        h.event(turnStarted("remote-turn"), 6)
+        var sealed = false
+        val message = nativeNotification("event-1")
+        assertEquals(NativeNotificationDispatchResult.RejectedBeforeTransport,
+            h.controller.dispatchNotificationEvent(message, "thread-1", { sealed = true; true }) { })
+        assertFalse(sealed)
+        assertNull(h.runtime.findRequest("turn/start"))
+        // Even a real persisted tool-output fact must not override a separate remote origin.
+        h.event(JSONObject().put("method", "item/completed").put("params", JSONObject()
+            .put("threadId", "thread-1").put("turnId", "remote-turn").put("completedAtMs", 1L)
+            .put("item", JSONObject().put("id", "external-fact").put("type", "functionCallOutput")
+                .put("name", "push_event").put("namespace", "hans_notifications")
+                .put("output", message.payloadJson))).toString(), 7)
+        h.event(toolCall(9_403, "remote-turn", "remote-still-denied"), 8)
+        assertTrue(tools.calls.isEmpty())
+        assertEquals("remote_control_consent_not_active", h.runtime.takeResponse(9_403)
+            .getJSONObject("error").getString("message"))
+    }
+
+    @Test fun unsolicitedTurnWhileHookIsPendingHasNoToolsAndExactReceiptDoesNotReleaseOtherTurn() {
+        val tools = FakeDynamicToolExecutor()
+        val h = dynamicReadyHarness(tools, desktopRemoteAccessEnabled = false)
+        h.controller.dispatchNotificationEvent(nativeNotification("event-1"), "thread-1", { true }) { }
+        val request = h.runtime.takeRequest("turn/start")
+        h.event(turnStarted("foreign-racing-turn"), 6)
+        h.event(toolCall(9_404, "foreign-racing-turn", "unproven-origin"), 7)
+        assertTrue(tools.calls.isEmpty())
+        assertEquals("remote_control_consent_not_active", h.runtime.takeResponse(9_404)
+            .getJSONObject("error").getString("message"))
+        h.respond(request, turnStartResult("thread-1", "actual-native-turn"), 8)
+        h.event(toolCall(9_405, "foreign-racing-turn", "not-the-accepted-turn"), 9)
+        assertTrue(tools.calls.isEmpty())
+        assertEquals("remote_control_consent_not_active", h.runtime.takeResponse(9_405)
+            .getJSONObject("error").getString("message"))
+        h.event(turnStarted("actual-native-turn"), 10)
+        h.event(toolCall(9_406, "actual-native-turn", "exact-native-origin"), 11)
+        assertEquals(1, tools.calls.size)
+        assertEquals("actual-native-turn", tools.calls.single().turnId)
+    }
+
+    private fun nativeNotification(id: String): NativeNotificationExternalMessage = NativeNotificationExternalMessage.create(id,
+        JSONObject().put("schema", NativeNotificationExternalMessage.SCHEMA).put("eventId", id)
+            .put("observedAtEpochMillis", 1_000L).put("source", JSONObject().put("packageName", "example.test")).toString())
+
+    @Test fun voiceHangupBindsMarkerlessNativeHandoffWithEitherTurnEventOrder() {
+        for (handoffFirst in listOf(true, false)) {
+            val h = readyHarness(); proveDesktopDisabled(h)
+            startVoiceControlCall(h, VOICE_A, 7)
+            val call = voiceEndCall("native")
+            assertNull(h.controller.voiceControlSessionIdFor(call))
+            if (handoffFirst) {
+                h.event(voiceHandoff("handoff"), 8)
+                assertNull(h.controller.voiceControlSessionIdFor(call))
+                h.event(turnStarted("native"), 9)
+            } else {
+                h.event(turnStarted("native"), 8)
+                assertNull("A native turn alone is not a handoff", h.controller.voiceControlSessionIdFor(call))
+                h.event(voiceHandoff("handoff"), 9)
+            }
+            assertEquals(VOICE_A, h.controller.voiceControlSessionIdFor(call))
+            assertNull(h.controller.voiceControlSessionIdFor(voiceEndCall("other")))
+            assertNull(h.controller.voiceControlSessionIdFor(voiceEndCall("native", "foreign-thread")))
+        }
+    }
+
+    @Test fun onlyConfirmedNativeVoiceWorkBindingProducesTheDisplayScope() {
+        val h = readyHarness(); proveDesktopDisabled(h)
+        val probe = RealtimeProbe(VOICE_A)
+        startVoiceControlCall(h, VOICE_A, 7, probe)
+        assertTrue(probe.workScopes.isEmpty())
+        h.event(voiceHandoff("spoken-request"), 8)
+        assertTrue(probe.workScopes.isEmpty())
+        h.event(turnStarted("voice-native"), 9)
+        fun item(stage: String, id: String, phase: String) = JSONObject()
+            .put("method", "item/$stage").put("params", JSONObject()
+                .put("threadId", "thread-1").put("turnId", "voice-native")
+                .put(if (stage == "started") "startedAtMs" else "completedAtMs", 1L)
+                .put("item", JSONObject().put("type", "agentMessage").put("id", id)
+                    .put("phase", phase).put("text", if (stage == "started") "" else "Native final answer.")))
+        h.event(item("started", "interim", "commentary").toString(), 10)
+        h.event(item("completed", "interim", "commentary").toString(), 11)
+        assertEquals(listOf(ai.hans.standard.voice.realtime.CodexVoiceWorkScope(
+            "thread-1", "voice-native")), probe.workScopes)
+        h.event(item("started", "native-final", "final_answer").toString(), 12)
+        h.event(item("completed", "native-final", "final_answer").toString(), 13)
+        assertEquals(1, probe.workScopes.size)
+        assertEquals(ClientRuntimePhase.READY, h.controller.snapshot().runtimePhase)
+        assertNull(h.controller.snapshot().problem)
+    }
+
+    @Test fun voiceHangupSteerBindsPreviouslyConfirmedLocalTaskOnlyAfterHandoff() {
+        val h = readyHarness(); proveDesktopDisabled(h); h.startTurn("local", 7)
+        startVoiceControlCall(h, VOICE_A, 8)
+        assertNull(h.controller.voiceControlSessionIdFor(voiceEndCall("local")))
+        h.event(voiceHandoff("spoken-goodbye"), 9)
+        assertEquals(VOICE_A, h.controller.voiceControlSessionIdFor(voiceEndCall("local")))
+        h.event(voiceHandoff("spoken-goodbye"), 10) // Native duplicate is not another capability.
+        assertEquals(VOICE_A, h.controller.voiceControlSessionIdFor(voiceEndCall("local")))
+    }
+
+    @Test fun voiceHangupKeepsFirstOwnerAcrossCallsAndDoesNotRebindReplayedTurns() {
+        val h = readyHarness(); proveDesktopDisabled(h)
+        val a = startVoiceControlCall(h, VOICE_A, 7)
+        h.event(voiceHandoff("A"), 8); h.event(turnStarted("shared"), 9)
+        assertEquals(VOICE_A, h.controller.voiceControlSessionIdFor(voiceEndCall("shared")))
+        a.stop(); h.event(realtimeEvent("closed", JSONObject().put("reason", "requested")), 10)
+        startVoiceControlCall(h, VOICE_B, 11)
+        assertNull(h.controller.voiceControlSessionIdFor(voiceEndCall("shared")))
+        h.event(voiceHandoff("B-steer-same-turn"), 12)
+        assertNull("Old A work must never close B", h.controller.voiceControlSessionIdFor(voiceEndCall("shared")))
+        h.event(turnCompleted("shared"), 13)
+        h.event(voiceHandoff("B-new-turn"), 14); h.event(turnStarted("fresh"), 15)
+        assertEquals(VOICE_B, h.controller.voiceControlSessionIdFor(voiceEndCall("fresh")))
+        h.event(turnStarted("shared"), 16)
+        assertNull(h.controller.voiceControlSessionIdFor(voiceEndCall("shared")))
+        assertEquals(VOICE_B, h.controller.voiceControlSessionIdFor(voiceEndCall("fresh")))
+    }
+
+    @Test fun voiceHangupUnmatchedPriorHandoffsFailClosedEvenWhenANewCallHasStarted() {
+        for (handoffs in 1..2) {
+            val h = readyHarness(); proveDesktopDisabled(h)
+            val a = startVoiceControlCall(h, VOICE_A, 7)
+            h.event(voiceHandoff("A-one"), 8)
+            if (handoffs == 2) {
+                h.event(voiceHandoff("A-two"), 9)
+                h.event(turnStarted("first-A"), 10)
+                h.event(turnCompleted("first-A"), 11)
+            }
+            a.stop(); h.event(realtimeEvent("closed", JSONObject().put("reason", "requested")), 12)
+            startVoiceControlCall(h, VOICE_B, 13)
+            h.event(turnStarted("possibly-delayed-A"), 14)
+            h.event(voiceHandoff("B"), 15)
+            assertNull(h.controller.voiceControlSessionIdFor(voiceEndCall("possibly-delayed-A")))
+        }
+    }
+
+    @Test fun voiceHangupAuthorityIsLostOnLogoutRuntimeRestartOrRemoteAuthorityChange() {
+        for (change in listOf("logout", "restart", "remote")) {
+            val h = readyHarness(); proveDesktopDisabled(h)
+            startVoiceControlCall(h, VOICE_A, 7)
+            h.event(voiceHandoff("first"), 8); h.event(turnStarted("native"), 9)
+            assertEquals(VOICE_A, h.controller.voiceControlSessionIdFor(voiceEndCall("native")))
+            when (change) {
+                "logout" -> assertTrue(h.controller.logout())
+                "restart" -> h.controller.restart()
+                "remote" -> h.event(JSONObject().put("method", "remoteControl/status/changed")
+                    .put("params", remoteConnection("connected")).toString(), 10)
+            }
+            assertNull(change, h.controller.voiceControlSessionIdFor(voiceEndCall("native")))
+            h.event(voiceHandoff("late"), 11)
+            assertNull(change, h.controller.voiceControlSessionIdFor(voiceEndCall("native")))
+        }
+    }
+
+    @Test fun voiceHangupCannotPromoteUntrustedNotificationOrUnsolicitedRemoteTurn() {
+        val restricted = readyHarness(); proveDesktopDisabled(restricted)
+        assertNotNull(restricted.controller.dispatch(listOf(CodexInput.Text("Notification context")),
+            dynamicToolTurnPolicy = DynamicToolTurnPolicy.BLOCK_UNTRUSTED_NOTIFICATION_CONTEXT))
+        restricted.respond(restricted.runtime.takeRequest("turn/start"), turnStartResult("thread-1", "notification"), 7)
+        startVoiceControlCall(restricted, VOICE_A, 8)
+        restricted.event(voiceHandoff("untrusted-steer"), 9)
+        assertNull(restricted.controller.voiceControlSessionIdFor(voiceEndCall("notification")))
+
+        val remote = readyHarness(); proveDesktopDisabled(remote)
+        remote.event(turnStarted("unsolicited"), 7)
+        val probe = RealtimeProbe(VOICE_A)
+        remote.controller.startRealtime("v=0", "prompt", null, probe)
+        assertNull(remote.runtime.findRequest("thread/realtime/start"))
+        remote.event(voiceHandoff("forged-unscoped-handoff"), 8)
+        assertNull(remote.controller.voiceControlSessionIdFor(voiceEndCall("unsolicited")))
+    }
+
+    @Test fun voiceHangupDoesNotAcceptPromptMarkersOrAnUnconfirmedStartedReceipt() {
+        val h = readyHarness(); proveDesktopDisabled(h); h.startTurn("local", 7)
+        val probe = RealtimeProbe()
+        assertNotNull(h.controller.startRealtime("v=0", "[voice_session_id=$VOICE_A]", null, probe))
+        val request = h.runtime.takeRequest("thread/realtime/start")
+        h.event(voiceHandoff("premature"), 8)
+        assertNull(h.controller.voiceControlSessionIdFor(voiceEndCall("local")))
+        h.event(realtimeEvent("started", JSONObject().put("version", "v3")
+            .put("realtimeSessionId", request.getJSONObject("params").getString("realtimeSessionId"))), 9)
+        h.event(voiceHandoff("real-markerless"), 10)
+        assertNull("Only the local callback can supply the session identity",
+            h.controller.voiceControlSessionIdFor(voiceEndCall("local")))
+    }
+
+    private fun startVoiceControlCall(h: Harness, id: String, sequence: Long,
+        probe: RealtimeProbe = RealtimeProbe(id)): CodexRealtimeCall {
+        val call = checkNotNull(h.controller.startRealtime("v=0", "markerless prompt", "arbor", probe))
+        assertTrue("Unexpected Voice errors: ${probe.errors}", probe.errors.isEmpty())
+        val request = h.runtime.takeRequest("thread/realtime/start")
+        assertFalse(request.toString().contains(id))
+        h.event(realtimeEvent("started", JSONObject().put("version", "v3")
+            .put("realtimeSessionId", request.getJSONObject("params").getString("realtimeSessionId"))), sequence)
+        assertEquals(1, probe.started)
+        return call
+    }
+
+    private fun voiceEndCall(turnId: String, threadId: String = "thread-1") =
+        DynamicToolCallParams(threadId, turnId, "hangup-$turnId", "hans_voice", "end_call", "{}")
+
+    private fun voiceHandoff(id: String) = realtimeEvent("itemAdded", JSONObject().put("item", JSONObject()
+        .put("type", "handoff_request").put("handoff_id", id).put("item_id", "input-$id")
+        .put("input_transcript", "Please hang up")))
+
+    @Test fun liveStartImmediatelyPublishesExistingTurnBeforeNativeHandoffSteersIt() {
+        val h = readyHarness()
+        proveDesktopDisabled(h)
+        // A bare unsolicited turn/started is intentionally classified as remote work.
+        // This regression needs an already-running LOCAL task that native Live will steer.
+        h.startTurn("pre-existing-turn", 7)
+        val states = mutableListOf<ai.hans.standard.voice.realtime.CodexTaskVoiceWorkState>()
+        val errors = mutableListOf<CodexRealtimeIssue>()
+        val callbacks = object : CodexRealtimeCallbacks {
+            override fun onWorkState(state: ai.hans.standard.voice.realtime.CodexTaskVoiceWorkState) { states += state }
+            override fun onError(issue: CodexRealtimeIssue) { errors += issue }
+        }
+        assertNotNull(h.controller.startRealtime("v=0", "prompt", "arbor", callbacks))
+        assertTrue("Unexpected Voice errors: $errors", errors.isEmpty())
+        assertNotNull(h.runtime.takeRequest("thread/realtime/start"))
+        assertTrue("Successful native start must immediately publish existing work", states.isNotEmpty())
+        assertEquals("pre-existing-turn", states.last().activeTurnId)
+        h.event(turnCompleted("pre-existing-turn"), 8)
+        assertEquals("pre-existing-turn", states.last().terminal?.turnId)
+        assertNull(states.last().activeTurnId)
+        assertTrue(states.last().revision > states.first().revision)
+    }
+
     @Test
-    fun freshPersonalThreadIsNotReadyUntilMemoryEnableIsConfirmed() {
-        val harness = Harness(autoEnableMemory = false)
+    fun withdrawnDesktopPolicyProbesOnceAndLiveWaitsForActualDisabledProof() {
+        val h = readyHarness(desktopRemoteAccessEnabled = false)
+        assertFalse(h.controller.snapshot().remoteControl.isDisabledConfirmed)
+        val probe = h.runtime.takeRequest("remoteControl/status/read")
+        assertFalse(h.controller.remoteControlEnable())
+        assertFalse(h.controller.remoteControlPair())
+        assertNull(h.runtime.findRequest("remoteControl/enable"))
+        assertNull(h.runtime.findRequest("remoteControl/pairing/start"))
+
+        val callbacks = RealtimeProbe()
+        assertNotNull(h.controller.startRealtime("v=0", "prompt", "arbor", callbacks))
+        assertNull(h.runtime.findRequest("thread/realtime/start"))
+        assertNull(h.runtime.findRequest("remoteControl/status/read"))
+        h.respond(probe, remoteConnection("disabled"), 6)
+        assertTrue(h.controller.snapshot().remoteControl.isDisabledConfirmed)
+        assertNotNull(h.runtime.takeRequest("thread/realtime/start"))
+        assertTrue(callbacks.errors.isEmpty())
+        assertTrue(h.controller.refreshAccount())
+        h.respond(h.runtime.takeRequest("account/read"), signedInAccount(), 7)
+        assertNull(h.runtime.findRequest("remoteControl/status/read"))
+        assertEquals(0, h.runtime.restartCalls)
+    }
+
+    @Test
+    fun withdrawnPolicyRevokesContraryEffectiveStateWithoutRetryOrRestartLoops() {
+        val h = readyHarness(desktopRemoteAccessEnabled = false)
+        h.respond(h.runtime.takeRequest("remoteControl/status/read"), remoteConnection("connected"), 6)
+        val disable = h.runtime.takeRequest("remoteControl/disable")
+        assertTrue(disable.getJSONObject("params").getBoolean("ephemeral"))
+        assertFalse(h.controller.snapshot().remoteControl.mayUsePhoneToolsRemotely)
+        assertFalse(h.controller.remoteControlEnable())
+        assertFalse(h.controller.remoteControlPair())
+        h.fail(disable, 7)
+        repeat(3) { index ->
+            h.event(JSONObject().put("method", "remoteControl/status/changed")
+                .put("params", remoteConnection("connected")).toString(), 8L + index)
+        }
+        assertNull(h.runtime.findRequest("remoteControl/disable"))
+        assertEquals(0, h.runtime.restartCalls)
+        assertEquals(ClientSessionPhase.READY, h.controller.snapshot().sessionPhase)
+        h.event(JSONObject().put("method", "remoteControl/status/changed")
+            .put("params", remoteConnection("disabled")).toString(), 12)
+        h.event(JSONObject().put("method", "remoteControl/status/changed")
+            .put("params", remoteConnection("connected")).toString(), 13)
+        assertNotNull(h.runtime.takeRequest("remoteControl/disable"))
+        assertNull(h.runtime.findRequest("remoteControl/client/revoke"))
+        assertNull(h.runtime.findRequest("account/logout"))
+    }
+
+    @Test
+    fun realtimeUsesConfirmedMainThreadAndNativeTurnsKeepPhoneToolsWithoutDesktopConsent() {
+        val tools = FakeDynamicToolExecutor()
+        val h = dynamicReadyHarness(tools)
+        proveDesktopDisabled(h)
+        val callbacks = RealtimeProbe()
+        val call = h.controller.startRealtime("v=0\r\noffer", "native prompt", "arbor", callbacks)
+        assertNotNull("Realtime refused: ${callbacks.errors}; state=${h.controller.snapshot().sessionPhase}", call)
+        val request = h.runtime.takeRequest("thread/realtime/start")
+        assertEquals("thread-1", request.getJSONObject("params").getString("threadId"))
+        h.respond(request, JSONObject(), 6)
+        assertEquals(0, callbacks.started)
+        h.event(realtimeEvent("started", JSONObject().put("version", "v3")
+            .put("realtimeSessionId", request.getJSONObject("params").getString("realtimeSessionId"))), 7)
+        assertEquals(1, callbacks.started)
+        h.event(turnStarted("native-voice-turn"), 8)
+        h.event(toolCall(901, "native-voice-turn", "voice-call"), 9)
+        assertEquals(listOf("voice-call"), tools.calls.map { it.callId })
+        assertNull(h.runtime.findRequest("turn/start")) // No duplicated transcript dispatch.
+        call!!.stop()
+        assertNotNull(h.runtime.findRequest("thread/realtime/stop"))
+        h.event(turnCompleted("native-voice-turn"), 10)
+        h.event(turnStarted("draining-voice-turn"), 11)
+        h.event(toolCall(902, "draining-voice-turn", "draining-call"), 12)
+        assertEquals(listOf("voice-call", "draining-call"), tools.calls.map { it.callId })
+        h.event(turnCompleted("draining-voice-turn"), 13)
+        h.event(realtimeEvent("closed", JSONObject().put("reason", "requested")), 14)
+        h.event(turnStarted("unowned-turn"), 15)
+        h.event(toolCall(903, "unowned-turn", "unowned-call"), 16)
+        assertEquals(listOf("voice-call", "draining-call"), tools.calls.map { it.callId })
+        assertEquals("remote_control_consent_not_active", h.runtime.takeResponse(903).getJSONObject("error").getString("message"))
+        assertEquals(0, h.runtime.restartCalls)
+    }
+
+    @Test fun realtimeDrainExpiryNeverRestartsOrReusesUnclosedLease() {
+        val h = readyHarness()
+        proveDesktopDisabled(h)
+        val call = checkNotNull(h.controller.startRealtime("v=0", "prompt", "arbor", RealtimeProbe()))
+        h.runtime.takeRequest("thread/realtime/start")
+        call.stop()
+        h.realtimeDrainDeadlines.fireNext()
+        assertEquals(CodexRealtimeState.RECOVERY_REQUIRED, h.controller.realtimeDiagnostics().state)
+        val retry = RealtimeProbe()
+        assertNull(h.controller.startRealtime("v=0", "prompt", "arbor", retry))
+        assertEquals(listOf(CodexRealtimeIssue.RECOVERY_REQUIRED), retry.errors)
+        assertEquals(0, h.runtime.restartCalls)
+        assertNull(h.runtime.findRequest("turn/interrupt"))
+        assertNull(h.runtime.findRequest("thread/realtime/start"))
+    }
+
+    @Test fun confirmedCloseRetainsOnlyObservedUnmatchedHandoffOriginAndRelayEnableRevokesIt() {
+        for (enableRelay in listOf(false, true)) {
+            val tools = FakeDynamicToolExecutor()
+            val h = dynamicReadyHarness(tools)
+            closedUnroutedCall(h, handoff = true)
+            if (enableRelay) assertTrue(h.controller.remoteControlEnable())
+            h.event(turnStarted("late-voice-turn"), 24)
+            h.event(toolCall(910, "late-voice-turn", "late-call"), 25)
+            if (enableRelay) {
+                assertTrue(tools.calls.isEmpty())
+                assertEquals("remote_control_consent_not_active", h.runtime.takeResponse(910)
+                    .getJSONObject("error").getString("message"))
+            } else {
+                assertEquals(listOf("late-call"), tools.calls.map { it.callId })
+                h.event(turnCompleted("late-voice-turn"), 26)
+                h.event(turnStarted("unrelated-turn"), 27)
+                h.event(toolCall(911, "unrelated-turn", "unrelated-call"), 28)
+                assertEquals(listOf("late-call"), tools.calls.map { it.callId })
+                assertEquals("remote_control_consent_not_active", h.runtime.takeResponse(911)
+                    .getJSONObject("error").getString("message"))
+            }
+        }
+    }
+
+    @Test fun unroutedDictationWaitsForCorrelatedAckAndLeaseCannotSendTwice() {
+        val h = readyHarness()
+        val call = closedUnroutedCall(h)
+        val results = mutableListOf<Result<Unit>>()
+        assertTrue(call.finishUnroutedDictation("one dictated request", results::add))
+        val request = h.runtime.takeRequest("turn/start")
+        assertTrue(results.isEmpty())
+        assertFalse(call.finishUnroutedDictation("duplicate", results::add))
+        h.event(turnStarted("dictation-turn"), 24)
+        assertTrue(results.isEmpty()) // Ordinary turn event is not the correlated ACK.
+        h.respond(request, turnStartResult("thread-1", "dictation-turn"), 25)
+        assertEquals(1, results.size)
+        assertTrue(results.single().isSuccess)
+        assertEquals(0, h.realtimeDrainDeadlines.pendingCount)
+        assertNull(h.runtime.findRequest("turn/start"))
+        assertNull(h.runtime.findRequest("turn/interrupt"))
+    }
+
+    @Test fun unroutedDictationSteersBusyTurnWithoutInterruptAndTimeoutNeverRetries() {
+        val h = readyHarness()
+        h.controller.dispatch(listOf(CodexInput.Text("existing request")))
+        h.respond(h.runtime.takeRequest("turn/start"), turnStartResult("thread-1", "existing-turn"), 6)
+        val call = closedUnroutedCall(h)
+        val results = mutableListOf<Result<Unit>>()
+        assertTrue(call.finishUnroutedDictation("add this correction", results::add))
+        val steer = h.runtime.takeRequest("turn/steer")
+        assertEquals("existing-turn", steer.getJSONObject("params").getString("expectedTurnId"))
+        assertNull(h.runtime.findRequest("turn/start"))
+        assertNull(h.runtime.findRequest("turn/interrupt"))
+        h.realtimeDrainDeadlines.fireNext()
+        assertEquals(1, results.size)
+        assertTrue(results.single().isFailure)
+        h.respond(steer, JSONObject().put("turnId", "existing-turn"), 24)
+        assertEquals(1, results.size)
+        assertFalse(call.finishUnroutedDictation("retry", results::add))
+        assertEquals(0, h.runtime.restartCalls)
+        assertNull(h.runtime.findRequest("turn/steer"))
+    }
+
+    @Test fun handoffOrSessionInvalidationPreventsUnroutedFallback() {
+        for (reason in listOf("handoff", "logout", "restart")) {
+            val h = readyHarness()
+            val call = closedUnroutedCall(h, handoff = reason == "handoff")
+            when (reason) {
+                "logout" -> h.controller.logout()
+                "restart" -> h.controller.restart()
+            }
+            val results = mutableListOf<Result<Unit>>()
+            assertFalse(reason, call.finishUnroutedDictation("must not dispatch", results::add))
+            assertTrue(results.isEmpty())
+            assertNull(h.runtime.findRequest("turn/start"))
+            assertNull(h.runtime.findRequest("turn/steer"))
+        }
+    }
+
+    @Test fun ambiguousFallbackTransportDoesNotRestartAcceptedWorkOrRetryAndLateAckCannotCompleteTwice() {
+        val tools = FakeDynamicToolExecutor()
+        val h = dynamicReadyHarness(tools)
+        val call = closedUnroutedCall(h)
+        h.runtime.onSend = { _, request ->
+            if (request.optString("method") == "turn/start") throw IllegalStateException("ambiguous write")
+        }
+        val results = mutableListOf<Result<Unit>>()
+        assertTrue(call.finishUnroutedDictation("one request", results::add))
+        val request = h.runtime.takeRequest("turn/start")
+        assertEquals(1, results.size)
+        assertTrue(results.single().isFailure)
+        assertEquals(0, h.runtime.restartCalls)
+        assertNull(h.runtime.findRequest("turn/interrupt"))
+        h.runtime.onSend = null
+        h.event(turnStarted("accepted-despite-transport"), 24)
+        h.event(toolCall(920, "accepted-despite-transport", "accepted-local-call"), 25)
+        assertEquals(listOf("accepted-local-call"), tools.calls.map { it.callId })
+        h.respond(request, turnStartResult("thread-1", "accepted-despite-transport"), 26)
+        assertEquals(1, results.size)
+        assertFalse(call.finishUnroutedDictation("duplicate", results::add))
+        assertNull(h.runtime.findRequest("turn/start"))
+    }
+
+    private fun closedUnroutedCall(h: Harness, handoff: Boolean = false): CodexRealtimeCall {
+        proveDesktopDisabled(h)
+        val call = checkNotNull(h.controller.startRealtime("v=0", "prompt", "arbor", RealtimeProbe()))
+        val start = h.runtime.takeRequest("thread/realtime/start")
+        h.event(realtimeEvent("started", JSONObject().put("version", "v3")
+            .put("realtimeSessionId", start.getJSONObject("params").getString("realtimeSessionId"))), 20)
+        h.event(realtimeEvent("sdp", JSONObject().put("sdp", "v=0\r\nanswer")), 21)
+        call.stop()
+        if (handoff) h.event(realtimeEvent("itemAdded", JSONObject().put("item", JSONObject()
+            .put("type", "handoff_request").put("handoff_id", "observed").put("item_id", "input"))), 22)
+        h.event(realtimeEvent("closed", JSONObject().put("reason", "requested")), 23)
+        return call
+    }
+
+    @Test
+    fun realtimeBackendErrorAndMalformedEventDoNotInvalidateAuthenticatedChat() {
+        for (malformed in listOf(false, true)) {
+            val h = readyHarness()
+            proveDesktopDisabled(h)
+            val callbacks = RealtimeProbe()
+            val call = h.controller.startRealtime("v=0", "prompt", null, callbacks)
+            assertNotNull("Realtime refused: ${callbacks.errors}; state=${h.controller.snapshot().sessionPhase}", call)
+            val request = h.runtime.takeRequest("thread/realtime/start")
+            h.respond(request, JSONObject(), 6)
+            h.event(realtimeEvent("error", JSONObject().put("message", if (malformed) JSONObject() else "not entitled")), 7)
+            assertEquals(if (malformed) CodexRealtimeIssue.MALFORMED_RESPONSE else CodexRealtimeIssue.NOT_AVAILABLE,
+                callbacks.errors.single())
+            assertEquals(ClientSessionPhase.READY, h.controller.snapshot().sessionPhase)
+            assertEquals(ClientRuntimePhase.READY, h.controller.snapshot().runtimePhase)
+            assertEquals(0, h.runtime.restartCalls)
+        }
+    }
+
+    @Test
+    fun realtimeRequiresChatgptAndLogoutCancelsBeforeLateStarted() {
+        val missing = Harness()
+        val unready = RealtimeProbe()
+        assertNull(missing.controller.startRealtime("v=0", "prompt", null, unready))
+        assertEquals(listOf(CodexRealtimeIssue.CHATGPT_LOGIN_REQUIRED), unready.errors)
+        val h = readyHarness()
+        val callbacks = RealtimeProbe()
+        proveDesktopDisabled(h)
+        val call = h.controller.startRealtime("v=0", "prompt", null, callbacks)
+        assertNotNull("Realtime refused: ${callbacks.errors}; state=${h.controller.snapshot().sessionPhase}", call)
+        val request = h.runtime.takeRequest("thread/realtime/start")
+        assertTrue(h.controller.logout())
+        assertNotNull(h.runtime.findRequest("thread/realtime/stop"))
+        h.event(realtimeEvent("started", JSONObject().put("version", "v3")
+            .put("realtimeSessionId", request.getJSONObject("params").getString("realtimeSessionId"))), 6)
+        assertEquals(0, callbacks.started)
+        assertEquals(listOf(CodexRealtimeIssue.SESSION_CHANGED), callbacks.errors)
+    }
+
+    private fun realtimeEvent(name: String, params: JSONObject): String = JSONObject()
+        .put("method", "thread/realtime/$name").put("params", params.put("threadId", "thread-1")).toString()
+
+    private fun proveDesktopDisabled(h: Harness) {
+        assertTrue(h.controller.remoteControlSettingsOpened())
+        h.respond(h.runtime.takeRequest("remoteControl/status/read"), remoteConnection("disabled"), 6)
+    }
+
+    @Test
+    fun realtimeAndDesktopAccessCannotOverlapInEitherStartOrder() {
+        val h = readyHarness()
+        val callbacks = RealtimeProbe()
+        assertNotNull(h.controller.startRealtime("v=0", "prompt", null, callbacks))
+        val probe = h.runtime.takeRequest("remoteControl/status/read")
+        assertNull(h.runtime.findRequest("thread/realtime/start"))
+        assertFalse(h.controller.remoteControlEnable())
+        h.respond(probe, remoteConnection("connected"), 6)
+        assertEquals(listOf(CodexRealtimeIssue.REMOTE_ACCESS_ACTIVE), callbacks.errors)
+        assertNull(h.runtime.findRequest("thread/realtime/start"))
+        assertNull(h.runtime.findRequest("remoteControl/disable")) // User setting is untouched.
+
+        val fresh = readyHarness()
+        proveDesktopDisabled(fresh)
+        val call = checkNotNull(fresh.controller.startRealtime("v=0", "prompt", null, RealtimeProbe()))
+        assertNotNull(fresh.runtime.takeRequest("thread/realtime/start"))
+        assertFalse(fresh.controller.remoteControlEnable())
+        call.stop()
+        assertFalse(fresh.controller.remoteControlEnable()) // Stop ACK alone is not a close.
+        fresh.event(realtimeEvent("closed", JSONObject().put("reason", "requested")), 7)
+        assertTrue(fresh.controller.remoteControlEnable())
+    }
+
+    @Test
+    fun realtimeProbeTimeoutOrLocalCancellationCannotStartFromALateStatusReply() {
+        for (timeout in listOf(true, false)) {
+            val h = readyHarness()
+            val callbacks = RealtimeProbe()
+            val call = checkNotNull(h.controller.startRealtime("v=0", "private prompt", null, callbacks))
+            val probe = h.runtime.takeRequest("remoteControl/status/read")
+            if (timeout) h.realtimeDeadlines.fireNext() else call.stop()
+            h.respond(probe, remoteConnection("disabled"), 6)
+            assertNull(h.runtime.findRequest("thread/realtime/start"))
+            assertEquals(if (timeout) listOf(CodexRealtimeIssue.TIMED_OUT) else emptyList<CodexRealtimeIssue>(), callbacks.errors)
+            assertTrue(h.diagnostics.none { it.contains("private prompt") })
+            assertEquals(ClientSessionPhase.READY, h.controller.snapshot().sessionPhase)
+        }
+    }
+
+    private class RealtimeProbe(override val voiceControlSessionId: String? = null) : CodexRealtimeCallbacks {
+        var started = 0
+        var rejected = 0
+        val errors = mutableListOf<CodexRealtimeIssue>()
+        val workScopes = mutableListOf<ai.hans.standard.voice.realtime.CodexVoiceWorkScope>()
+        override fun onStarted() { started++ }
+        override fun onStartRejected() { rejected++ }
+        override fun onError(issue: CodexRealtimeIssue) { errors += issue }
+        override fun onWorkBound(scope: ai.hans.standard.voice.realtime.CodexVoiceWorkScope) { workScopes += scope }
+    }
+
+    private val VOICE_A = "00000000-0000-4000-8000-000000000001"
+    private val VOICE_B = "00000000-0000-4000-8000-000000000002"
+
+    @Test
+    fun stoppingPreparedRealtimeProvesNoAdmissionAndLateProbeCannotStartIt() {
+        val h = readyHarness()
+        val callbacks = RealtimeProbe()
+        val call = checkNotNull(h.controller.startRealtime("v=0", "Read the answer", null,
+            CodexRealtimeOptions(false, false, true), callbacks))
+        val probe = h.runtime.takeRequest("remoteControl/status/read")
+        call.stop(); call.stop()
+        assertEquals(1, callbacks.rejected)
+        h.respond(probe, remoteConnection("disabled"), 6)
+        assertNull(h.runtime.findRequest("thread/realtime/start"))
+        assertEquals(0, callbacks.started)
+        assertTrue(callbacks.errors.isEmpty())
+    }
+
+    @Test
+    fun realtimeBufferedAudioCarriesShortOptionsAndStopsOnLogoutWithoutReplay() {
+        val h = readyHarness(desktopRemoteAccessEnabled = false)
+        h.respond(h.runtime.takeRequest("remoteControl/status/read"), remoteConnection("disabled"), 6)
+        val callbacks = RealtimeProbe()
+        val call = checkNotNull(h.controller.startRealtime("v=0", "prompt", "arbor",
+            CodexRealtimeOptions(delegationAckFiller = false), callbacks))
+        val results = mutableListOf<Result<Unit>>()
+        assertFalse(call.appendAudio("AAAAAA==", 24_000, results::add))
+        val start = h.runtime.takeRequest("thread/realtime/start")
+        assertFalse(start.getJSONObject("params").getBoolean("delegationAckFiller"))
+        h.event(realtimeEvent("started", JSONObject().put("version", "v3")
+            .put("realtimeSessionId", start.getJSONObject("params").getString("realtimeSessionId"))), 7)
+        assertTrue(call.appendAudio("AAAAAA==", 24_000, results::add))
+        assertFalse(call.appendAudio("AAAAAA==", 24_000, results::add))
+        val audio = h.runtime.takeRequest("thread/realtime/appendAudio")
+        assertEquals("thread-1", audio.getJSONObject("params").getString("threadId"))
+        h.respond(audio, JSONObject(), 8)
+        assertEquals(1, results.size)
+        assertTrue(results.single().isSuccess)
+        assertEquals(0, h.realtimeAudioDeadlines.pendingCount)
+        assertTrue(call.appendAudio("AAAAAA==", 24_000, results::add))
+        val lateAudio = h.runtime.takeRequest("thread/realtime/appendAudio")
+        assertTrue(h.controller.logout())
+        assertFalse(call.appendAudio("AAAAAA==", 24_000, results::add))
+        h.respond(lateAudio, JSONObject(), 9)
+        assertEquals(2, results.size)
+        assertEquals(CodexRealtimeIssue.SESSION_CHANGED, (results.last().exceptionOrNull() as CodexRealtimeFailure).issue)
+        assertEquals(0, h.realtimeAudioDeadlines.pendingCount)
+        assertNull(h.runtime.findRequest("turn/start"))
+        assertTrue(h.diagnostics.none { it.contains("AAAAAA==") })
+    }
+
+    @Test
+    fun realtimeAudioAckTimeoutFailsOnlyOptionalSessionAndNeverRetries() {
+        val h = readyHarness(); proveDesktopDisabled(h)
+        val callbacks = RealtimeProbe()
+        val call = checkNotNull(h.controller.startRealtime("v=0", "prompt", null, callbacks))
+        val start = h.runtime.takeRequest("thread/realtime/start")
+        h.event(realtimeEvent("started", JSONObject().put("version", "v3")
+            .put("realtimeSessionId", start.getJSONObject("params").getString("realtimeSessionId"))), 7)
+        val results = mutableListOf<Result<Unit>>()
+        assertTrue(call.appendAudio("AAAAAA==", 24_000, results::add))
+        val audio = h.runtime.takeRequest("thread/realtime/appendAudio")
+        h.realtimeAudioDeadlines.fireNext()
+        h.respond(audio, JSONObject(), 8)
+        assertEquals(1, results.size)
+        assertEquals(CodexRealtimeIssue.TIMED_OUT, (results.single().exceptionOrNull() as CodexRealtimeFailure).issue)
+        assertEquals(listOf(CodexRealtimeIssue.TIMED_OUT), callbacks.errors)
+        assertFalse(call.appendAudio("AAAAAA==", 24_000, results::add))
+        assertNull(h.runtime.findRequest("thread/realtime/appendAudio"))
+        assertEquals(ClientSessionPhase.READY, h.controller.snapshot().sessionPhase)
+        assertEquals(0, h.runtime.restartCalls)
+    }
+
+    @Test
+    fun nativeReadAloudTextDoesNotCreateATurnAndIsInvalidatedOnLogout() {
+        val h = readyHarness(desktopRemoteAccessEnabled = false)
+        h.respond(h.runtime.takeRequest("remoteControl/status/read"), remoteConnection("disabled"), 6)
+        val call = checkNotNull(h.controller.startRealtime("v=0", "Read the answer", "arbor",
+            CodexRealtimeOptions(false, false, true), RealtimeProbe()))
+        val results = mutableListOf<Result<Unit>>()
+        assertFalse(call.appendSpeech("visible response", results::add))
+        val start = h.runtime.takeRequest("thread/realtime/start")
+        assertTrue(start.getJSONObject("params").getBoolean("clientManagedHandoffs"))
+        assertFalse(start.getJSONObject("params").getBoolean("includeStartupContext"))
+        h.event(realtimeEvent("started", JSONObject().put("version", "v3")
+            .put("realtimeSessionId", start.getJSONObject("params").getString("realtimeSessionId"))), 7)
+        h.event(realtimeEvent("sdp", JSONObject().put("sdp", "v=0\r\nanswer")), 8)
+        assertTrue(call.appendSpeech("visible response", results::add))
+        val speech = h.runtime.takeRequest("thread/realtime/appendSpeech")
+        assertEquals("thread-1", speech.getJSONObject("params").getString("threadId"))
+        h.respond(speech, JSONObject(), 9)
+        assertTrue(results.single().isSuccess)
+        assertTrue(call.appendSpeech("second response", results::add))
+        val late = h.runtime.takeRequest("thread/realtime/appendSpeech")
+        assertTrue(h.controller.logout())
+        assertFalse(call.appendSpeech("must not be sent", results::add))
+        h.respond(late, JSONObject(), 10)
+        assertEquals(2, results.size); assertTrue(results.last().isFailure)
+        assertNull(h.runtime.findRequest("turn/start"))
+        assertNull(h.runtime.findRequest("turn/steer"))
+        assertTrue(h.diagnostics.none { it.contains("visible response") || it.contains("second response") })
+    }
+
+    @Test
+    fun performanceSeparatesDispatchActiveTurnAndIdleWithBothReceiptOrders() {
+        for (eventFirst in listOf(true, false)) {
+            val probe = PerformanceProbe()
+            val harness = readyHarness(performanceObserver = probe)
+            assertEquals(PerformancePhase.IDLE_BETWEEN_TURNS, probe.phases.last())
+            assertNotNull(harness.controller.dispatch(listOf(CodexInput.Text("private input"))))
+            assertEquals(PerformancePhase.DISPATCH_PENDING, probe.phases.last())
+            assertEquals(listOf(PerformanceEvent.DISPATCH_ACCEPTED, PerformanceEvent.TURN_START_SEND), probe.events)
+            val request = harness.runtime.takeRequest("turn/start")
+            if (eventFirst) harness.event(turnStarted("turn-timing"), 6)
+            harness.respond(request, turnStartResult("thread-1", "turn-timing"), 7)
+            harness.event(turnStarted("turn-timing"), 8)
+            assertEquals(PerformancePhase.TURN_ACTIVE, probe.phases.last())
+            assertEquals(1, probe.events.count { it == PerformanceEvent.TURN_STARTED })
+            assertEquals(1, probe.events.count { it == PerformanceEvent.DISPATCH_ACKNOWLEDGED })
+            harness.event(turnCompleted("turn-timing"), 9)
+            harness.event(turnCompleted("turn-timing"), 10)
+            harness.event(turnStarted("turn-timing"), 11)
+            assertEquals(PerformancePhase.IDLE_BETWEEN_TURNS, probe.phases.last())
+            assertEquals(1, probe.events.count { it == PerformanceEvent.TURN_COMPLETED })
+            assertEquals(1, probe.events.count { it == PerformanceEvent.TURN_STARTED })
+        }
+    }
+
+    @Test
+    fun performanceOnlyUsesAcceptedCurrentThreadWaitStatusAndClearsItForNextTurn() {
+        val probe = PerformanceProbe()
+        val harness = readyHarness(performanceObserver = probe)
+        harness.startTurn("turn-wait", 6)
+        harness.event(performanceStatus("thread-foreign", "waitingOnUserInput"), 7)
+        assertEquals(PerformancePhase.TURN_ACTIVE, probe.phases.last())
+        harness.event(performanceStatus("thread-1", "waitingOnUserInput"), 8)
+        assertEquals(PerformancePhase.WAITING_FOR_USER, probe.phases.last())
+        harness.event(performanceStatus("thread-1", null), 8) // duplicate delivery cursor
+        assertEquals(PerformancePhase.WAITING_FOR_USER, probe.phases.last())
+        harness.event(performanceStatus("thread-1", null), 9)
+        assertEquals(PerformancePhase.TURN_ACTIVE, probe.phases.last())
+        harness.event(performanceStatus("thread-1", "waitingOnApproval"), 10)
+        assertEquals(PerformancePhase.WAITING_FOR_USER, probe.phases.last())
+        harness.event(turnCompleted("turn-wait"), 11)
+        assertEquals(PerformancePhase.IDLE_BETWEEN_TURNS, probe.phases.last())
+        harness.startTurn("turn-next", 12)
+        assertEquals(PerformancePhase.TURN_ACTIVE, probe.phases.last())
+    }
+
+    @Test
+    fun performanceSteerDoesNotStartOrCompleteAnotherTurn() {
+        val probe = PerformanceProbe()
+        val harness = readyHarness(performanceObserver = probe)
+        harness.startTurn("turn-steer-timing", 6)
+        assertNotNull(harness.controller.dispatch(listOf(CodexInput.Text("private steer"))))
+        assertEquals(PerformancePhase.DISPATCH_PENDING, probe.phases.last())
+        val request = harness.runtime.takeRequest("turn/steer")
+        harness.respond(request, JSONObject().put("turnId", "turn-steer-timing"), 7)
+        assertEquals(PerformancePhase.TURN_ACTIVE, probe.phases.last())
+        assertEquals(1, probe.events.count { it == PerformanceEvent.TURN_STARTED })
+        assertEquals(0, probe.events.count { it == PerformanceEvent.TURN_COMPLETED })
+        assertTrue(PerformanceEvent.TURN_STEER_SEND in probe.events)
+    }
+
+    @Test
+    fun performanceRejectedDispatchAndObserverExceptionsDoNotChangeOperation() {
+        val probe = PerformanceProbe()
+        val unready = Harness(performanceObserver = probe)
+        assertNull(unready.controller.dispatch(listOf(CodexInput.Text("not accepted"))))
+        assertTrue(probe.events.isEmpty())
+        val throwing = object : PerformanceSessionObserver {
+            override fun onState(generation: Long?, threadId: String?, phase: PerformancePhase) {
+                error("observer must not affect chat")
+            }
+            override fun onEvent(event: PerformanceEvent) { error("observer must not affect chat") }
+        }
+        val harness = readyHarness(performanceObserver = throwing)
+        harness.startTurn("turn-throwing-observer", 6)
+        assertEquals(ClientSessionPhase.BUSY, harness.controller.snapshot().sessionPhase)
+        harness.event(turnCompleted("turn-throwing-observer"), 7)
+        assertEquals(ClientSessionPhase.READY, harness.controller.snapshot().sessionPhase)
+    }
+
+    @Test
+    fun performanceReplayedHistoryIsNotLiveProgress() {
+        val probe = PerformanceProbe()
+        val harness = Harness(storedThreadId = "thread-1", autoEnableMemory = false, performanceObserver = probe)
+        harness.startRuntime()
+        harness.respond(harness.runtime.takeRequest("account/read"), signedInAccount(), 3)
+        harness.respond(harness.runtime.takeRequest("model/list"), modelList(), 4)
+        harness.respond(harness.runtime.takeRequest("thread/resume"), threadResumeResult("thread-1"), 5)
+        harness.event(turnStarted("turn-buffered"), 6)
+        harness.event(turnCompleted("turn-buffered"), 7)
+        harness.respond(harness.runtime.takeRequest("thread/memoryMode/set"), JSONObject(), 8)
+        assertTrue(probe.events.isEmpty())
+        assertEquals(PerformancePhase.IDLE_BETWEEN_TURNS, probe.phases.last())
+    }
+
+    @Test
+    fun performanceFirstOutputIsOneContentFreeEventNotPerToken() {
+        val probe = PerformanceProbe()
+        val harness = readyHarness(performanceObserver = probe)
+        harness.startTurn("turn-output", 6)
+        fun delta(text: String) = JSONObject().put("method", "item/agentMessage/delta")
+            .put("params", JSONObject().put("threadId", "thread-1").put("turnId", "turn-output")
+                .put("itemId", "private-item-id").put("delta", text)).toString()
+        harness.event(delta("private account content"), 7)
+        harness.event(delta("additional private content"), 8)
+        assertEquals(1, probe.events.count { it == PerformanceEvent.FIRST_ASSISTANT_OUTPUT })
+        assertFalse(probe.events.toString().contains("private"))
+        assertEquals(PerformancePhase.TURN_ACTIVE, probe.phases.last())
+    }
+
+    @Test
+    fun performanceStaleStartCannotKeepAuthoritativelyCompletedTurnActive() {
+        val probe = PerformanceProbe()
+        val harness = readyHarness(performanceObserver = probe)
+        harness.startTurn("turn-current", 6)
+        harness.event(turnStarted("turn-current"), 10)
+        harness.event(turnStarted("turn-stale"), 9)
+        harness.event(turnCompleted("turn-current"), 11)
+        assertEquals(PerformancePhase.IDLE_BETWEEN_TURNS, probe.phases.last())
+        assertEquals(1, probe.events.count { it == PerformanceEvent.TURN_STARTED })
+        assertEquals(1, probe.events.count { it == PerformanceEvent.TURN_COMPLETED })
+    }
+
+    @Test
+    fun performanceImmediateTerminalAcceptanceRecordsEndWithoutInventedStart() {
+        for (terminalEventFirst in listOf(false, true)) {
+            val probe = PerformanceProbe()
+            val harness = readyHarness(performanceObserver = probe)
+            assertNotNull(harness.controller.dispatch(listOf(CodexInput.Text("private"))))
+            val request = harness.runtime.takeRequest("turn/start")
+            if (terminalEventFirst) harness.event(turnCompleted("turn-immediate"), 6)
+            val result = turnStartResult("thread-1", "turn-immediate").apply {
+                getJSONObject("turn").put("status", "completed")
+            }
+            harness.respond(request, result, 7)
+            harness.event(turnCompleted("turn-immediate"), 8)
+            assertEquals(0, probe.events.count { it == PerformanceEvent.TURN_STARTED })
+            assertEquals(1, probe.events.count { it == PerformanceEvent.TURN_COMPLETED })
+            assertEquals(PerformancePhase.IDLE_BETWEEN_TURNS, probe.phases.last())
+        }
+    }
+
+    @Test
+    fun performanceInterruptDoesNotPermanentlyPoisonLaterIdlePhase() {
+        val probe = PerformanceProbe()
+        val harness = readyHarness(performanceObserver = probe)
+        harness.startTurn("turn-interrupt", 6)
+        assertTrue(harness.controller.interrupt())
+        harness.respond(harness.runtime.takeRequest("turn/interrupt"), JSONObject(), 7)
+        assertEquals(PerformancePhase.IDLE_BETWEEN_TURNS, probe.phases.last())
+        harness.event(turnCompleted("turn-interrupt"), 8)
+        assertEquals(PerformancePhase.IDLE_BETWEEN_TURNS, probe.phases.last())
+        harness.startTurn("turn-followup", 9)
+        harness.event(turnCompleted("turn-followup"), 10)
+        assertEquals(PerformancePhase.IDLE_BETWEEN_TURNS, probe.phases.last())
+        assertTrue(PerformanceEvent.INTERRUPT_SEND in probe.events)
+    }
+
+    @Test
+    fun performanceDelayedCompletionOfOlderTurnDoesNotDuplicateMilestone() {
+        val probe = PerformanceProbe()
+        val harness = readyHarness(performanceObserver = probe)
+        harness.startTurn("turn-a", 6)
+        harness.event(turnCompleted("turn-a"), 7)
+        harness.startTurn("turn-b", 8)
+        harness.event(turnCompleted("turn-b"), 9)
+        harness.event(turnCompleted("turn-a"), 10)
+        assertEquals(2, probe.events.count { it == PerformanceEvent.TURN_COMPLETED })
+        assertEquals(PerformancePhase.IDLE_BETWEEN_TURNS, probe.phases.last())
+    }
+
+    @Test
+    fun performanceBoundaryInterruptThenImmediateTerminalTurnHasTwoTerminalReceipts() {
+        val probe = PerformanceProbe()
+        val harness = readyHarness(performanceObserver = probe)
+        harness.startTurn("turn-old", 6)
+        assertNotNull(harness.controller.dispatch(
+            listOf(CodexInput.Text("private")), DispatchSelection("gpt-5.6-sol", ReasoningEffort.ULTRA),
+        ))
+        harness.respond(harness.runtime.takeRequest("turn/interrupt"), JSONObject(), 7)
+        val request = harness.runtime.takeRequest("turn/start")
+        val result = turnStartResult("thread-1", "turn-terminal-next").apply {
+            getJSONObject("turn").put("status", "completed")
+        }
+        harness.respond(request, result, 8)
+        assertEquals(2, probe.events.count { it == PerformanceEvent.TURN_COMPLETED })
+        assertEquals(1, probe.events.count { it == PerformanceEvent.TURN_STARTED })
+        assertEquals(PerformancePhase.IDLE_BETWEEN_TURNS, probe.phases.last())
+    }
+
+    @Test
+    fun performanceRestoredExplicitWaitSeedsStateWithoutInventingLiveEvents() {
+        val probe = PerformanceProbe()
+        val harness = Harness(storedThreadId = "thread-1", performanceObserver = probe)
+        harness.startRuntime()
+        harness.respond(harness.runtime.takeRequest("account/read"), signedInAccount(), 3)
+        harness.respond(harness.runtime.takeRequest("model/list"), modelList(), 4)
+        val result = threadResumeResult("thread-1", JSONArray().put(JSONObject()
+            .put("id", "turn-wait-restored").put("status", "inProgress").put("items", JSONArray())))
+        result.getJSONObject("thread").put("status", JSONObject().put("type", "active")
+            .put("activeFlags", JSONArray().put("waitingOnUserInput")))
+        harness.respond(harness.runtime.takeRequest("thread/resume"), result, 5)
+        assertEquals(PerformancePhase.WAITING_FOR_USER, probe.phases.last())
+        assertTrue(probe.events.isEmpty())
+    }
+
+    private class PerformanceProbe : PerformanceSessionObserver {
+        val phases = mutableListOf<PerformancePhase>()
+        val events = mutableListOf<PerformanceEvent>()
+        override fun onState(generation: Long?, threadId: String?, phase: PerformancePhase) {
+            phases += phase
+        }
+        override fun onEvent(event: PerformanceEvent) { events += event }
+    }
+
+    private fun performanceStatus(threadId: String, flag: String?): String = JSONObject()
+        .put("method", "thread/status/changed")
+        .put("params", JSONObject().put("threadId", threadId).put("status", JSONObject()
+            .put("type", "active").put("activeFlags", JSONArray().apply { flag?.let { put(it) } })))
+        .toString()
+
+    @Test
+    fun freshPersonalThreadIsNotReadyOrSelectedUntilMemoryAndMaterializationAreConfirmed() {
+        val harness = Harness(autoEnableMemory = false, autoMaterializeFreshThread = false)
         harness.startRuntime()
         harness.respond(harness.runtime.takeRequest("account/read"), signedInAccount(), 3)
         harness.respond(harness.runtime.takeRequest("model/list"), modelList(), 4)
@@ -123,7 +1146,7 @@ class CodexSessionControllerTest {
         val params = memory.getJSONObject("params")
         assertEquals("thread-memory-new", params.getString("threadId"))
         assertEquals("enabled", params.getString("mode"))
-        assertEquals("thread-memory-new", harness.store.threadId)
+        assertNull(harness.store.threadId)
         assertEquals(
             ClientSessionPhase.RECOVERING_THREAD,
             harness.controller.snapshot().sessionPhase,
@@ -132,9 +1155,22 @@ class CodexSessionControllerTest {
 
         harness.respond(memory, JSONObject(), 6)
 
+        assertEquals(ClientSessionPhase.RECOVERING_THREAD, harness.controller.snapshot().sessionPhase)
+        assertNull(harness.store.threadId)
+        assertNull(harness.controller.dispatch(listOf(CodexInput.Text("Noch immer nicht"))))
+        assertNull(harness.controller.startRealtime("v=0\r\n", "test", null, RealtimeProbe()))
+        assertFalse(harness.controller.updateSelection(DispatchSelection("gpt-5.6-luna", ReasoningEffort.MAX)))
+        assertNull(harness.runtime.findRequest("turn/start"))
+        assertNull(harness.runtime.findRequest("thread/realtime/start"))
+        val read = harness.runtime.takeRequest("thread/read")
+        assertEquals("thread-memory-new", read.getJSONObject("params").getString("threadId"))
+        assertTrue(read.getJSONObject("params").getBoolean("includeTurns"))
+        harness.respond(read, threadMaterializeResult("thread-memory-new"), 7)
+
         val ready = harness.controller.snapshot()
         assertEquals(ClientSessionPhase.READY, ready.sessionPhase)
         assertEquals("thread-memory-new", ready.session.currentThreadId)
+        assertEquals("thread-memory-new", harness.store.threadId)
     }
 
     @Test
@@ -169,6 +1205,8 @@ class CodexSessionControllerTest {
 
         harness.respond(migration, JSONObject(), 6)
 
+        assertNull("Existing history must not be fully fetched for bootstrap", harness.runtime.findRequest("thread/read"))
+
         val ready = harness.controller.snapshot()
         assertEquals(ClientSessionPhase.READY, ready.sessionPhase)
         assertEquals("thread-from-memory-off-build", ready.session.currentThreadId)
@@ -180,6 +1218,113 @@ class CodexSessionControllerTest {
             DispatchSelection("gpt-5.6-luna", ReasoningEffort.MAX),
             ready.migrationReadiness.effectiveSelection,
         )
+    }
+
+    @Test fun malformedFreshPersistenceReceiptNeverSelectsOrRestartsTheTask() {
+        for (fault in listOf("wrong-id", "ephemeral", "unexpected-turn", "active", "missing-mode")) {
+            val (h, read) = pendingFreshMaterialization()
+            val receipt = threadMaterializeResult("thread-1")
+            receipt.getJSONObject("thread").also { thread -> when (fault) {
+                "wrong-id" -> thread.put("id", "PRIVATE_OTHER_THREAD")
+                "ephemeral" -> thread.put("ephemeral", true)
+                "unexpected-turn" -> thread.put("turns", JSONArray().put(JSONObject().put("id", "PRIVATE_TURN")))
+                "active" -> thread.put("status", JSONObject().put("type", "active"))
+                else -> thread.remove("historyMode")
+            } }
+            h.respond(read, receipt, 6)
+            assertEquals(fault, ClientSessionPhase.FAILED, h.controller.snapshot().sessionPhase)
+            assertEquals(ClientProblemCode.THREAD_RECOVERY, h.controller.snapshot().problem?.code)
+            assertNull(h.store.threadId)
+            assertEquals(0, h.runtime.restartCalls)
+            assertNull(h.runtime.findRequest("thread/start"))
+            assertTrue(h.diagnostics.single().startsWith(
+                "Thread bootstrap failure boundary=thread_materialize stage=invalid_receipt reason="))
+            assertTrue(h.diagnostics.none { it.contains("PRIVATE") })
+            h.respond(read, threadMaterializeResult("thread-1"), 7)
+            assertEquals(ClientSessionPhase.FAILED, h.controller.snapshot().sessionPhase)
+            assertNull(h.store.threadId)
+            assertEquals(0, h.runtime.restartCalls)
+        }
+    }
+
+    @Test fun materializationFailureAndLateAckPreserveAnyExistingPointerAndReceipts() {
+        val (h, read) = pendingFreshMaterialization()
+        h.store.threadId = "preserved-task"
+        val visible = VisibleInputReceipt.fromInputs("preserved-task", "visible",
+            listOf(CodexInput.Text("Retained local message")))!!
+        h.store.record(visible)
+        h.fail(read, 6)
+        h.respond(read, threadMaterializeResult("thread-1"), 7)
+        assertEquals(ClientSessionPhase.FAILED, h.controller.snapshot().sessionPhase)
+        assertEquals("preserved-task", h.store.threadId)
+        assertEquals(visible, h.store.read("preserved-task", "visible"))
+        assertEquals(0, h.runtime.restartCalls)
+        assertNull(h.runtime.findRequest("thread/start"))
+    }
+
+    @Test fun materializationAckCannotOverwriteAChangedDurablePointer() {
+        val (h, read) = pendingFreshMaterialization()
+        h.store.threadId = "preserved-task"
+        h.respond(read, threadMaterializeResult("thread-1"), 6)
+        assertEquals(ClientSessionPhase.FAILED, h.controller.snapshot().sessionPhase)
+        assertEquals(ClientProblemCode.LOCAL_PERSISTENCE, h.controller.snapshot().problem?.code)
+        assertEquals("preserved-task", h.store.threadId)
+        assertEquals(0, h.runtime.restartCalls)
+    }
+
+    @Test fun materializationAckFromPreviousAccountCannotPublishNewThread() {
+        val (h, read) = pendingFreshMaterialization()
+        assertTrue(h.controller.refreshAccount())
+        val otherAccount = signedInAccount().also {
+            it.getJSONObject("account").put("email", "another@example.invalid")
+        }
+        h.respond(h.runtime.takeRequest("account/read"), otherAccount, 6)
+        h.respond(read, threadMaterializeResult("thread-1"), 7)
+        assertEquals(ClientSessionPhase.FAILED, h.controller.snapshot().sessionPhase)
+        assertNull(h.store.threadId)
+        assertEquals(0, h.runtime.restartCalls)
+    }
+
+    @Test fun materializationAckFromPreviousGenerationCannotPublishNewThread() {
+        val (h, read) = pendingFreshMaterialization()
+        h.controller.restart()
+        h.runtime.emitState(2, 1, AppServerSessionContract.STATE_STARTING)
+        h.runtime.emitState(2, 2, AppServerSessionContract.STATE_READY)
+        h.respond(read, threadMaterializeResult("thread-1"), 6, generation = 1)
+        assertEquals(ClientSessionPhase.BOOTSTRAPPING, h.controller.snapshot().sessionPhase)
+        assertNull(h.store.threadId)
+        assertEquals(1, h.runtime.restartCalls)
+    }
+
+    @Test fun actualPreAdmissionWorkInvalidatesAnEmptyMaterializationReceipt() {
+        val (h, read) = pendingFreshMaterialization()
+        h.event(turnStarted("unexpected-native-work"), 6)
+        h.event(turnCompleted("unexpected-native-work"), 7)
+        h.respond(read, threadMaterializeResult("thread-1"), 8)
+        assertEquals(ClientSessionPhase.FAILED, h.controller.snapshot().sessionPhase)
+        assertNull(h.store.threadId)
+        assertEquals(0, h.runtime.restartCalls)
+    }
+
+    @Test fun repeatedMaterializationReceiptCannotReopenOrRestartReadyTask() {
+        val (h, read) = pendingFreshMaterialization()
+        h.respond(read, threadMaterializeResult("thread-1"), 6)
+        h.respond(read, threadMaterializeResult("thread-1"), 7)
+        assertEquals(ClientSessionPhase.READY, h.controller.snapshot().sessionPhase)
+        assertEquals("thread-1", h.store.threadId)
+        assertEquals(0, h.runtime.restartCalls)
+        assertTrue(h.diagnostics.isEmpty())
+    }
+
+    private fun pendingFreshMaterialization(): Pair<Harness, JSONObject> {
+        val h = Harness(autoMaterializeFreshThread = false)
+        h.startRuntime()
+        h.respond(h.runtime.takeRequest("account/read"), signedInAccount(), 3)
+        h.respond(h.runtime.takeRequest("model/list"), modelList(), 4)
+        h.respond(h.runtime.takeRequest("thread/start"), threadStartResult("thread-1"), 5)
+        assertNull(h.store.threadId)
+        assertEquals(ClientSessionPhase.RECOVERING_THREAD, h.controller.snapshot().sessionPhase)
+        return h to h.runtime.takeRequest("thread/read")
     }
 
     @Test
@@ -387,6 +1532,58 @@ class CodexSessionControllerTest {
         harness.respond(standardStart, turnStartResult("thread-1", "turn-standard"), 8)
         assertEquals(standard, harness.controller.snapshot().confirmedSelection)
         assertEquals(HansSettings.DEFAULT_SERVICE_TIER, harness.settings.value.serviceTier)
+    }
+
+    @Test
+    fun sealedWhatsAppDestinationRejectsAChangedSelectedThreadBeforeAnyFrameOrOutbound() {
+        val harness = readyHarness()
+        val preparedThreadId = harness.controller.snapshot().session.currentThreadId!!
+        harness.runtime.emitState(1, 6, AppServerSessionContract.STATE_EXITED)
+        harness.store.saveThreadId("thread-other")
+        harness.controller.restart()
+        harness.runtime.emitState(2, 1, AppServerSessionContract.STATE_STARTING)
+        harness.runtime.emitState(2, 2, AppServerSessionContract.STATE_READY)
+        harness.respond(harness.runtime.takeRequest("account/read", 2), signedInAccount(), 3, 2)
+        harness.respond(harness.runtime.takeRequest("model/list", 2), modelList(), 4, 2)
+        harness.respond(harness.runtime.takeRequest("thread/resume", 2), threadResumeResult("thread-other"), 5, 2)
+        assertEquals(ClientSessionPhase.READY, harness.controller.snapshot().sessionPhase)
+        val framesBefore = harness.runtime.sent.size
+        val outboundBefore = harness.controller.snapshot().outboundTimeline
+        assertEquals(CodexDispatchAttemptResult.RejectedBeforeTransport,
+            harness.controller.dispatchAttempt(listOf(CodexInput.Text("Not a task for the changed conversation")),
+                clientUserMessageId = "whatsapp-agent-prepared", expectedThreadId = preparedThreadId))
+        assertEquals(framesBefore, harness.runtime.sent.size)
+        assertEquals(outboundBefore, harness.controller.snapshot().outboundTimeline)
+        assertNull(harness.runtime.findRequest("turn/start"))
+        assertNull(harness.runtime.findRequest("turn/steer"))
+    }
+
+    @Test
+    fun passiveAgentChannelRecoveryUsesRawPersistedClientIdsNotFilteredUiAndClearsOnReset() {
+        val harness = Harness(storedThreadId = "thread-1")
+        harness.startRuntime()
+        harness.respond(harness.runtime.takeRequest("account/read"), signedInAccount(), 3)
+        harness.respond(harness.runtime.takeRequest("model/list"), modelList(), 4)
+        val before = harness.controller.snapshot().agentChannelHistoryRevision
+        assertNull(harness.controller.agentChannelRecoveredHistory())
+        val raw = threadResumeResult("thread-1", JSONArray().put(recoveredSummaryTurn("turn-received",
+            "whatsapp-agent-receipt", listOf("Unverified private history is not visible UI"),
+            "agent-received", "Completed response")))
+        harness.respond(harness.runtime.takeRequest("thread/resume"), raw, 5)
+        val proof = harness.controller.agentChannelRecoveredHistory()!!
+        assertEquals(mapOf("whatsapp-agent-receipt" to "turn-received"), proof.messageTurns)
+        assertEquals(mapOf("turn-received" to TurnStatus.COMPLETED), proof.turnStatuses)
+        assertFalse(proof.toString().contains("Unverified private history"))
+        assertTrue(harness.controller.snapshot().outboundTimeline.isEmpty())
+        assertTrue(harness.controller.snapshot().timeline.none { it.text.contains("Unverified private history") })
+        assertTrue(harness.controller.snapshot().agentChannelHistoryRevision > before)
+        assertNull(harness.runtime.findRequest("turn/start"))
+        assertNull(harness.runtime.findRequest("turn/steer"))
+        val loadedRevision = harness.controller.snapshot().agentChannelHistoryRevision
+        harness.controller.restart()
+        assertNull(harness.controller.agentChannelRecoveredHistory())
+        harness.runtime.emitState(2, 1, AppServerSessionContract.STATE_STARTING)
+        assertTrue(harness.controller.snapshot().agentChannelHistoryRevision > loadedRevision)
     }
 
     @Test
@@ -758,21 +1955,25 @@ class CodexSessionControllerTest {
 
     @Test
     fun bootstrapRemoteRejectionsIdentifyTheBoundaryWithoutLoggingPrivateErrorDetails() {
-        listOf("thread/start", "thread/resume", "thread/memoryMode/set").forEach { method ->
+        listOf("thread/start", "thread/resume", "thread/memoryMode/set", "thread/read").forEach { method ->
             val harness = Harness(
                 storedThreadId = "PRIVATE_STORED_THREAD".takeIf { method == "thread/resume" },
                 instructions = "PRIVATE_DEVELOPER_INSTRUCTIONS",
                 autoEnableMemory = false,
+                autoMaterializeFreshThread = false,
             )
             harness.startRuntime()
             harness.respond(harness.runtime.takeRequest("account/read"), signedInAccount(), 3)
             harness.respond(harness.runtime.takeRequest("model/list"), modelList(), 4)
-            if (method == "thread/memoryMode/set") {
+            if (method in setOf("thread/memoryMode/set", "thread/read")) {
                 harness.respond(
                     harness.runtime.takeRequest("thread/start"),
                     threadStartResult("PRIVATE_STARTED_THREAD"),
                     5,
                 )
+            }
+            if (method == "thread/read") {
+                harness.respond(harness.runtime.takeRequest("thread/memoryMode/set"), JSONObject(), 5)
             }
             val request = harness.runtime.takeRequest(method)
             harness.runtime.emitFrame(1, 6, JSONObject()
@@ -786,6 +1987,7 @@ class CodexSessionControllerTest {
             val boundary = when (method) {
                 "thread/start" -> "thread_start"
                 "thread/resume" -> "thread_resume"
+                "thread/read" -> "thread_materialize"
                 else -> "thread_memory_enable"
             }
             assertEquals(listOf(
@@ -800,15 +2002,62 @@ class CodexSessionControllerTest {
     }
 
     @Test
+    fun classifiedResumeFailuresRemainDiagnosticOnlyAndPreserveTheSelectedTask() {
+        val threadId = "00000000-1111-2222-3333-444444444444"
+        listOf(
+            "no rollout found for thread id $threadId" to "rollout_missing",
+            "thread $threadId already has an active writer" to "active_writer",
+            "failed to load configuration: PRIVATE_CREDENTIAL /PRIVATE_PATH" to "configuration_load",
+            "no rollout found for thread id other-thread" to "unclassified",
+        ).forEach { (message, reason) ->
+            val harness = Harness(storedThreadId = threadId)
+            val receipt = VisibleInputReceipt.fromInputs(
+                threadId, "private-client", listOf(CodexInput.Text("PRIVATE_EXISTING_INPUT")),
+            )!!
+            harness.store.record(receipt)
+            harness.startRuntime()
+            harness.respond(harness.runtime.takeRequest("account/read"), signedInAccount(), 3)
+            harness.respond(harness.runtime.takeRequest("model/list"), modelList(), 4)
+            val request = harness.runtime.takeRequest("thread/resume")
+            harness.runtime.emitFrame(1, 5, JSONObject()
+                .put("id", request.get("id"))
+                .put("error", JSONObject()
+                    .put("code", -32600)
+                    .put("message", message)
+                    .put("data", JSONObject().put("private", "PRIVATE_ERROR_DATA")))
+                .toString())
+
+            assertEquals(listOf(
+                "Thread bootstrap failure boundary=thread_resume stage=remote_rejection " +
+                    "reason=$reason rpc_code=-32600",
+            ), harness.diagnostics)
+            assertEquals(threadId, harness.store.threadId)
+            assertEquals(receipt, harness.store.read(threadId, "private-client"))
+            assertEquals(ClientSessionPhase.FAILED, harness.controller.snapshot().sessionPhase)
+            assertEquals(ClientProblemCode.THREAD_RECOVERY, harness.controller.snapshot().problem?.code)
+            assertEquals(AccountPhase.SIGNED_IN, harness.controller.snapshot().session.account.phase)
+            assertTrue(harness.controller.snapshot().problem!!.retryable)
+            assertNull(harness.runtime.findRequest("thread/start"))
+            assertEquals(0, harness.runtime.restartCalls)
+        }
+    }
+
+    @Test
     fun bootstrapTransportFailuresStayAmbiguousRatherThanClaimingLocalOrRemoteRejection() {
-        listOf("thread/start", "thread/resume", "thread/memoryMode/set").forEach { method ->
+        listOf("thread/start", "thread/resume", "thread/memoryMode/set", "thread/read").forEach { method ->
             val harness = Harness(
                 storedThreadId = "thread-stored".takeIf { method == "thread/resume" },
                 autoEnableMemory = false,
+                autoMaterializeFreshThread = false,
             )
             harness.startRuntime()
             harness.respond(harness.runtime.takeRequest("account/read"), signedInAccount(), 3)
-            if (method == "thread/memoryMode/set") {
+            if (method == "thread/read") {
+                harness.respond(harness.runtime.takeRequest("model/list"), modelList(), 4)
+                harness.respond(harness.runtime.takeRequest("thread/start"), threadStartResult("thread-started"), 5)
+                harness.runtime.failNextSend = true
+                harness.respond(harness.runtime.takeRequest("thread/memoryMode/set"), JSONObject(), 6)
+            } else if (method == "thread/memoryMode/set") {
                 harness.respond(harness.runtime.takeRequest("model/list"), modelList(), 4)
                 harness.runtime.failNextSend = true
                 harness.respond(
@@ -824,15 +2073,23 @@ class CodexSessionControllerTest {
             val boundary = when (method) {
                 "thread/start" -> "thread_start"
                 "thread/resume" -> "thread_resume"
+                "thread/read" -> "thread_materialize"
                 else -> "thread_memory_enable"
             }
             assertEquals(listOf(
                 "Thread bootstrap failure boundary=$boundary stage=transport_outcome_ambiguous " +
                     "reason=invalid_state",
             ), harness.diagnostics)
-            assertEquals(ClientRuntimePhase.RESTARTING, harness.controller.snapshot().runtimePhase)
-            assertEquals(ClientProblemCode.DISPATCH_AMBIGUOUS, harness.controller.snapshot().problem?.code)
-            assertEquals(1, harness.runtime.restartCalls)
+            if (method == "thread/resume") {
+                assertEquals(ClientRuntimePhase.RESTARTING, harness.controller.snapshot().runtimePhase)
+                assertEquals(ClientProblemCode.DISPATCH_AMBIGUOUS, harness.controller.snapshot().problem?.code)
+                assertEquals(1, harness.runtime.restartCalls)
+            } else {
+                assertEquals(ClientSessionPhase.FAILED, harness.controller.snapshot().sessionPhase)
+                assertEquals(ClientProblemCode.THREAD_RECOVERY, harness.controller.snapshot().problem?.code)
+                assertEquals("An ambiguous fresh bootstrap must not create another task", 0, harness.runtime.restartCalls)
+                assertNull(harness.store.threadId)
+            }
         }
     }
 
@@ -911,12 +2168,71 @@ class CodexSessionControllerTest {
         val pending = harness.runtime.takeRequest("thread/start")
         completeDeviceLogin(harness, 5)
         assertNull(harness.runtime.findRequest("thread/start"))
+        assertEquals(ClientSessionPhase.RECOVERING_THREAD, harness.controller.snapshot().sessionPhase)
+        assertNull(harness.store.threadId)
 
         harness.respond(pending, threadStartResult("thread-pending"), 9)
         assertEquals(ClientSessionPhase.READY, harness.controller.snapshot().sessionPhase)
+        assertEquals("thread-pending", harness.store.threadId)
     }
 
-    private fun completeDeviceLogin(harness: Harness, sequence: Long) {
+    @Test fun sameAccountReloginRestoresEachPendingFreshBootstrapStageWithoutDuplicatingWork() {
+        for (stage in listOf("thread/start", "thread/memoryMode/set", "thread/read")) {
+            val h = Harness(autoEnableMemory = false, autoMaterializeFreshThread = false)
+            h.startRuntime()
+            h.respond(h.runtime.takeRequest("account/read"), signedInAccount(), 3)
+            h.respond(h.runtime.takeRequest("model/list"), modelList(), 4)
+            if (stage != "thread/start") {
+                h.respond(h.runtime.takeRequest("thread/start"), threadStartResult("thread-1"), 5)
+            }
+            if (stage == "thread/read") {
+                h.respond(h.runtime.takeRequest("thread/memoryMode/set"), JSONObject(), 6)
+            }
+            val pending = h.runtime.takeRequest(stage)
+            completeDeviceLogin(h, 10)
+            assertEquals(stage, ClientSessionPhase.RECOVERING_THREAD, h.controller.snapshot().sessionPhase)
+            assertNull(h.store.threadId)
+            assertNull(h.runtime.findRequest("thread/start"))
+            assertNull(h.runtime.findRequest("thread/memoryMode/set"))
+            assertNull(h.runtime.findRequest("thread/read"))
+            h.respond(pending, when (stage) {
+                "thread/start" -> threadStartResult("thread-1")
+                "thread/memoryMode/set" -> JSONObject()
+                else -> threadMaterializeResult("thread-1")
+            }, 14)
+            if (stage == "thread/start") {
+                h.respond(h.runtime.takeRequest("thread/memoryMode/set"), JSONObject(), 15)
+            }
+            if (stage != "thread/read") {
+                h.respond(h.runtime.takeRequest("thread/read"), threadMaterializeResult("thread-1"), 16)
+            }
+            assertEquals(stage, ClientSessionPhase.READY, h.controller.snapshot().sessionPhase)
+            assertEquals("thread-1", h.store.threadId)
+            assertEquals(0, h.runtime.restartCalls)
+        }
+    }
+
+    @Test fun differentAccountReloginCannotAdoptPendingFreshThreadStart() {
+        val h = Harness(autoEnableMemory = false, autoMaterializeFreshThread = false)
+        h.startRuntime()
+        h.respond(h.runtime.takeRequest("account/read"), signedInAccount(), 3)
+        h.respond(h.runtime.takeRequest("model/list"), modelList(), 4)
+        val pending = h.runtime.takeRequest("thread/start")
+        val otherAccount = signedInAccount().also {
+            it.getJSONObject("account").put("email", "another@example.invalid")
+        }
+        completeDeviceLogin(h, 5, otherAccount)
+        assertNull(h.runtime.findRequest("thread/start"))
+        h.respond(pending, threadStartResult("old-account-thread"), 9)
+        assertEquals(ClientSessionPhase.FAILED, h.controller.snapshot().sessionPhase)
+        assertEquals(ClientProblemCode.THREAD_RECOVERY, h.controller.snapshot().problem?.code)
+        assertNull(h.store.threadId)
+        assertNull(h.runtime.findRequest("thread/memoryMode/set"))
+        assertNull(h.runtime.findRequest("thread/read"))
+        assertEquals(0, h.runtime.restartCalls)
+    }
+
+    private fun completeDeviceLogin(harness: Harness, sequence: Long, account: JSONObject = signedInAccount()) {
         assertTrue(harness.controller.loginWithDeviceCode())
         harness.respond(harness.runtime.takeRequest("account/login/start"), JSONObject()
             .put("type", "chatgptDeviceCode").put("loginId", "login-retry")
@@ -926,7 +2242,7 @@ class CodexSessionControllerTest {
             """{"method":"account/login/completed","params":{"success":true,"loginId":"login-retry","error":null}}""",
             sequence + 1,
         )
-        harness.respond(harness.runtime.takeRequest("account/read"), signedInAccount(), sequence + 2)
+        harness.respond(harness.runtime.takeRequest("account/read"), account, sequence + 2)
         harness.respond(harness.runtime.takeRequest("model/list"), modelList(), sequence + 3)
     }
 
@@ -1177,6 +2493,23 @@ class CodexSessionControllerTest {
     }
 
     @Test
+    fun foreignTurnBufferedDuringRestoreCannotReplaceTheLocalTurnOrSteerTarget() {
+        val harness = Harness(storedThreadId = "thread-1")
+        harness.startRuntime()
+        harness.respond(harness.runtime.takeRequest("account/read"), signedInAccount(), 3)
+        harness.respond(harness.runtime.takeRequest("model/list"), modelList(), 4)
+        harness.event(foreignTurnEvent("turn/started", "foreign-desktop", "foreign-turn"), 5)
+        harness.respond(harness.runtime.takeRequest("thread/resume"),
+            threadResumeResult("thread-1", JSONArray()), 6)
+        assertEquals("thread-1", harness.controller.snapshot().session.currentThreadId)
+        assertEquals(ClientWorkInterruptPhase.IDLE, harness.controller.snapshot().workInterrupt.phase)
+        assertNotNull(harness.controller.dispatch(listOf(CodexInput.Text("A local request"))))
+        assertNotNull(harness.runtime.findRequest("turn/start"))
+        assertNull(harness.runtime.findRequest("turn/steer"))
+        assertEquals(0, harness.runtime.restartCalls)
+    }
+
+    @Test
     fun restartBuffersEventsUntilAccountAndThreadAreRehydrated() {
         val harness = readyHarness()
         harness.controller.restart()
@@ -1231,6 +2564,14 @@ class CodexSessionControllerTest {
             "turn-still-active",
             interrupt.getJSONObject("params").getString("turnId"),
         )
+        assertEquals(ClientWorkInterruptPhase.PENDING, harness.controller.snapshot().workInterrupt.phase)
+        assertTrue(harness.controller.interrupt())
+        assertNull(harness.runtime.findRequest("turn/interrupt"))
+        harness.fail(interrupt, 7, generation = 2)
+        assertEquals(ClientWorkInterruptPhase.AVAILABLE, harness.controller.snapshot().workInterrupt.phase)
+        assertTrue(harness.controller.interrupt())
+        assertEquals("turn-still-active", harness.runtime.takeRequest("turn/interrupt", generation = 2)
+            .getJSONObject("params").getString("turnId"))
     }
 
     @Test
@@ -4393,6 +5734,123 @@ class CodexSessionControllerTest {
     }
 
     @Test
+    fun completedTurnRetiresUnansweredInterruptAndLateRepliesCannotBlockOrStopTheNextTurn() {
+        val harness = dynamicReadyHarness(FakeDynamicToolExecutor())
+        harness.startTurn("turn-stop-a", 6)
+        assertTrue(harness.controller.interrupt())
+        val oldInterrupt = harness.runtime.takeRequest("turn/interrupt")
+        assertEquals(1, harness.interruptDeadlines.pendingCount)
+        harness.event(turnCompleted("turn-stop-a"), 7)
+        assertEquals(ClientWorkInterruptPhase.IDLE, harness.controller.snapshot().workInterrupt.phase)
+        assertEquals(0, harness.interruptDeadlines.pendingCount)
+
+        harness.startTurn("turn-stop-b", 8)
+        assertEquals(ClientWorkInterruptPhase.AVAILABLE, harness.controller.snapshot().workInterrupt.phase)
+        assertTrue(harness.controller.interrupt())
+        val currentInterrupt = harness.runtime.takeRequest("turn/interrupt")
+        assertEquals("turn-stop-b", currentInterrupt.getJSONObject("params").getString("turnId"))
+        harness.respond(oldInterrupt, JSONObject(), 9)
+        harness.fail(oldInterrupt, 10)
+        assertEquals(ClientRuntimePhase.READY, harness.controller.snapshot().runtimePhase)
+        assertEquals(ClientSessionPhase.BUSY, harness.controller.snapshot().sessionPhase)
+        assertEquals(ClientWorkInterruptPhase.PENDING, harness.controller.snapshot().workInterrupt.phase)
+        harness.respond(currentInterrupt, JSONObject(), 11)
+        assertEquals(ClientWorkInterruptPhase.IDLE, harness.controller.snapshot().workInterrupt.phase)
+        assertEquals(0, harness.interruptDeadlines.pendingCount)
+    }
+
+    @Test
+    fun unansweredInterruptDeadlineRestoresRetryWithoutRevivingToolsOrClaimingSuccess() {
+        val queue = ManualDynamicToolExecutor()
+        val fixture = LifecycleNotificationTools(queue)
+        val harness = dynamicReadyHarness(fixture.executor)
+        harness.startTurn("turn-stop-timeout", 6)
+        harness.event(notificationMutationCall(1801, "turn-stop-timeout", "queued-before-timeout"), 7)
+        assertTrue(harness.controller.interrupt())
+        val timedOutInterrupt = harness.runtime.takeRequest("turn/interrupt")
+        assertEquals(1, harness.interruptDeadlines.pendingCount)
+        harness.interruptDeadlines.fireNext()
+        assertEquals(0, harness.interruptDeadlines.pendingCount)
+        assertEquals(ClientSessionPhase.BUSY, harness.controller.snapshot().sessionPhase)
+        assertEquals(ClientWorkInterruptPhase.AVAILABLE, harness.controller.snapshot().workInterrupt.phase)
+        assertEquals(ClientProblemCode.INTERRUPT_REJECTED, harness.controller.snapshot().problem?.code)
+        harness.event(notificationMutationCall(1802, "turn-stop-timeout", "after-timeout"), 8)
+        queue.runAll()
+        assertEquals(0, fixture.source.mutations)
+        assertEquals(0, fixture.confirmations)
+        assertEquals(0, harness.controller.snapshot().pendingDynamicToolCalls)
+
+        assertTrue(harness.controller.interrupt())
+        val retriedInterrupt = harness.runtime.takeRequest("turn/interrupt")
+        harness.respond(timedOutInterrupt, JSONObject(), 9)
+        harness.fail(timedOutInterrupt, 10)
+        assertEquals(ClientRuntimePhase.READY, harness.controller.snapshot().runtimePhase)
+        assertEquals(ClientSessionPhase.BUSY, harness.controller.snapshot().sessionPhase)
+        assertEquals(ClientWorkInterruptPhase.PENDING, harness.controller.snapshot().workInterrupt.phase)
+        assertEquals(1, harness.interruptDeadlines.pendingCount)
+        harness.respond(retriedInterrupt, JSONObject(), 11)
+        assertEquals(ClientWorkInterruptPhase.IDLE, harness.controller.snapshot().workInterrupt.phase)
+        assertEquals(0, harness.interruptDeadlines.pendingCount)
+        assertNull(harness.controller.snapshot().problem)
+    }
+
+    @Test
+    fun runtimeRestartCancelsThePendingInterruptDeadline() {
+        val harness = dynamicReadyHarness(FakeDynamicToolExecutor())
+        harness.startTurn("turn-stop-restart", 6)
+        assertTrue(harness.controller.interrupt())
+        assertEquals(1, harness.interruptDeadlines.pendingCount)
+        harness.controller.restart()
+        harness.runtime.emitState(2, 1, AppServerSessionContract.STATE_STARTING)
+        assertEquals(0, harness.interruptDeadlines.pendingCount)
+        assertEquals(ClientWorkInterruptPhase.IDLE, harness.controller.snapshot().workInterrupt.phase)
+    }
+
+    @Test
+    fun workInterruptStateTracksRealTurnRequestAndCorrelatedAckWithoutDuplicateRequests() {
+        val harness = dynamicReadyHarness(FakeDynamicToolExecutor())
+        assertEquals(ClientWorkInterruptPhase.IDLE, harness.controller.snapshot().workInterrupt.phase)
+        assertFalse(harness.controller.interrupt())
+        assertNotNull(harness.controller.dispatch(listOf(CodexInput.Text("Start controlled task"))))
+        assertEquals(ClientWorkInterruptPhase.AWAITING_TURN, harness.controller.snapshot().workInterrupt.phase)
+        assertFalse(harness.controller.interrupt())
+        val start = harness.runtime.takeRequest("turn/start")
+        harness.respond(start, turnStartResult("thread-1", "turn-composer-stop"), 6)
+        assertEquals(ClientWorkInterruptPhase.AVAILABLE, harness.controller.snapshot().workInterrupt.phase)
+
+        assertTrue(harness.controller.interrupt())
+        val interrupt = harness.runtime.takeRequest("turn/interrupt")
+        val pending = harness.controller.snapshot().workInterrupt
+        assertEquals(ClientWorkInterruptPhase.PENDING, pending.phase)
+        assertTrue(harness.controller.interrupt())
+        assertEquals(pending, harness.controller.snapshot().workInterrupt)
+        assertNull(harness.runtime.findRequest("turn/interrupt"))
+        assertEquals(ClientSessionPhase.BUSY, harness.controller.snapshot().sessionPhase)
+        assertEquals("turn-composer-stop", interrupt.getJSONObject("params").getString("turnId"))
+
+        harness.respond(interrupt, JSONObject(), 7)
+        assertEquals(ClientWorkInterruptPhase.IDLE, harness.controller.snapshot().workInterrupt.phase)
+        assertEquals(ClientSessionPhase.READY, harness.controller.snapshot().sessionPhase)
+    }
+
+    @Test
+    fun rejectedWorkInterruptCanBeRetriedWithoutClaimingTheTurnStopped() {
+        val harness = dynamicReadyHarness(FakeDynamicToolExecutor())
+        harness.startTurn("turn-composer-retry-stop", 6)
+        assertTrue(harness.controller.interrupt())
+        val firstRevision = harness.controller.snapshot().workInterrupt.revision
+        harness.fail(harness.runtime.takeRequest("turn/interrupt"), 7)
+        assertEquals(ClientWorkInterruptPhase.AVAILABLE, harness.controller.snapshot().workInterrupt.phase)
+        assertEquals(ClientSessionPhase.BUSY, harness.controller.snapshot().sessionPhase)
+        assertEquals(ClientProblemCode.INTERRUPT_REJECTED, harness.controller.snapshot().problem?.code)
+        assertTrue(harness.controller.interrupt())
+        assertTrue(harness.controller.snapshot().workInterrupt.revision > firstRevision)
+        harness.respond(harness.runtime.takeRequest("turn/interrupt"), JSONObject(), 8)
+        assertEquals(ClientWorkInterruptPhase.IDLE, harness.controller.snapshot().workInterrupt.phase)
+        assertNull(harness.controller.snapshot().problem)
+    }
+
+    @Test
     fun userStopBeforeInterruptAckCancelsQueuedMutationAndDeniesLateRequests() {
         val queue = ManualDynamicToolExecutor()
         val fixture = LifecycleNotificationTools(queue)
@@ -4871,6 +6329,86 @@ class CodexSessionControllerTest {
     }
 
     @Test
+    fun newDesktopThreadUsesPhoneToolsWithoutReplacingTheLocalConversation() {
+        val tools = FakeDynamicToolExecutor()
+        val harness = dynamicReadyHarness(tools)
+        enableRemotePhoneTools(harness)
+        val local = harness.controller.snapshot().session.currentThreadId
+        harness.event(foreignTurnEvent("turn/started", "desktop-new", "remote-turn"), 8)
+        assertEquals(local, harness.controller.snapshot().session.currentThreadId)
+        assertTrue(harness.controller.snapshot().remotePhoneToolsActive)
+        val results = mutableListOf<DynamicToolExecutionResult>()
+        harness.controller.executeRemotePhoneTool(remotePhoneCall("desktop-new", "remote-turn", "remote-call"),
+            DynamicToolCancellation.NONE, results::add)
+        assertEquals(1, tools.calls.size)
+        assertEquals("desktop-new", tools.calls.single().threadId)
+        tools.complete("remote-call")
+        assertTrue(results.single().success)
+        harness.event(foreignTurnEvent("turn/completed", "desktop-new", "remote-turn"), 9)
+        assertFalse(harness.controller.snapshot().remotePhoneToolsActive)
+        assertEquals(local, harness.controller.snapshot().session.currentThreadId)
+        assertEquals(0, harness.runtime.restartCalls)
+    }
+
+    @Test
+    fun desktopBridgeDeniesLocalUnobservedAndCompletedTurns() {
+        val tools = FakeDynamicToolExecutor()
+        val harness = dynamicReadyHarness(tools)
+        enableRemotePhoneTools(harness)
+        val results = mutableListOf<DynamicToolExecutionResult>()
+        for ((thread, turn) in listOf("thread-1" to "local-turn", "desktop-new" to "unobserved")) {
+            harness.controller.executeRemotePhoneTool(remotePhoneCall(thread, turn, "$thread-call"),
+                DynamicToolCancellation.NONE, results::add)
+        }
+        harness.event(foreignTurnEvent("turn/started", "desktop-new", "done"), 8)
+        harness.event(foreignTurnEvent("turn/completed", "desktop-new", "done"), 9)
+        harness.controller.executeRemotePhoneTool(remotePhoneCall("desktop-new", "done", "late-call"),
+            DynamicToolCancellation.NONE, results::add)
+        assertTrue(tools.calls.isEmpty())
+        assertEquals(3, results.size)
+        assertTrue(results.none { it.success })
+    }
+
+    @Test
+    fun remoteDisableInterruptsEveryNewDesktopTurnAndFencesLateCalls() {
+        val tools = FakeDynamicToolExecutor()
+        val harness = dynamicReadyHarness(tools)
+        enableRemotePhoneTools(harness)
+        harness.event(foreignTurnEvent("turn/started", "desktop-a", "turn-a"), 8)
+        harness.event(foreignTurnEvent("turn/started", "desktop-b", "turn-b"), 9)
+        assertTrue(harness.controller.remoteControlDisable())
+        val first = harness.runtime.takeRequest("turn/interrupt")
+        val second = harness.runtime.takeRequest("turn/interrupt")
+        assertEquals(setOf("desktop-a", "desktop-b"), listOf(first, second).map {
+            it.getJSONObject("params").getString("threadId")
+        }.toSet())
+        harness.respond(first, JSONObject(), 10)
+        harness.respond(second, JSONObject(), 11)
+        val results = mutableListOf<DynamicToolExecutionResult>()
+        harness.controller.executeRemotePhoneTool(remotePhoneCall("desktop-a", "turn-a", "late-call"),
+            DynamicToolCancellation.NONE, results::add)
+        assertFalse(results.single().success)
+        assertTrue(tools.calls.isEmpty())
+        assertFalse(harness.controller.snapshot().remotePhoneToolsActive)
+        assertEquals(0, harness.runtime.restartCalls)
+    }
+
+    private fun enableRemotePhoneTools(harness: Harness) {
+        assertTrue(harness.controller.remoteControlSettingsOpened())
+        harness.respond(harness.runtime.takeRequest("remoteControl/status/read"), remoteConnection("disabled"), 6)
+        assertTrue(harness.controller.remoteControlEnable())
+        harness.respond(harness.runtime.takeRequest("remoteControl/enable"), remoteConnection("connected"), 7)
+    }
+
+    private fun remotePhoneCall(thread: String, turn: String, call: String) =
+        DynamicToolCallParams(thread, turn, call, "android", "observe", "{}")
+
+    private fun foreignTurnEvent(method: String, thread: String, turn: String): String = JSONObject()
+        .put("method", method).put("params", JSONObject().put("threadId", thread)
+            .put("turn", JSONObject().put("id", turn).put("items", JSONArray())
+                .put("status", if (method == "turn/started") "inProgress" else "completed"))).toString()
+
+    @Test
     fun runtimeStopInvalidatesRemoteConsentWithoutPretendingDisableWasAcknowledged() {
         val harness = readyHarness()
         harness.controller.remoteControlSettingsOpened()
@@ -5060,8 +6598,12 @@ class CodexSessionControllerTest {
         assertFalse(harness.controller.snapshot().remoteControl.mayUsePhoneToolsRemotely)
     }
 
-    private fun readyHarness(catalog: JSONObject = modelList()): Harness {
-        val harness = Harness()
+    private fun readyHarness(
+        catalog: JSONObject = modelList(),
+        performanceObserver: PerformanceSessionObserver = PerformanceSessionObserver.NONE,
+        desktopRemoteAccessEnabled: Boolean = true,
+    ): Harness {
+        val harness = Harness(performanceObserver = performanceObserver, desktopRemoteAccessEnabled = desktopRemoteAccessEnabled)
         harness.startRuntime()
         val account = harness.runtime.takeRequest("account/read")
         val models = harness.runtime.takeRequest("model/list")
@@ -5072,8 +6614,8 @@ class CodexSessionControllerTest {
         return harness
     }
 
-    private fun dynamicReadyHarness(tools: DynamicToolExecutor): Harness {
-        val harness = Harness(dynamicToolExecutor = tools)
+    private fun dynamicReadyHarness(tools: DynamicToolExecutor, desktopRemoteAccessEnabled: Boolean = true): Harness {
+        val harness = Harness(dynamicToolExecutor = tools, desktopRemoteAccessEnabled = desktopRemoteAccessEnabled)
         harness.startRuntime()
         val account = harness.runtime.takeRequest("account/read")
         val models = harness.runtime.takeRequest("model/list")
@@ -5574,10 +7116,18 @@ class CodexSessionControllerTest {
         pluginInstallDeadlineNowMillis: () -> Long = { 0L },
         pluginInstallTimeoutMillis: Long = 5 * 60_000L,
         private val autoEnableMemory: Boolean = true,
+        private val autoMaterializeFreshThread: Boolean = true,
+        performanceObserver: PerformanceSessionObserver = PerformanceSessionObserver.NONE,
+        desktopRemoteAccessEnabled: Boolean = true,
     ) {
         val runtime = FakeRuntimeTransport()
         val setupDeadlines = FakeSetupDispatchDeadlineScheduler()
         val selectionDeadlines = FakeSetupDispatchDeadlineScheduler()
+        val interruptDeadlines = FakeSetupDispatchDeadlineScheduler()
+        val nativeNotificationDeadlines = FakeSetupDispatchDeadlineScheduler()
+        val realtimeDeadlines = FakeSetupDispatchDeadlineScheduler(expectedDelayMillis = 45_000L)
+        val realtimeAudioDeadlines = FakeSetupDispatchDeadlineScheduler(expectedDelayMillis = 10_000L)
+        val realtimeDrainDeadlines = FakeSetupDispatchDeadlineScheduler(expectedDelayMillis = 10_000L)
         val store = FakeSessionStore(threadId = storedThreadId)
         val settings = FakeSettingsStore()
         private var nextMessage = 1
@@ -5591,6 +7141,8 @@ class CodexSessionControllerTest {
             developerInstructions = DeveloperInstructionsProvider { instructions },
             dynamicToolExecutor = dynamicToolExecutor,
             protocolDiagnostics = diagnostics::add,
+            performanceObserver = performanceObserver,
+            desktopRemoteAccessEnabled = desktopRemoteAccessEnabled,
             bundledSetupPlugin = bundledSetupPlugin,
             pluginInstallTransactions = pluginInstallTransactions,
             pluginUninstallTransactions = pluginUninstallTransactions,
@@ -5603,6 +7155,13 @@ class CodexSessionControllerTest {
             setupDispatchTimeoutMillis = 1_000L,
             selectionUpdateDeadlineScheduler = selectionDeadlines,
             selectionUpdateTimeoutMillis = 1_000L,
+            workInterruptDeadlineScheduler = interruptDeadlines,
+            workInterruptTimeoutMillis = 1_000L,
+            notificationExternalDeadlineScheduler = nativeNotificationDeadlines,
+            notificationExternalTimeoutMillis = 1_000L,
+            realtimeDeadlineScheduler = realtimeDeadlines,
+            realtimeAudioDeadlineScheduler = realtimeAudioDeadlines,
+            realtimeDrainDeadlineScheduler = realtimeDrainDeadlines,
             remoteControlDeadlineScheduler = SetupDispatchDeadlineScheduler { _, _ ->
                 SetupDispatchDeadline { }
             },
@@ -5632,6 +7191,14 @@ class CodexSessionControllerTest {
                     generation,
                 )
             }
+            if (autoMaterializeFreshThread && request.optString("method") in
+                setOf("thread/start", "thread/memoryMode/set") && runtime.findRequest("thread/read") != null
+            ) {
+                val read = runtime.takeRequest("thread/read", generation)
+                runtime.respond(read,
+                    threadMaterializeResult(read.getJSONObject("params").getString("threadId")),
+                    sequence, generation)
+            }
         }
 
         fun fail(request: JSONObject, sequence: Long, generation: Long = 1) =
@@ -5652,7 +7219,7 @@ class CodexSessionControllerTest {
         }
     }
 
-    private class FakeSetupDispatchDeadlineScheduler : SetupDispatchDeadlineScheduler {
+    private class FakeSetupDispatchDeadlineScheduler(private val expectedDelayMillis: Long = 1_000L) : SetupDispatchDeadlineScheduler {
         private val tasks = ArrayDeque<ScheduledTask>()
 
         val pendingCount: Int
@@ -5662,7 +7229,7 @@ class CodexSessionControllerTest {
             delayMillis: Long,
             task: () -> Unit,
         ): SetupDispatchDeadline {
-            assertEquals(1_000L, delayMillis)
+            assertEquals(expectedDelayMillis, delayMillis)
             val scheduled = ScheduledTask(task)
             tasks.addLast(scheduled)
             return SetupDispatchDeadline { scheduled.active = false }
@@ -6002,6 +7569,11 @@ class CodexSessionControllerTest {
             return value
         }
 
+        override fun saveCodexLiveVoice(voice: String): HansSettings {
+            value = value.copy(codexLiveVoice = voice)
+            return value
+        }
+
         override fun saveLiveVoice(voice: String): HansSettings {
             value = value.copy(liveVoice = voice)
             return value
@@ -6213,6 +7785,11 @@ class CodexSessionControllerTest {
             .put("model", "gpt-5.6-luna")
             .put("reasoningEffort", JSONObject.NULL)
             .put("serviceTier", JSONObject.NULL)
+
+        private fun threadMaterializeResult(id: String): JSONObject = JSONObject().put("thread", JSONObject()
+            .put("id", id).put("ephemeral", false).put("historyMode", "paginated")
+            .put("path", "/private/sessions/fresh-rollout.jsonl")
+            .put("status", JSONObject().put("type", "idle")).put("turns", JSONArray()))
 
         private fun turnStartResult(threadId: String, turnId: String): JSONObject = JSONObject()
             .put(

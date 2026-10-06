@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="codex_live_remote_access_active">Pausiere den Desktop-Fernzugriff, bevor du einen Live-Anruf startest. Diese Codex-Version kann gleichzeitige Desktop- und Sprachaufträge nicht sicher unterscheiden. Die Kopplung bleibt gespeichert.</string>
+    <string name="codex_live_access">Live-Anrufe, Diktat und Vorlesen nutzen deine ChatGPT-Anmeldung. Verfügbarkeit und Limits hängen vom Konto ab. Kein API-Schlüssel nötig.</string>
+    <string name="codex_live_sign_in_required">Die Sprachfunktionen benötigen deine ChatGPT-Anmeldung. Verbinde Codex in Hans erneut. Kein API-Schlüssel nötig.</string>
+    <string name="codex_live_usage_limit">Das ChatGPT-Limit für Live Voice ist erreicht. Prüfe deine Kontolimits und versuche es später erneut. API-Guthaben setzt dieses Limit nicht zurück.</string>
+    <string name="codex_live_not_available">Codex Live Voice ist für dieses Konto oder diese Laufzeit derzeit nicht verfügbar. Es wurde kein API-Ersatz gestartet.</string>
+    <string name="codex_live_session_not_ready">Die Hans-Aufgabe ist noch nicht für Live bereit. Warte, bis Codex wieder verbunden ist, und starte den Anruf erneut.</string>
+    <string name="codex_live_interrupted">Der Codex-Live-Anruf konnte nicht verbunden werden oder wurde unterbrochen. Prüfe die Verbindung und versuche es erneut. Bestehende Aufgaben wurden nicht nochmals gesendet.</string>
+    <string name="codex_dictation_title">Diktat</string>
+    <string name="codex_dictation_access">Nimmt lokal auf und transkribiert nach Aufnahmeende mit deiner ChatGPT-Anmeldung. Der fertige Text wird einmal an deine aktuelle Hans-Aufgabe gesendet. Dieser Kompatibilitätsweg ist möglicherweise nicht für jedes Konto verfügbar. Kein API-Schlüssel und kein Live-Anruf.</string>
+    <string name="codex_batch_transcription_unavailable">ChatGPT-Diktat ist derzeit nicht verfügbar. Der Kompatibilitätsweg wird von deinem Konto möglicherweise nicht unterstützt.</string>
+    <string name="codex_batch_transcription_failed">Das Diktat konnte nicht transkribiert werden. Es wurde kein API-Schlüssel verwendet und nichts an Hans gesendet.</string>
+    <string name="codex_dictation_unconfirmed">Der diktierte Auftrag konnte nicht vollständig bestätigt werden. Hans kann bereits arbeiten; prüfe den Chat, bevor du ihn wiederholst. Er wird nicht automatisch erneut gesendet.</string>
+    <string name="codex_live_recovery_required">Die vorige Sprachsitzung ist noch nicht vollständig beendet. Warte kurz und versuche es erneut. Falls das so bleibt, melde diesen Fehler zur Diagnose. Laufende Codex-Aufgaben wurden nicht unterbrochen.</string>
+</resources>

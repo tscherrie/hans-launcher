@@ -19,6 +19,31 @@ import org.junit.Test
 
 class OpenAiRealtimeTranscriptionProtocolTest {
     @Test
+    fun quotaFailureBeforeFirstAudioChunkIsImmediatelyReportedWithCorrectRemediationCode() {
+        mapOf(
+            "credit_balance_exhausted" to "quota_exhausted",
+            "organization_spend_limit_exceeded" to "spending_limit_reached",
+            "project_spend_limit_exceeded" to "project_spending_limit_reached",
+        ).forEach { (apiCode, localCode) ->
+            val socket = FakeSocketFactory()
+            val failures = mutableListOf<String>()
+            val provider = provider(socket, observer = object : RealtimeTranscriptionObserver {
+                override fun onFailure(recordingId: RecordingId, code: String) { failures += code }
+            })
+            val session = provider.openSession(RecordingId(32), PCM_24K)
+            socket.open()
+            socket.server("""{"type":"error","error":{"code":"$apiCode","type":"insufficient_quota","message":"sk-secret"}}""")
+            assertEquals(listOf("realtime_stt_$localCode"), failures)
+            assertTrue(socket.cancelled == true)
+            var result: Result<Unit>? = null
+            session.submitChunk(chunk(32, 0, byteArrayOf(1, 2))) { result = it }
+            assertTrue(checkNotNull(result).isFailure)
+            assertFalse(failures.toString().contains("sk-secret"))
+            provider.close()
+        }
+    }
+
+    @Test
     fun bothDelayChoicesUseDocumentedWireValuesAndPreservePrompt() {
         for (delay in SttTranscriptionDelay.entries) {
             val transcription = JSONObject(

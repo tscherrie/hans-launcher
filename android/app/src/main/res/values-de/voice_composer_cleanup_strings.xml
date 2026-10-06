@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="voice_composer_start">Diktat starten</string>
+    <string name="voice_composer_starting">Aufnahme startet …</string>
+    <string name="voice_composer_transcript_pending">Dein Transkript folgt nach Aufnahmeende</string>
+    <string name="voice_composer_request">Diktat</string>
+    <string name="voice_composer_listening">Ich höre zu</string>
+    <string name="voice_composer_finishing">Wird transkribiert …</string>
+    <string name="voice_composer_microphone_starting">Mikrofon wird vorbereitet</string>
+    <string name="voice_composer_microphone_on">Mikrofon an</string>
+    <string name="voice_composer_microphone_off">Mikrofon aus</string>
+    <string name="voice_composer_output">Sprachausgabe</string>
+    <string name="voice_composer_empty_action_key">Schreib los oder drücke die Aktionstaste.</string>
+    <string name="voice_composer_empty_microphone">Schreib los oder tippe aufs Mikrofon.</string>
+</resources>

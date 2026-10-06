@@ -9,6 +9,7 @@ interface IRuntimeService {
     void runCodexReadinessGate(long requestId, ICodexRuntimeCallback callback);
 
     int getSessionProtocolVersion();
+    void configurePhoneToolsBridge(int port, String token);
     void startAppServerSession(long operationId, IAppServerSessionCallback callback);
     void restartAppServerSession(long operationId, long expectedGeneration);
     void sendAppServerFrameChunk(

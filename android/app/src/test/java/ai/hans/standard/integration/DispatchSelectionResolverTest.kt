@@ -9,6 +9,18 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 
 class DispatchSelectionResolverTest {
+    @Test
+    fun currentLunaAndSolAreUsableOnlyWhenActuallyAdvertised() {
+        for (id in listOf("gpt-6-luna", "gpt-6.1-sol", "gpt-6-sol")) {
+            val current = model(id, ReasoningEffort.HIGH, setOf(ReasoningEffort.HIGH, ReasoningEffort.MAX))
+            assertEquals(DispatchSelection(id, ReasoningEffort.MAX), resolveDispatchSelection(models + current, id, ReasoningEffort.MAX))
+            assertEquals(DispatchSelection("gpt-5.6-luna", ReasoningEffort.MEDIUM),
+                resolveDispatchSelection(models, id, ReasoningEffort.MEDIUM))
+            assertEquals(DispatchSelection("gpt-5.6-luna", ReasoningEffort.MEDIUM),
+                resolveDispatchSelection(models + current.copy(hidden = true), id, ReasoningEffort.MEDIUM))
+        }
+    }
+
     private val models = listOf(
         model(
             id = "gpt-5.6-luna",

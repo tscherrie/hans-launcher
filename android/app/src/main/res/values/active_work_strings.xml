@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <string name="active_work_channel_name">Hans Hintergrundaktivität</string>
-    <string name="active_work_channel_description">Zeigt aktive Aufgaben und Sprachausgabe von Hans an.</string>
-    <string name="active_work_notification_title">Hans ist aktiv</string>
-    <string name="active_work_codex">Eine Aufgabe wird im Hintergrund ausgeführt.</string>
-    <string name="active_work_speech">Sprachausgabe läuft.</string>
-    <string name="active_work_codex_and_speech">Aufgabe und Sprachausgabe laufen.</string>
+<resources xmlns:tools="http://schemas.android.com/tools" tools:locale="en">
+    <string name="active_work_channel_name">Hans background activity</string>
+    <string name="active_work_channel_description">Shows active Hans tasks and speech playback.</string>
+    <string name="active_work_notification_title">Hans is active</string>
+    <string name="active_work_codex">A task is running in the background.</string>
+    <string name="active_work_speech">Speech playback is active.</string>
+    <string name="active_work_codex_and_speech">A task and speech playback are active.</string>
 </resources>

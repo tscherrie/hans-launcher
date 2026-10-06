@@ -22,9 +22,7 @@ class OpenAiApiFailureClassifierTest {
 
         listOf(
             "credit_balance_exhausted",
-            "organization_usage_limit_exceeded",
-            "organization_spend_limit_exceeded",
-            "project_spend_limit_exceeded",
+            "insufficient_quota",
         ).forEach { code ->
             assertEquals(
                 OpenAiApiFailure(OpenAiApiFailureClassifier.QUOTA_EXHAUSTED, false),
@@ -38,6 +36,31 @@ class OpenAiApiFailureClassifierTest {
                 """{"error":{"code":null,"type":"insufficient_quota","message":"ignored"}}""",
             ),
         )
+    }
+
+    @Test
+    fun specificSpendingCodeOverridesGenericInsufficientQuotaTypeForHttpAndLive() {
+        mapOf(
+            "organization_usage_limit_exceeded" to OpenAiApiFailureClassifier.SPENDING_LIMIT_REACHED,
+            "organization_spend_limit_exceeded" to OpenAiApiFailureClassifier.SPENDING_LIMIT_REACHED,
+            "billing_hard_limit_reached" to OpenAiApiFailureClassifier.SPENDING_LIMIT_REACHED,
+            "project_spend_limit_exceeded" to OpenAiApiFailureClassifier.PROJECT_SPENDING_LIMIT_REACHED,
+        ).forEach { (code, expected) ->
+            val body = """{"error":{"code":"$code","type":"insufficient_quota","message":"sk-secret"}}"""
+            assertEquals(OpenAiApiFailure(expected, false), OpenAiApiFailureClassifier.classifyHttp(429, body))
+            assertEquals(OpenAiApiFailure(expected, false), OpenAiApiFailureClassifier.classifyServerError(code, "insufficient_quota"))
+        }
+    }
+
+    @Test
+    fun slowDownAndRateLimitTypeAreNotBillingFailuresAndMessagesAreNeverInterpreted() {
+        listOf("slow_down", "rate_limit_exceeded").forEach { code ->
+            assertEquals(OpenAiApiFailure("rate_limited", true), OpenAiApiFailureClassifier.classifyServerError(code, "rate_limit_error"))
+        }
+        assertEquals("rate_limited", OpenAiApiFailureClassifier.classifyServerError(null, "rate_limit_error").code)
+        assertEquals("rate_limited", OpenAiApiFailureClassifier.classifyHttp(429,
+            """{"error":{"message":"run out of credits sk-secret","code":null}}""").code)
+        assertEquals("authentication_failed", OpenAiApiFailureClassifier.classifyHttp(401).code)
     }
 
     @Test

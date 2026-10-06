@@ -1,0 +1,9 @@
+<resources xmlns:tools="http://schemas.android.com/tools" tools:locale="en">
+    <string name="speech_failure_api_credit">Voice unavailable: your OpenAI API credits or quota are exhausted. Check your API balance and add credit if needed. A ChatGPT subscription does not include API credit.</string>
+    <string name="speech_failure_spending_limit">Voice unavailable: your OpenAI API spending or usage limit has been reached. Check your API limits.</string>
+    <string name="speech_failure_open_billing">Open API billing</string>
+    <string name="speech_failure_project_limit">Voice unavailable: your OpenAI API project spending limit has been reached. Check the limits for the project that owns your API key.</string>
+    <string name="speech_failure_open_project">Open API project settings</string>
+    <string name="speech_failure_open_limits">Open API limits</string>
+    <string name="speech_failure_dismiss">Dismiss</string>
+</resources>

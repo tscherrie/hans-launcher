@@ -38,6 +38,9 @@ add_library(
 )
 
 target_compile_features(hans_python_jni PRIVATE cxx_std_17)
+# The release keeps JNI debug symbols. Do not let checkout/SDK locations enter
+# DWARF, __FILE__, or the derived build ID: two clean release roots must agree.
+get_filename_component(HANS_SOURCE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../.." ABSOLUTE)
 target_compile_options(
     hans_python_jni
     PRIVATE
@@ -47,6 +50,8 @@ target_compile_options(
     -fvisibility=hidden
     -fvisibility-inlines-hidden
     -fstack-protector-strong
+    "-ffile-prefix-map=${HANS_SOURCE_ROOT}=/hans-src"
+    "-ffile-prefix-map=${CMAKE_ANDROID_NDK}=/android-ndk"
 )
 target_compile_definitions(hans_python_jni PRIVATE PY_SSIZE_T_CLEAN=1)
 target_include_directories(

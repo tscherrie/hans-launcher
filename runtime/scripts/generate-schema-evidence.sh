@@ -1,6 +1,11 @@
 #!/bin/sh
 set -eu
 
+case "${HANS_RUNTIME_OFFLINE-0}" in
+  0|1) ;;
+  *) echo "HANS_RUNTIME_OFFLINE must be 0 (online) or 1 (offline)" >&2; exit 2 ;;
+esac
+
 sha256_file() {
   if command -v sha256sum >/dev/null 2>&1; then
     sha256sum "$1" | awk '{print $1}'
@@ -30,12 +35,13 @@ script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 runtime_dir=$(CDPATH='' cd -- "$script_dir/.." && pwd)
 lock_file="$runtime_dir/runtime.lock.json"
 output_dir=${1:-"$runtime_dir/build/schema"}
-download_dir=${HANS_RUNTIME_DOWNLOAD_DIR:-"$runtime_dir/build/downloads"}
 
 command -v jq >/dev/null 2>&1 || {
   echo "jq is required" >&2
   exit 2
 }
+runtime_version=$(jq -er '.runtime.version' "$lock_file")
+download_dir=${HANS_RUNTIME_DOWNLOAD_DIR:-"$runtime_dir/build/downloads/$runtime_version"}
 
 asset_url=$(jq -er '.schemaGenerator.releaseUrl' "$lock_file")
 asset_name=$(jq -er '.schemaGenerator.releaseAsset' "$lock_file")
@@ -53,7 +59,13 @@ temporary_dir=$(mktemp -d "${TMPDIR:-/tmp}/hans-codex-schema.XXXXXX")
 trap 'rm -rf -- "$temporary_dir"' 0 HUP INT TERM
 
 if [ ! -f "$archive" ]; then
-  curl --fail --location --retry 3 --output "$archive" "$asset_url"
+  if [ "${HANS_RUNTIME_OFFLINE-0}" = 1 ]; then
+    echo "Offline schema generation: missing pinned archive $archive" >&2
+    exit 1
+  fi
+  curl --fail --location --retry 3 --output "$temporary_dir/$asset_name" "$asset_url"
+  assert_digest_and_size "$temporary_dir/$asset_name" "$archive_sha" "$archive_bytes"
+  mv "$temporary_dir/$asset_name" "$archive"
 fi
 
 assert_digest_and_size "$archive" "$archive_sha" "$archive_bytes"

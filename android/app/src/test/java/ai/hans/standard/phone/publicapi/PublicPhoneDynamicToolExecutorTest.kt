@@ -1,5 +1,7 @@
 package ai.hans.standard.phone.publicapi
 
+import ai.hans.standard.localization.TestResourceTextResolver
+
 import ai.hans.standard.codex.DynamicToolCallParams
 import ai.hans.standard.codex.DynamicToolCancellation
 import ai.hans.standard.codex.DynamicToolCancellationDisposition
@@ -301,7 +303,7 @@ class PublicPhoneDynamicToolExecutorTest {
         val rejecting = PublicPhoneDynamicToolExecutor(
             platform,
             Executor { throw IllegalStateException("private failure") },
-        )
+        text = TestResourceTextResolver(java.util.Locale.GERMAN))
         var callbacks = 0
         lateinit var rejected: DynamicToolExecutionResult
         rejecting.execute(call("capabilities", "bad-3")) {
@@ -329,7 +331,7 @@ class PublicPhoneDynamicToolExecutorTest {
                 confirmations += 1
                 grant(request)
             },
-        )
+        text = TestResourceTextResolver(java.util.Locale.GERMAN))
 
         val handle = executor.executeCancellable(
             call("open_camera", "queued-cancel", "{\"mode\":\"photo\"}"),
@@ -425,7 +427,7 @@ class PublicPhoneDynamicToolExecutorTest {
         platform,
         Executor(Runnable::run),
         confirmations,
-    )
+    text = TestResourceTextResolver(java.util.Locale.GERMAN))
 
     private fun DynamicToolExecutor.run(
         call: DynamicToolCallParams,

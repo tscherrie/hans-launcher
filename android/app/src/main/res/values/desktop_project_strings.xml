@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools" tools:locale="en">
+    <string name="setup_desktop_project_instructions">After pairing, start a task in Codex or ChatGPT Work on your desktop, select this phone and use %1$s as the project folder. Copy the path under Remote access from ChatGPT Desktop.</string>
+    <string name="setup_desktop_project_permissions">The project folder adds no permissions. Hans uses the phone access and action mode already allowed on this phone.</string>
+</resources>

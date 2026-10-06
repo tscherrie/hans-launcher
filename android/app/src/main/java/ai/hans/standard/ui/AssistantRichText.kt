@@ -1,5 +1,11 @@
 package ai.hans.standard.ui
 
+import ai.hans.standard.R
+import ai.hans.standard.localization.HansTextResolver
+import ai.hans.standard.localization.AndroidHansTextResolver
+import ai.hans.standard.localization.rememberHansTextResolver
+import androidx.compose.ui.res.stringResource
+
 import android.content.ActivityNotFoundException
 import android.widget.Toast
 import ai.hans.standard.text.AssistantMarkdown
@@ -50,6 +56,7 @@ fun AssistantRichText(
     style: TextStyle = MaterialTheme.typography.bodyLarge,
     onOpenLink: ((String) -> Unit)? = null,
 ) {
+    val uiText = rememberHansTextResolver()
     val document = remember(raw, complete) { AssistantMarkdown.parse(raw, complete) }
     val currentOpenLink by rememberUpdatedState(onOpenLink)
     val uriHandler = LocalUriHandler.current
@@ -65,13 +72,13 @@ fun AssistantRichText(
                         ai.hans.standard.files.AndroidFileLinks(context).openLink(safe)
                     } else uriHandler.openUri(safe)
                 } catch (_: ActivityNotFoundException) {
-                    Toast.makeText(context, "Keine App zum Öffnen dieses Links gefunden.", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, uiText.text(R.string.ui_no_app_was_found_to_open_this_link_c1191d), Toast.LENGTH_SHORT).show()
                 } catch (_: IllegalArgumentException) {
-                    Toast.makeText(context, "Dieser Link konnte nicht geöffnet werden.", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, uiText.text(R.string.ui_this_link_could_not_be_opened_a31d47), Toast.LENGTH_SHORT).show()
                 } catch (_: SecurityException) {
-                    Toast.makeText(context, "Android hat das Öffnen dieses Links nicht erlaubt.", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, uiText.text(R.string.ui_android_did_not_allow_this_link_to_be_opened_3eba7f), Toast.LENGTH_SHORT).show()
                 } catch (_: Exception) {
-                    Toast.makeText(context, "Datei nicht verfügbar. Prüfe den Dateizugriff in den Einstellungen.", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, uiText.text(R.string.ui_file_unavailable_check_file_access_in_settings_48cabd), Toast.LENGTH_SHORT).show()
                 }
             }
         }

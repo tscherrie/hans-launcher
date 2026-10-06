@@ -1,6 +1,6 @@
 {
   "name": "hans-setup",
-  "version": "0.2.7+codex.20260828031843",
+  "version": "0.2.8+codex.20260914000000",
   "description": "Conversational setup and repair guidance for the root-free Hans Android launcher.",
   "author": {
     "name": "Hans"

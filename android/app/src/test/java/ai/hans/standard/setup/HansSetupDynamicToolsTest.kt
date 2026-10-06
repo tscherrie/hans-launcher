@@ -1,5 +1,7 @@
 package ai.hans.standard.setup
 
+import ai.hans.standard.localization.TestResourceTextResolver
+
 import ai.hans.standard.codex.DynamicToolCallParams
 import ai.hans.standard.codex.DynamicToolExecutionResult
 import ai.hans.standard.phone.capabilities.AccessibilityGrantState
@@ -22,6 +24,51 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class HansSetupDynamicToolsTest {
+    @Test
+    fun unfinishedLegacyHoldChoiceCapturesPressWithoutRewritingStoredChoice() {
+        listOf(true, false).forEach { compatible ->
+            val router = SetupUiCommandRouter()
+            var requested: SetupUiCommand.BeginKeyCapture? = null
+            val registration = router.attach(SetupUiCommandHandler { command, _, completion ->
+                requested = command as SetupUiCommand.BeginKeyCapture
+                completion(SetupUiCommandResult.Accepted())
+            })
+            try {
+                val fixture = fixture(attachUi = false, uiRouter = router,
+                    initial = documentAt(HansSetupStep.HARDWARE_MAPPING).copy(
+                        inputChoice = HansSetupInputChoice.HARDWARE_HOLD))
+                fixture.probe.holdCompatible = compatible
+                call(fixture.executor, "get_setup_state", "{}")
+                assertEquals(HansSetupStep.HARDWARE_MAPPING, fixture.repository.read().currentStep)
+                val result = call(fixture.executor, "begin_key_capture", "{}")
+                assertTrue(result.success)
+                assertEquals(HansSetupInputChoice.HARDWARE_TOGGLE, checkNotNull(requested).inputChoice)
+                assertEquals(HansSetupInputChoice.HARDWARE_HOLD, fixture.repository.read().inputChoice)
+            } finally { registration.close() }
+        }
+    }
+
+    @Test
+    fun hiddenDesktopAccessNeverAppearsInSetupProjectionOrChangesSavedProject() {
+        val fixture = fixture(initial = documentAtReview())
+        preserveVerifiedFreshState(fixture)
+        fixture.executor.refreshFreshEvidence()
+        val project = HansSetupDesktopProject("/synthetic/hans/files/codex-workspace",
+            "Legacy desktop instructions", "The folder grants no Android permissions.")
+        fixture.probe.project = project
+        val before = fixture.repository.read()
+        val json = JSONObject(call(fixture.executor, "get_setup_state", "{}").contentText)
+        assertFalse(json.has("desktopProject"))
+        assertTrue(json.has("voiceUsageInstructions"))
+        assertEquals(project, fixture.probe.project)
+        assertEquals(before, fixture.repository.read())
+        val speech = json.getJSONObject("technicalSummary").getJSONObject("speech")
+        assertEquals("chatgpt_login", speech.getString("access"))
+        assertEquals("optional_user_initiated_not_verified", speech.getString("practice"))
+        assertFalse(speech.has("credentialProof"))
+        assertFalse(speech.has("voiceDictationProof"))
+    }
+
     @Test
     fun policyWireValuesAreExplicitAndDefaultSetupProjectionDoesNotClaimFullAccess() {
         assertEquals("confirm_actions", HansPhoneActionPolicy.CONFIRM_ACTIONS.wireValue)
@@ -109,8 +156,8 @@ class HansSetupDynamicToolsTest {
 
     @Test
     fun accessibilitySetupCopyDescribesBothPoliciesWithoutClaimingAndroidOrRootAccess() {
-        val full = setupAccessibilityDescription(HansPhoneActionPolicy.USER_AUTHORIZED_FULL_ACCESS)
-        val confirm = setupAccessibilityDescription(HansPhoneActionPolicy.CONFIRM_ACTIONS)
+        val full = setupAccessibilityDescription(HansPhoneActionPolicy.USER_AUTHORIZED_FULL_ACCESS, text = TestResourceTextResolver(java.util.Locale.GERMAN))
+        val confirm = setupAccessibilityDescription(HansPhoneActionPolicy.CONFIRM_ACTIONS, text = TestResourceTextResolver(java.util.Locale.GERMAN))
         assertTrue(full.contains("ohne zusätzliche Hans-Rückfragen"))
         assertFalse(full.contains("bestätigungspflichtig"))
         assertTrue(confirm.contains("Zusätzliche Hans-Bestätigungen können erforderlich sein"))
@@ -167,7 +214,7 @@ class HansSetupDynamicToolsTest {
         fixture.repository.recordSimpleChoice(HansSetupStep.INTRO, "begin")
         val inputChoice = JSONObject(call(fixture.executor, "get_setup_state", "{}").contentText)
         assertEquals(
-            listOf("hardware_toggle", "hardware_hold", "no_hardware_key", "defer"),
+            listOf("hardware_toggle", "no_hardware_key", "defer"),
             (0 until inputChoice.getJSONArray("allowedChoices").length()).map {
                 inputChoice.getJSONArray("allowedChoices").getString(it)
             },
@@ -269,25 +316,16 @@ class HansSetupDynamicToolsTest {
     }
 
     @Test
-    fun absentActivityReturnsUserInteractionRequiredAndDoesNotClaimCameraChoice() {
+    fun retiredCameraChoiceIsRejectedBeforeAnyActivityIsNeeded() {
         val fixture = fixture(attachUi = false)
         reachCameraChoice(fixture.repository)
-
-        val result = call(
-            fixture.executor,
-            "record_choice",
-            """{"step":"camera_hold_choice","choice":"enabled"}""",
-        )
-
+        val before = fixture.repository.read()
+        val result = call(fixture.executor, "record_choice",
+            """{"step":"camera_hold_choice","choice":"enabled"}""")
         assertFalse(result.success)
-        assertEquals(
-            "user_interaction_required",
-            JSONObject(result.contentText).getString("errorCode"),
-        )
-        val state = fixture.repository.read()
-        assertEquals(HansSetupStep.CAMERA_HOLD_CHOICE, state.currentStep)
-        assertEquals(HansSetupStepStatus.AWAITING_USER, state.record(state.currentStep).status)
-        assertEquals(null, state.cameraHoldEnabled)
+        assertEquals("setup_step_retired", JSONObject(result.contentText).getString("errorCode"))
+        assertEquals(before, fixture.repository.read())
+        assertEquals(HansSetupStep.APP_NOTIFICATIONS_CONSENT, before.currentStep)
     }
 
     @Test
@@ -296,35 +334,22 @@ class HansSetupDynamicToolsTest {
         val router = SetupUiCommandRouter(deadlines, requestTimeoutMillis = 1_234)
         router.attach(SetupUiCommandHandler { _, _, _ -> Unit })
         val fixture = fixture(attachUi = false, uiRouter = router)
-        reachCameraChoice(fixture.repository)
+        reachNotificationAccess(fixture.repository)
         var completed: DynamicToolExecutionResult? = null
-
-        fixture.executor.execute(
-            DynamicToolCallParams(
-                threadId = "thread_setup",
-                turnId = "turn_lost_activity_callback",
-                callId = "call_lost_activity_callback",
-                namespace = HansSetupDynamicToolCatalog.NAMESPACE,
-                tool = "record_choice",
-                argumentsJson =
-                    """{"step":"camera_hold_choice","choice":"enabled"}""",
-            ),
+        fixture.executor.execute(DynamicToolCallParams(
+            threadId = "thread_setup", turnId = "turn_lost_activity_callback",
+            callId = "call_lost_activity_callback", namespace = HansSetupDynamicToolCatalog.NAMESPACE,
+            tool = "request_step_ui", argumentsJson = """{"step":"notification_access"}"""),
         ) { completed = it }
-
         assertNull(completed)
         assertEquals(listOf(1_234L), deadlines.pendingDelays())
         deadlines.runNext()
-
         val result = checkNotNull(completed)
         assertFalse(result.success)
-        assertEquals(
-            "setup_ui_request_timeout",
-            JSONObject(result.contentText).getString("errorCode"),
-        )
-        val state = fixture.repository.read()
-        assertEquals(HansSetupStep.CAMERA_HOLD_CHOICE, state.currentStep)
-        assertEquals(HansSetupStepStatus.AWAITING_USER, state.record(state.currentStep).status)
-        assertEquals(null, state.cameraHoldEnabled)
+        assertEquals("setup_ui_request_timeout", JSONObject(result.contentText).getString("errorCode"))
+        assertEquals(HansSetupStep.NOTIFICATION_ACCESS, fixture.repository.read().currentStep)
+        assertEquals(HansSetupStepStatus.AWAITING_USER,
+            fixture.repository.read().record(HansSetupStep.NOTIFICATION_ACCESS).status)
     }
 
     @Test
@@ -385,10 +410,11 @@ class HansSetupDynamicToolsTest {
     }
 
     @Test
-    fun getStateDoesNotReopenExplicitNoHardwareOrDisabledCameraChoices() {
+    fun getStateDoesNotReopenNoHardwareChoiceOrChangeStoredNullableCameraChoice() {
         val fixture = fixture()
         reachNotificationAccess(fixture.repository)
         preserveVerifiedFreshState(fixture)
+        val cameraChoiceBefore = fixture.repository.read().cameraHoldEnabled
 
         val result = call(fixture.executor, "get_setup_state", "{}")
 
@@ -398,7 +424,7 @@ class HansSetupDynamicToolsTest {
             HansSetupStepStatus.SKIPPED,
             fixture.repository.read().record(HansSetupStep.HARDWARE_MAPPING).status,
         )
-        assertEquals(false, fixture.repository.read().cameraHoldEnabled)
+        assertEquals(cameraChoiceBefore, fixture.repository.read().cameraHoldEnabled)
     }
 
     @Test
@@ -427,40 +453,29 @@ class HansSetupDynamicToolsTest {
     }
 
     @Test
-    fun incompatibleExistingHoldMappingIsNotAdopted() {
+    fun legacyHoldMappingUsesEffectivePressControlEvenOnHoldIncompatibleDevice() {
         val fixture = fixture(initial = documentAt(HansSetupStep.INPUT_CHOICE))
         fixture.probe.configuredChoice = HansSetupInputChoice.HARDWARE_HOLD
         fixture.probe.holdCompatible = false
-
         call(fixture.executor, "get_setup_state", "{}")
-
         val state = fixture.repository.read()
-        assertNull(state.inputChoice)
-        assertEquals(HansSetupStep.INPUT_CHOICE, state.currentStep)
-        assertEquals(
-            HansSetupStepStatus.AWAITING_USER,
-            state.record(HansSetupStep.HARDWARE_MAPPING).status,
-        )
+        assertEquals(HansSetupInputChoice.HARDWARE_TOGGLE, state.inputChoice)
+        assertEquals(HansSetupStepStatus.VERIFIED, state.record(HansSetupStep.HARDWARE_MAPPING).status)
+        assertEquals(HansSetupStep.MICROPHONE_CONSENT, state.currentStep)
+        assertEquals(HansSetupInputChoice.HARDWARE_HOLD, fixture.probe.configuredChoice)
     }
 
     @Test
-    fun compatibleExistingHoldMappingIsAdoptedButStillNeedsLiveProof() {
+    fun existingMappingNeverRequiresAForcedVoiceRecordingOrGestureChoice() {
         val fixture = fixture(initial = documentAt(HansSetupStep.INPUT_CHOICE))
         fixture.probe.configuredChoice = HansSetupInputChoice.HARDWARE_HOLD
-        fixture.probe.holdCompatible = true
-
         call(fixture.executor, "get_setup_state", "{}")
-
         val state = fixture.repository.read()
-        assertEquals(HansSetupInputChoice.HARDWARE_HOLD, state.inputChoice)
-        assertEquals(
-            HansSetupStepStatus.VERIFIED,
-            state.record(HansSetupStep.HARDWARE_MAPPING).status,
-        )
-        assertEquals(
-            HansSetupStepStatus.AWAITING_USER,
-            state.record(HansSetupStep.HARDWARE_LIVE_TEST).status,
-        )
+        assertEquals(HansSetupInputChoice.HARDWARE_TOGGLE, state.inputChoice)
+        assertEquals(HansSetupStepStatus.VERIFIED, state.record(HansSetupStep.HARDWARE_MAPPING).status)
+        val result = call(fixture.executor, "begin_live_test", """{"step":"hardware_live_test"}""")
+        assertFalse(result.success)
+        assertEquals("setup_step_retired", JSONObject(result.contentText).getString("errorCode"))
     }
 
     @Test
@@ -537,28 +552,13 @@ class HansSetupDynamicToolsTest {
     }
 
     @Test
-    fun onlyEnabledExistingCameraHoldIsAdopted() {
-        val disabled = fixture()
-        disabled.probe.cameraHoldEnabled = false
-        call(disabled.executor, "get_setup_state", "{}")
-        assertNull(disabled.repository.read().cameraHoldEnabled)
-        assertEquals(
-            HansSetupStepStatus.AWAITING_USER,
-            disabled.repository.read().record(HansSetupStep.CAMERA_HOLD_CHOICE).status,
-        )
-
-        val enabled = fixture()
-        enabled.probe.cameraHoldEnabled = true
-        call(enabled.executor, "get_setup_state", "{}")
-        assertEquals(true, enabled.repository.read().cameraHoldEnabled)
-        assertEquals(
-            HansSetupStepStatus.VERIFIED,
-            enabled.repository.read().record(HansSetupStep.CAMERA_HOLD_CHOICE).status,
-        )
-        assertEquals(
-            HansSetupStepStatus.AWAITING_USER,
-            enabled.repository.read().record(HansSetupStep.CAMERA_HOLD_LIVE_TEST).status,
-        )
+    fun cameraHoldIsNeitherAdoptedNorOverwrittenBySetupRepair() {
+        val fixture = fixture(initial = HansSetupDocument(cameraHoldEnabled = true))
+        fixture.probe.cameraHoldEnabled = false
+        call(fixture.executor, "get_setup_state", "{}")
+        assertEquals(true, fixture.repository.read().cameraHoldEnabled)
+        assertFalse(fixture.repository.read().steps.containsKey(HansSetupStep.CAMERA_HOLD_CHOICE))
+        assertFalse(fixture.repository.read().steps.containsKey(HansSetupStep.CAMERA_HOLD_LIVE_TEST))
     }
 
     @Test
@@ -585,10 +585,7 @@ class HansSetupDynamicToolsTest {
             HansSetupStepStatus.VERIFIED,
             state.record(HansSetupStep.MICROPHONE_ACCESS).status,
         )
-        assertEquals(
-            HansSetupStepStatus.SKIPPED,
-            state.record(HansSetupStep.HARDWARE_LIVE_TEST).status,
-        )
+        assertFalse(state.steps.containsKey(HansSetupStep.HARDWARE_LIVE_TEST))
         assertEquals(
             HansSetupStepStatus.SKIPPED,
             state.record(HansSetupStep.ACCESSIBILITY_ACCESS).status,
@@ -611,7 +608,6 @@ class HansSetupDynamicToolsTest {
         listOf(
             HansSetupStep.ACCESSIBILITY_ACCESS,
             HansSetupStep.ACCESSIBILITY_LIVE_TEST,
-            HansSetupStep.HARDWARE_LIVE_TEST,
             HansSetupStep.REVIEW,
         ).forEach { step ->
             assertEquals(step.name, HansSetupStepStatus.VERIFIED, state.record(step).status)
@@ -648,7 +644,6 @@ class HansSetupDynamicToolsTest {
         listOf(
             HansSetupStep.ACCESSIBILITY_ACCESS,
             HansSetupStep.ACCESSIBILITY_LIVE_TEST,
-            HansSetupStep.HARDWARE_LIVE_TEST,
         ).forEach { step ->
             assertEquals(step.name, HansSetupStepStatus.AWAITING_USER, revoked.record(step).status)
         }
@@ -669,8 +664,7 @@ class HansSetupDynamicToolsTest {
         val fixture = completedFixture(
             skipped = setOf(
                 HansSetupStep.ACCESSIBILITY_LIVE_TEST,
-                HansSetupStep.HARDWARE_LIVE_TEST,
-                HansSetupStep.PERSONAL_PROFILE,
+                    HansSetupStep.PERSONAL_PROFILE,
             ),
         )
         // A durable grant is independent of the service's temporary bound/session state.
@@ -686,7 +680,6 @@ class HansSetupDynamicToolsTest {
         )
         listOf(
             HansSetupStep.ACCESSIBILITY_LIVE_TEST,
-            HansSetupStep.HARDWARE_LIVE_TEST,
             HansSetupStep.PERSONAL_PROFILE,
         ).forEach { step ->
             assertEquals(step.name, HansSetupStepStatus.SKIPPED, state.record(step).status)
@@ -694,29 +687,13 @@ class HansSetupDynamicToolsTest {
     }
 
     @Test
-    fun temporaryKeystoreFailurePreservesSetupButMissingCredentialStillReopensVoiceTest() {
+    fun apiCredentialAvailabilityIsNotProbedAndNeverReopensCompletedSetup() {
         val fixture = completedFixture()
-        fixture.probe.results[HansSetupStep.SPEECH_CREDENTIAL_ACCESS] = HansSetupProbeResult(
-            false,
-            "speech_credential_temporarily_unavailable",
-            transient = true,
-        )
-
-        assertTrue(fixture.executor.refreshFreshEvidence().complete)
-        assertEquals(
-            HansSetupStepStatus.VERIFIED,
-            fixture.repository.read().record(HansSetupStep.VOICE_DICTATION_TEST).status,
-        )
-
         fixture.probe.results[HansSetupStep.SPEECH_CREDENTIAL_ACCESS] =
             HansSetupProbeResult(false, "speech_credential_missing")
-        val revoked = fixture.executor.refreshFreshEvidence()
-        assertFalse(revoked.complete)
-        assertEquals(HansSetupStep.SPEECH_CREDENTIAL_ACCESS, revoked.currentStep)
-        assertEquals(
-            HansSetupStepStatus.AWAITING_USER,
-            revoked.record(HansSetupStep.VOICE_DICTATION_TEST).status,
-        )
+        assertTrue(fixture.executor.refreshFreshEvidence().complete)
+        assertFalse(fixture.probe.probedSteps.contains(HansSetupStep.SPEECH_CREDENTIAL_ACCESS))
+        assertFalse(fixture.probe.probedSteps.contains(HansSetupStep.CAMERA_HOLD_CHOICE))
     }
 
     @Test
@@ -797,8 +774,6 @@ class HansSetupDynamicToolsTest {
         )
         listOf(
             HansSetupStep.MICROPHONE_ACCESS,
-            HansSetupStep.HARDWARE_LIVE_TEST,
-            HansSetupStep.VOICE_DICTATION_TEST,
         ).forEach { step ->
             assertEquals(step.name, HansSetupStepStatus.AWAITING_USER, state.record(step).status)
         }
@@ -822,7 +797,6 @@ class HansSetupDynamicToolsTest {
         listOf(
             HansSetupStep.ACCESSIBILITY_ACCESS,
             HansSetupStep.ACCESSIBILITY_LIVE_TEST,
-            HansSetupStep.HARDWARE_LIVE_TEST,
         ).forEach { step ->
             assertEquals(step.name, HansSetupStepStatus.AWAITING_USER, revoked.record(step).status)
         }
@@ -941,31 +915,15 @@ class HansSetupDynamicToolsTest {
     }
 
     @Test
-    fun lifecycleRefreshReopensPersistedHoldMappingWhenStockMp01BecomesIncompatible() {
-        val fixture = fixture(
-            initial = documentAt(HansSetupStep.HARDWARE_LIVE_TEST).copy(
-                inputChoice = HansSetupInputChoice.HARDWARE_HOLD,
-            ),
-        )
-        val live = fixture.repository.beginLiveTest(HansSetupStep.HARDWARE_LIVE_TEST)
-        fixture.repository.acceptAccessibilityHardwareCommand(live, ActionKeyCommand.StartDictation)
-        fixture.repository.acceptDictationEvidence(live, HansSetupDictationEvidence.LISTENING)
-        fixture.repository.acceptAccessibilityHardwareCommand(live, ActionKeyCommand.StopDictation)
-        fixture.repository.acceptDictationEvidence(live, HansSetupDictationEvidence.SENT)
-        fixture.probe.results[HansSetupStep.HARDWARE_MAPPING] =
-            HansSetupProbeResult(true, "hardware_mapping_present")
+    fun lifecycleRefreshUsesLegacyMappingAsPressWithoutReopeningRemovedHoldTest() {
+        val fixture = fixture(initial = documentAt(HansSetupStep.HOME_ROLE_CONSENT).copy(
+            inputChoice = HansSetupInputChoice.HARDWARE_HOLD))
+        preserveVerifiedFreshState(fixture)
         fixture.probe.holdCompatible = false
-
         fixture.executor.refreshFreshEvidence()
-        assertEquals(HansSetupStep.HARDWARE_MAPPING, fixture.repository.read().currentStep)
-        assertEquals(
-            HansSetupStepStatus.BLOCKED,
-            fixture.repository.read().record(HansSetupStep.HARDWARE_MAPPING).status,
-        )
-        assertEquals(
-            "stock_mp01_hold_blocked",
-            fixture.repository.read().record(HansSetupStep.HARDWARE_MAPPING).detailCode,
-        )
+        assertEquals(HansSetupStep.HOME_ROLE_CONSENT, fixture.repository.read().currentStep)
+        assertEquals(HansSetupInputChoice.HARDWARE_TOGGLE, fixture.repository.read().inputChoice)
+        assertEquals(HansSetupStepStatus.VERIFIED, fixture.repository.read().record(HansSetupStep.HARDWARE_MAPPING).status)
     }
 
     @Test
@@ -1256,24 +1214,21 @@ class HansSetupDynamicToolsTest {
     }
 
     @Test
-    fun speechCredentialUiNeedsConsentAndFreshEffectiveReceipt() {
-        val fixture = fixture(
-            initial = documentAt(HansSetupStep.SPEECH_CREDENTIAL_ACCESS),
-            liveVerificationAccepted = true,
-        )
-
-        val result = call(
-            fixture.executor,
-            "request_step_ui",
-            """{"step":"speech_credential_access"}""",
-        )
-
-        assertTrue(result.success)
-        assertEquals(HansSetupStep.VOICE_DICTATION_TEST, fixture.repository.read().currentStep)
-        assertEquals(
-            HansSetupStepStatus.VERIFIED,
-            fixture.repository.read().record(HansSetupStep.SPEECH_CREDENTIAL_ACCESS).status,
-        )
+    fun everyRetiredStepIsAbsentFromSchemaAndRejectedWithoutLaunchingAnything() {
+        val fixture = fixture(initial = documentAt(HansSetupStep.MODEL_REASONING), attachUi = false)
+        val before = fixture.repository.read()
+        HANS_SETUP_RETIRED_STEPS.forEach { step ->
+            listOf("request_step_ui", "begin_live_test", "read_live_test", "verify_step").forEach { tool ->
+                val result = call(fixture.executor, tool, JSONObject().put("step", wireStep(step)).toString())
+                assertFalse(result.success)
+                assertEquals("setup_step_retired", JSONObject(result.contentText).getString("errorCode"))
+                assertEquals(before, fixture.repository.read())
+            }
+        }
+        val schema = HansSetupDynamicToolCatalog.namespace.tools
+            .single { it.name == "record_choice" }.inputSchemaJson
+        HANS_SETUP_RETIRED_STEPS.forEach { assertFalse(schema.contains(wireStep(it))) }
+        assertFalse(schema.contains("hardware_hold"))
     }
 
     @Test
@@ -1292,8 +1247,8 @@ class HansSetupDynamicToolsTest {
             summary.getJSONArray("optionalCapabilities").length(),
         )
         assertEquals(
-            "verified",
-            summary.getJSONObject("speech").getString("credentialProof"),
+            "chatgpt_login",
+            summary.getJSONObject("speech").getString("access"),
         )
         assertFalse(encoded.contains("detailCode"))
         assertFalse(encoded.contains("operationNonce"))
@@ -1434,8 +1389,6 @@ class HansSetupDynamicToolsTest {
 
     private fun reachNotificationAccess(repository: HansSetupRepository) {
         reachCameraChoice(repository)
-        val camera = repository.beginOperation(HansSetupStep.CAMERA_HOLD_CHOICE)
-        repository.applyCameraChoice(camera, false)
         repository.recordSimpleChoice(HansSetupStep.APP_NOTIFICATIONS_CONSENT, "enable")
         val appNotifications = repository.beginOperation(HansSetupStep.APP_NOTIFICATIONS_ACCESS)
         repository.applyFreshProbe(
@@ -1539,6 +1492,10 @@ class HansSetupDynamicToolsTest {
     )
 
     private class FakeProbe : HansSetupFreshProbe {
+        var project: HansSetupDesktopProject? = null
+        override fun desktopProject(): HansSetupDesktopProject? = project
+
+        val probedSteps = mutableListOf<HansSetupStep>()
         val results = mutableMapOf<HansSetupStep, HansSetupProbeResult>()
         val optionalResults =
             mutableMapOf<HansSetupOptionalCapability, HansSetupProbeResult>()
@@ -1546,8 +1503,10 @@ class HansSetupDynamicToolsTest {
         var configuredChoice: HansSetupInputChoice? = null
         var cameraHoldEnabled = false
 
-        override fun probe(step: HansSetupStep, operationNonce: String?): HansSetupProbeResult =
-            results[step] ?: HansSetupProbeResult(false, "probe_not_ready")
+        override fun probe(step: HansSetupStep, operationNonce: String?): HansSetupProbeResult {
+            probedSteps += step
+            return results[step] ?: HansSetupProbeResult(false, "probe_not_ready")
+        }
 
         override fun hardwareHoldCompatible(): Boolean = holdCompatible
 

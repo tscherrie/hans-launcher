@@ -1,5 +1,8 @@
 package ai.hans.standard.automations.androidui
 
+import ai.hans.standard.R
+import ai.hans.standard.localization.AndroidHansTextResolver
+
 import ai.hans.standard.automations.AutomationToolApprovalProvider
 import ai.hans.standard.automations.AutomationToolApprovalReceipt
 import ai.hans.standard.automations.AutomationToolApprovalRequest
@@ -52,11 +55,11 @@ class AndroidAutomationApprovalDialog(
                     val visible = AlertDialog.Builder(activity)
                         .setTitle(title(request.risk))
                         .setMessage(message(request))
-                        .setPositiveButton("Einmal erlauben") { _, _ ->
+                        .setPositiveButton(AndroidHansTextResolver(activity).text(R.string.integration_allow_once_90153ce)) { _, _ ->
                             accepted.set(true)
                             latch.countDown()
                         }
-                        .setNegativeButton("Ablehnen") { _, _ -> latch.countDown() }
+                        .setNegativeButton(AndroidHansTextResolver(activity).text(R.string.integration_decline_7be75ce)) { _, _ -> latch.countDown() }
                         .setOnCancelListener { latch.countDown() }
                         .create()
                     visible.setOnDismissListener {
@@ -97,22 +100,22 @@ class AndroidAutomationApprovalDialog(
     }
 
     private fun title(risk: AutomationToolRisk): String = when (risk) {
-        AutomationToolRisk.USER_VISIBLE_CHANGE -> "Automation ändern?"
-        AutomationToolRisk.EXECUTE_AGENT -> "Automation jetzt ausführen?"
-        AutomationToolRisk.DESTRUCTIVE -> "Automation löschen?"
+        AutomationToolRisk.USER_VISIBLE_CHANGE -> AndroidHansTextResolver(activity).text(R.string.integration_change_automation_8ee9be3)
+        AutomationToolRisk.EXECUTE_AGENT -> AndroidHansTextResolver(activity).text(R.string.integration_run_automation_now_bb938a5)
+        AutomationToolRisk.DESTRUCTIVE -> AndroidHansTextResolver(activity).text(R.string.integration_delete_automation_fa45b91)
     }
 
     private fun message(request: AutomationToolApprovalRequest): String {
         val target = request.targetAutomationId?.value?.let { " „$it“" }.orEmpty()
         return when (request.operation) {
-            "create" -> "Hans möchte eine neue Automation anlegen."
-            "update" -> "Hans möchte Automation$target ändern."
-            "enable" -> "Hans möchte Automation$target einschalten."
-            "disable" -> "Hans möchte Automation$target ausschalten und offene Läufe stoppen."
-            "delete" -> "Hans möchte Automation$target dauerhaft löschen."
-            "run_now" -> "Hans möchte Automation$target jetzt einmal ausführen."
-            "confirm" -> "Hans möchte genau diesen geplanten Lauf von Automation$target freigeben."
-            else -> "Hans möchte eine bestätigungspflichtige Automationsaktion ausführen."
+            "create" -> AndroidHansTextResolver(activity).text(R.string.integration_hans_would_like_to_create_a_new_automation_e576176)
+            "update" -> AndroidHansTextResolver(activity).text(R.string.integration_hans_would_like_to_change_automation_1_e572f99, target)
+            "enable" -> AndroidHansTextResolver(activity).text(R.string.integration_hans_would_like_to_enable_automation_1_08c6b0a, target)
+            "disable" -> AndroidHansTextResolver(activity).text(R.string.integration_hans_would_like_to_disable_automation_1_and_stop_pendin_2c2a0d9, target)
+            "delete" -> AndroidHansTextResolver(activity).text(R.string.integration_hans_would_like_to_permanently_delete_automation_1_2cfd2a7, target)
+            "run_now" -> AndroidHansTextResolver(activity).text(R.string.integration_hans_would_like_to_run_automation_1_once_now_150720a, target)
+            "confirm" -> AndroidHansTextResolver(activity).text(R.string.integration_hans_would_like_to_approve_this_exact_scheduled_run_of__c1059fe, target)
+            else -> AndroidHansTextResolver(activity).text(R.string.integration_hans_would_like_to_perform_an_automation_action_that_re_9aebff3)
         }
     }
 

@@ -8,6 +8,7 @@ import ai.hans.standard.runtime.IRuntimeService
 /** Android Binder adapter; all protocol/state logic remains in the controller. */
 internal class BinderSessionRuntimeTransport(
     private val runtime: IRuntimeService,
+    private val phoneToolsBridge: ai.hans.standard.remotecontrol.RemotePhoneToolsBridgeConfig? = null,
 ) : SessionRuntimeTransport {
     private val assembler = OrderedServerDeliveryAssembler()
     private val pendingStart = PendingRuntimeStart()
@@ -110,6 +111,7 @@ internal class BinderSessionRuntimeTransport(
         this.listener = listener
         pendingStart.begin(operationId)
         try {
+            runtime.configurePhoneToolsBridge(phoneToolsBridge?.port ?: 0, phoneToolsBridge?.token.orEmpty())
             runtime.startAppServerSession(operationId, callback)
         } catch (failure: Exception) {
             pendingStart.complete(operationId)
@@ -120,6 +122,7 @@ internal class BinderSessionRuntimeTransport(
     override fun restart(operationId: Long, expectedGeneration: Long) {
         pendingStart.begin(operationId)
         try {
+            runtime.configurePhoneToolsBridge(phoneToolsBridge?.port ?: 0, phoneToolsBridge?.token.orEmpty())
             runtime.restartAppServerSession(operationId, expectedGeneration)
         } catch (failure: Exception) {
             pendingStart.complete(operationId)

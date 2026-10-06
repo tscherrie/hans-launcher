@@ -1,5 +1,7 @@
 package ai.hans.standard.backup
 
+import ai.hans.standard.localization.TestResourceTextResolver
+
 import java.io.File
 import javax.xml.parsers.DocumentBuilderFactory
 import org.junit.Assert.assertEquals
@@ -15,7 +17,7 @@ class HansBackupResultCopyTest {
             HansBackupImportResult(true, pluginReferencesRetainedForReconciliation = 1),
             HansBackupImportResult(true, skillChoicesRetainedForReconciliation = 1),
         ).forEach { result ->
-            val message = backupImportResultMessage(result, true)
+            val message = backupImportResultMessage(result, true, text = TestResourceTextResolver(java.util.Locale.GERMAN))
             assertTrue(message.contains("nur vorgemerkt"))
             assertTrue(message.contains("nicht installiert oder aktiviert"))
             assertFalse(message.contains("vollständig"))
@@ -25,26 +27,32 @@ class HansBackupResultCopyTest {
     @Test
     fun stagedSelectionIsNotAlreadyEffectiveAndUnavailableSelectionIsExplicit() {
         val result = HansBackupImportResult(true, requestedModel = "gpt-5.6-luna")
-        assertTrue(backupImportResultMessage(result, true).contains("erst nach Bestätigung"))
-        assertTrue(backupImportResultMessage(result, false).contains("nicht verfügbar"))
+        assertTrue(backupImportResultMessage(result, true, text = TestResourceTextResolver(java.util.Locale.GERMAN)).contains("erst nach Bestätigung"))
+        assertTrue(backupImportResultMessage(result, false, text = TestResourceTextResolver(java.util.Locale.GERMAN)).contains("nicht verfügbar"))
     }
 
     @Test
     fun recoveryFallbackExplainsBlockedWorkWithoutClaimingTheJournalWasRepaired() {
-        val resource = source("res/values/strings.xml")
-        val strings = DocumentBuilderFactory.newInstance().apply {
+        val factory = DocumentBuilderFactory.newInstance().apply {
             setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
             setFeature("http://xml.org/sax/features/external-general-entities", false)
             setFeature("http://xml.org/sax/features/external-parameter-entities", false)
             isXIncludeAware = false
             isExpandEntityReferences = false
-        }.newDocumentBuilder().parse(resource).getElementsByTagName("string")
-        val messages = (0 until strings.length).map { strings.item(it) as Element }
-            .filter { it.getAttribute("name") == "backup_recovery_message" }
-        assertEquals(1, messages.size)
-        val message = messages.single().textContent
-        assertTrue(message.contains("bleiben gesperrt"))
-        assertTrue(message.contains("nicht gelöscht"))
+        }
+        listOf(
+            Triple("values", "remain blocked", "has not been deleted"),
+            Triple("values-de", "bleiben gesperrt", "nicht gelöscht"),
+        ).forEach { (qualifier, blocked, retained) ->
+            val resource = source("res/$qualifier/strings.xml")
+            val strings = factory.newDocumentBuilder().parse(resource).getElementsByTagName("string")
+            val messages = (0 until strings.length).map { strings.item(it) as Element }
+                .filter { it.getAttribute("name") == "backup_recovery_message" }
+            assertEquals(qualifier, 1, messages.size)
+            val message = messages.single().textContent
+            assertTrue(qualifier, message.contains(blocked))
+            assertTrue(qualifier, message.contains(retained))
+        }
         assertTrue(
             source("java/ai/hans/standard/backup/AndroidBackupRecoveryScreen.kt").readText()
                 .contains("setText(R.string.backup_recovery_message)"),

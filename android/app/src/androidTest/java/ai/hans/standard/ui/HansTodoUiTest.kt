@@ -8,10 +8,13 @@ import android.view.KeyEvent
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.assertContentDescriptionEquals
+import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.assertIsNotSelected
 import androidx.compose.ui.test.assertTextEquals
+import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -30,7 +33,7 @@ class HansTodoUiTest {
 
     @Test fun tappingHansRequiresAnExplicitPhoneCallConfirmation() {
         var starts = 0
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme { ChatScreen(ChatUiState(), chatCallbacks().copy(onStartLiveVoice = { starts++ })) }
         }
         compose.onNodeWithTag("hans_title").performClick()
@@ -45,7 +48,7 @@ class HansTodoUiTest {
 
     @Test fun liveConfirmationCanBeCancelledWithoutStartingAndExpiresAfterExactlyFiveSeconds() {
         var starts = 0
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme { ChatScreen(ChatUiState(), chatCallbacks().copy(onStartLiveVoice = { starts++ })) }
         }
         compose.onNodeWithTag("hans_title").performClick()
@@ -93,7 +96,7 @@ class HansTodoUiTest {
                 ),
             ),
         )
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 ChatScreen(
                     state.value,
@@ -103,7 +106,7 @@ class HansTodoUiTest {
         }
         compose.onNodeWithTag("message_answer").performTouchInput { longClick() }
         compose.onNodeWithTag("message_read_aloud_menu").assertExists()
-        compose.onNodeWithText("Vorlesen").assertExists()
+        compose.onNodeWithTag("message_read_aloud_action").assertTextEquals("Vorlesen")
         compose.onNodeWithText("Kopieren").assertDoesNotExist()
         compose.runOnIdle {
             state.value = state.value.copy(
@@ -127,7 +130,7 @@ class HansTodoUiTest {
     @Test fun activeLiveStopsImmediatelyWithoutAConfirmationOrStartCallback() {
         var starts = 0
         var stops = 0
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 ChatScreen(
                     ChatUiState(liveVoiceStatus = LiveVoiceUiStatus.LISTENING),
@@ -143,7 +146,7 @@ class HansTodoUiTest {
     }
 
     @Test fun activeLiveIsAnEarpieceOnlyCallSurfaceWithoutChatOrRouteControls() {
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 ChatScreen(
                     ChatUiState(
@@ -175,7 +178,7 @@ class HansTodoUiTest {
     }
 
     @Test fun connectingCallUsesNaturalRingingLanguage() {
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 ChatScreen(
                     ChatUiState(liveVoiceStatus = LiveVoiceUiStatus.CONNECTING),
@@ -192,7 +195,7 @@ class HansTodoUiTest {
             ChatUiState(liveVoiceStatus = LiveVoiceUiStatus.LISTENING),
         )
         val requested = mutableListOf<Boolean>()
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 ChatScreen(
                     state.value,
@@ -201,11 +204,11 @@ class HansTodoUiTest {
             }
         }
         compose.onNodeWithTag("live_call_mute")
-            .assertContentDescriptionEquals("Mikrofon stummschalten")
+            .assertContentDescriptionEquals("Aufnahme beenden")
             .performClick()
         compose.runOnIdle { assertEquals(listOf(true), requested) }
         compose.onNodeWithTag("live_call_mute")
-            .assertContentDescriptionEquals("Mikrofon stummschalten")
+            .assertContentDescriptionEquals("Aufnahme beenden")
         compose.runOnIdle { state.value = state.value.copy(liveVoiceInputMuted = true) }
         compose.onNodeWithTag("live_call_mute")
             .assertContentDescriptionEquals("Mikrofon ist stumm. Mikrofon einschalten")
@@ -215,7 +218,7 @@ class HansTodoUiTest {
 
     @Test fun systemBackMinimizesToAVisibleCallBarWithoutStoppingTheCall() {
         var stops = 0
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 ChatScreen(
                     ChatUiState(liveVoiceStatus = LiveVoiceUiStatus.LISTENING),
@@ -238,7 +241,7 @@ class HansTodoUiTest {
                 liveVoiceInputMuted = true,
             ),
         )
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme { ChatScreen(state.value, chatCallbacks()) }
         }
         compose.onNodeWithTag("live_call_status")
@@ -253,7 +256,7 @@ class HansTodoUiTest {
         val state = mutableStateOf(ChatUiState())
         var starts = 0
         var toggles = 0
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 ChatScreen(
                     state.value,
@@ -273,7 +276,7 @@ class HansTodoUiTest {
 
     @Test fun visibleMenuContainsOnlyGroupsAndKeepsAckSelectionsInsideTheChosenGroup() {
         val selected = mutableListOf<String>()
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 ChatScreen(
                     state = ChatUiState(composer = ComposerUiState(text = "Entwurf bleibt")),
@@ -293,7 +296,7 @@ class HansTodoUiTest {
         compose.onNodeWithTag("settings_content").assertDoesNotExist()
         compose.onNodeWithTag("model_gpt-5.6-sol").assertDoesNotExist()
         compose.onNodeWithTag("persistent_android_consent_notice").assertDoesNotExist()
-        val ids = listOf("permissions", "runtime", "speech", "input", "personal", "maintenance")
+        val ids = listOf("runtime", "speech", "input", "personal", "permissions", "maintenance")
         val positions = ids.map {
             compose.onNodeWithTag("settings_group_$it").fetchSemanticsNode().positionInRoot.y
         }
@@ -316,7 +319,7 @@ class HansTodoUiTest {
     }
 
     @Test fun externalSettingsEntryOpensTheSameSidebarWithoutAnotherSettingsScreen() {
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 ChatScreen(ChatUiState(), chatCallbacks(), sidebarRequested = true,
                     sidebarSettings = SettingsUiState(), sidebarCallbacks = settingsCallbacks())
@@ -330,7 +333,7 @@ class HansTodoUiTest {
     @Test fun audioToggleAppearsOnlyForActiveOutputAndWaitsForActualAndroidRoute() {
         val route = mutableStateOf(SpeechAudioRouteState())
         val requested = mutableListOf<SpeechAudioRoute>()
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 ChatScreen(ChatUiState(speechAudioRoute = route.value),
                     chatCallbacks().copy(onSpeechAudioRouteRequested = requested::add))
@@ -342,7 +345,8 @@ class HansTodoUiTest {
                 available = setOf(SpeechAudioRoute.EARPIECE, SpeechAudioRoute.SPEAKER),
                 effective = SpeechAudioRoute.SPEAKER)
         }
-        compose.onNodeWithTag("speech_audio_route").performClick()
+        compose.onNodeWithTag("speech_audio_route")
+            .assert(hasAnyAncestor(hasTestTag("speech_output_controls"))).performClick()
         compose.onNodeWithTag("speech_route_earpiece").performClick()
         compose.runOnIdle { assertEquals(listOf(SpeechAudioRoute.EARPIECE), requested) }
         compose.onNodeWithTag("speech_audio_route")
@@ -355,7 +359,7 @@ class HansTodoUiTest {
     }
 
     @Test fun missingEarpieceRemainsDisabledInsteadOfPretendingToSwitch() {
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 ChatScreen(ChatUiState(speechAudioRoute = SpeechAudioRouteState(active = true,
                     available = setOf(SpeechAudioRoute.SPEAKER), effective = SpeechAudioRoute.SPEAKER)), chatCallbacks())

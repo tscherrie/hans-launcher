@@ -1,5 +1,7 @@
 package ai.hans.standard.setup
 
+import ai.hans.standard.localization.TestResourceTextResolver
+import java.util.Locale
 import ai.hans.standard.phone.accessibility.AccessibilitySessionId
 import ai.hans.standard.phone.accessibility.AccessibilitySnapshotId
 import ai.hans.standard.phone.accessibility.AccessibilityWindowId
@@ -19,17 +21,18 @@ class AccessibilitySetupReceiptTrackerTest {
     private val session = AccessibilitySessionId("accessibility-session-setup")
     private val nonce = "setup_nonce_123456789"
     private val tracker = AccessibilitySetupReceiptTracker(OWN_PACKAGE)
+    private val copy = AccessibilitySetupTestCopy.capture(TestResourceTextResolver(Locale.GERMAN))
 
     @Test
     fun unrelatedFreshSnapshotCannotVerifyAccessibilitySetup() {
-        tracker.arm(nonce, session, snapshot(1, node(text = "Vorher")))
+        tracker.arm(nonce, session, snapshot(1, node(text = "Vorher")), copy)
 
         assertFalse(tracker.observeTargetAction(nonce, session, snapshot(2, node(text = "Fremd"))))
         assertFalse(
             tracker.observePostcondition(
                 nonce,
                 session,
-                snapshot(3, node(text = ACCESSIBILITY_SETUP_POSTCONDITION_TEXT)),
+                snapshot(3, node(text = copy.postconditionText)),
             ),
         )
         assertEquals(AccessibilitySetupReceiptState.ARMED, tracker.state(nonce))
@@ -37,9 +40,9 @@ class AccessibilitySetupReceiptTrackerTest {
 
     @Test
     fun exactNonceBoundTargetActionAndFreshPostconditionVerify() {
-        tracker.arm(nonce, session, snapshot(1, node(text = "Vorher")))
+        tracker.arm(nonce, session, snapshot(1, node(text = "Vorher")), copy)
         val target = node(
-            contentDescription = ACCESSIBILITY_SETUP_TARGET_DESCRIPTION,
+            contentDescription = copy.targetDescription,
             role = SemanticUiRole.BUTTON,
             clickable = true,
             actions = setOf(SemanticUiAction.CLICK),
@@ -50,14 +53,14 @@ class AccessibilitySetupReceiptTrackerTest {
             tracker.observePostcondition(
                 nonce,
                 session,
-                snapshot(2, node(text = ACCESSIBILITY_SETUP_POSTCONDITION_TEXT)),
+                snapshot(2, node(text = copy.postconditionText)),
             ),
         )
         assertTrue(
             tracker.observePostcondition(
                 nonce,
                 session,
-                snapshot(3, node(text = ACCESSIBILITY_SETUP_POSTCONDITION_TEXT)),
+                snapshot(3, node(text = copy.postconditionText)),
             ),
         )
         assertEquals(AccessibilitySetupReceiptState.VERIFIED, tracker.state(nonce))
@@ -67,16 +70,16 @@ class AccessibilitySetupReceiptTrackerTest {
     @Test
     fun staleOrWrongPackageTargetCannotCountAsAction() {
         val baseline = snapshot(4, node(text = "Vorher"))
-        tracker.arm(nonce, session, baseline)
+        tracker.arm(nonce, session, baseline, copy)
         val correctShapeWrongPackage = node(
             packageName = "other.app",
-            contentDescription = ACCESSIBILITY_SETUP_TARGET_DESCRIPTION,
+            contentDescription = copy.targetDescription,
             role = SemanticUiRole.BUTTON,
             clickable = true,
             actions = setOf(SemanticUiAction.CLICK),
         )
         val staleCorrectTarget = node(
-            contentDescription = ACCESSIBILITY_SETUP_TARGET_DESCRIPTION,
+            contentDescription = copy.targetDescription,
             role = SemanticUiRole.BUTTON,
             clickable = true,
             actions = setOf(SemanticUiAction.CLICK),
@@ -84,6 +87,44 @@ class AccessibilitySetupReceiptTrackerTest {
 
         assertFalse(tracker.observeTargetAction(nonce, session, snapshot(5, correctShapeWrongPackage)))
         assertFalse(tracker.observeTargetAction(nonce, session, snapshot(4, staleCorrectTarget)))
+    }
+
+    @Test
+    fun localizedCopyIsCapturedForBothLanguagesAndFreshExactActionsStillRequired() {
+        listOf(Locale.ENGLISH, Locale.GERMAN).forEach { locale ->
+            val localized = AccessibilitySetupTestCopy.capture(TestResourceTextResolver(locale))
+            tracker.arm(nonce, session, snapshot(1, node(text = "baseline")), localized)
+            assertEquals(localized, tracker.displayCopy(nonce))
+            val target = node(contentDescription = localized.targetDescription,
+                role = SemanticUiRole.BUTTON, clickable = true, actions = setOf(SemanticUiAction.CLICK))
+            assertTrue(tracker.observeTargetAction(nonce, session, snapshot(2, target)))
+            assertFalse(tracker.observePostcondition(nonce, session,
+                snapshot(2, node(text = localized.postconditionText))))
+            assertTrue(tracker.observePostcondition(nonce, session,
+                snapshot(3, node(text = localized.postconditionText))))
+        }
+    }
+
+    @Test
+    fun localeChangeCannotSwapArmedReceiptOrFalselyAcceptAnotherLanguage() {
+        val english = AccessibilitySetupTestCopy.capture(TestResourceTextResolver(Locale.ENGLISH))
+        val german = AccessibilitySetupTestCopy.capture(TestResourceTextResolver(Locale.GERMAN))
+        tracker.arm(nonce, session, snapshot(1, node(text = "baseline")), english)
+        fun target(copy: AccessibilitySetupTestCopy) = node(
+            contentDescription = copy.targetDescription, role = SemanticUiRole.BUTTON,
+            clickable = true, actions = setOf(SemanticUiAction.CLICK))
+        assertFalse(tracker.observeTargetAction(nonce, session, snapshot(2, target(german))))
+        assertEquals(english, tracker.displayCopy(nonce))
+        assertTrue(tracker.observeTargetAction(nonce, session, snapshot(3, target(english))))
+        assertFalse(tracker.observePostcondition(nonce, session,
+            snapshot(4, node(text = german.postconditionText))))
+        assertTrue(tracker.observePostcondition(nonce, session,
+            snapshot(5, node(text = english.postconditionText))))
+        tracker.clear(nonce)
+        assertEquals(null, tracker.displayCopy(nonce))
+        tracker.arm(nonce, session, snapshot(6, node(text = "baseline")), german)
+        assertEquals(german, tracker.displayCopy(nonce))
+        assertFalse(tracker.observeTargetAction(nonce, session, snapshot(7, target(english))))
     }
 
     private fun snapshot(id: Long, root: RawSemanticUiNode) =

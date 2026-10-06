@@ -1,8 +1,14 @@
 package ai.hans.standard.ui
 
+import android.accessibilityservice.AccessibilityServiceInfo
+import android.app.UiAutomation
 import android.content.ComponentName
 import android.content.Intent
+import android.os.SystemClock
+import android.util.Log
+import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import androidx.activity.ComponentActivity
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.CompositionLocalProvider
@@ -35,7 +41,7 @@ class LiveVoiceCallPresentationTest {
     @Test fun backMinimizesAndExpandKeepsTheCallAndShowsTheLauncher() {
         var starts = 0
         var stops = 0
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 ChatScreen(
                     ChatUiState(liveVoiceStatus = LiveVoiceUiStatus.LISTENING),
@@ -63,7 +69,7 @@ class LiveVoiceCallPresentationTest {
         compose.runOnUiThread { owner = CallLifecycleOwner() }
         var stops = 0
         val state = mutableStateOf(ChatUiState(liveVoiceStatus = LiveVoiceUiStatus.LISTENING))
-        compose.setContent {
+        compose.setGermanContent {
             CompositionLocalProvider(LocalLifecycleOwner provides owner) {
                 MaterialTheme {
                     ChatScreen(state.value, callbacks().copy(onStopLiveVoice = { stops++ }))
@@ -89,7 +95,7 @@ class LiveVoiceCallPresentationTest {
         val muteRequests = mutableListOf<Boolean>()
         var starts = 0
         var stops = 0
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 ChatScreen(state.value, callbacks().copy(
                     onLiveVoiceInputMutedChanged = muteRequests::add,
@@ -113,7 +119,7 @@ class LiveVoiceCallPresentationTest {
 
     @Test fun aNewCallStartsExpandedAfterThePreviousCallWasMinimized() {
         val state = mutableStateOf(ChatUiState(liveVoiceStatus = LiveVoiceUiStatus.LISTENING))
-        compose.setContent { MaterialTheme { ChatScreen(state.value, callbacks()) } }
+        compose.setGermanContent { MaterialTheme { ChatScreen(state.value, callbacks()) } }
         pressBack()
         compose.runOnIdle { state.value = state.value.copy(liveVoiceStatus = null) }
         compose.onNodeWithTag("live_call_bar").assertDoesNotExist()
@@ -131,7 +137,7 @@ class LiveVoiceCallPresentationTest {
             destination = HansDestination.CHAT,
             chat = ChatUiState(liveVoiceStatus = LiveVoiceUiStatus.LISTENING),
         ))
-        compose.setContent {
+        compose.setGermanContent {
             CompositionLocalProvider(LocalLifecycleOwner provides owner) {
                 MaterialTheme { HansApp(state.value, appCallbacks()) }
             }
@@ -167,7 +173,7 @@ class LiveVoiceCallPresentationTest {
             LiveCallForegroundBystanderActivity::class.java.name,
         )).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         var stops = 0
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 ChatScreen(
                     ChatUiState(liveVoiceStatus = LiveVoiceUiStatus.WAITING_FOR_TASK),
@@ -177,62 +183,189 @@ class LiveVoiceCallPresentationTest {
         }
         compose.onNodeWithTag("live_call_screen").assertIsDisplayed()
 
-        try {
-            compose.runOnUiThread { compose.activity.startActivity(externalIntent) }
+        // API32's default UiAutomation does not track interactive windows. A window-state
+        // event can arrive before input focus switches, leaving its active-window ID stale.
+        // Opt into WindowManager-backed tracking and prove the focused application root.
+        val uiAutomation = instrumentation.uiAutomation
+        val windowDiagnostics = InstrumentationRegistry.getArguments()
+            .getString("hansLiveCallWindowDiagnostics") == "true"
+        withInteractiveWindowTracking(uiAutomation) {
+            if (windowDiagnostics) {
+                recordWindowDiagnostics(uiAutomation, "before-external-start")
+                uiAutomation.setOnAccessibilityEventListener { event ->
+                    try {
+                        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+                            event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED) {
+                            Log.i("HansLiveCallWindowProbe", "event type=${event.eventType}" +
+                                " package=${event.packageName} windowId=${event.windowId}" +
+                                " changes=${event.windowChanges} time=${event.eventTime}")
+                        }
+                    } finally { @Suppress("DEPRECATION") event.recycle() }
+                }
+            }
             compose.waitUntil(5_000) {
-                instrumentation.uiAutomation.rootInActiveWindow?.let { root ->
-                    try { root.packageName?.toString() == externalPackage }
-                    finally { @Suppress("DEPRECATION") root.recycle() }
+                focusedApplicationRoot(uiAutomation, targetPackage)?.let { root ->
+                    @Suppress("DEPRECATION") root.recycle()
+                    true
                 } == true
             }
             instrumentation.runOnMainSync {
-                assertFalse(compose.activity.hasWindowFocus())
-                assertFalse(compose.activity.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
-                assertEquals(0, stops)
+                assertTrue(compose.activity.hasWindowFocus())
+                assertTrue(compose.activity.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
             }
-            val foregroundRoot = requireNotNull(instrumentation.uiAutomation.rootInActiveWindow)
+
             try {
-                assertEquals(externalPackage, foregroundRoot.packageName?.toString())
-                val controls = foregroundRoot.findAccessibilityNodeInfosByText(
-                    LiveCallForegroundBystanderActivity.INITIAL_TEXT,
-                )
-                try {
-                    assertEquals(1, controls.size)
-                    assertTrue(controls.single().performAction(AccessibilityNodeInfo.ACTION_CLICK))
-                } finally {
-                    controls.forEach { @Suppress("DEPRECATION") it.recycle() }
+                compose.runOnUiThread { compose.activity.startActivity(externalIntent) }
+                var rootSamples = 0
+                compose.waitUntil(5_000) {
+                    val queryStarted = SystemClock.elapsedRealtime()
+                    val root = focusedApplicationRoot(uiAutomation, externalPackage)
+                    if (windowDiagnostics) {
+                        Log.i("HansLiveCallWindowProbe", "external-root sample=${++rootSamples}" +
+                            " queryMs=${SystemClock.elapsedRealtime() - queryStarted}" +
+                            " package=${root?.packageName} windowId=${root?.windowId}")
+                    }
+                    root?.let {
+                        @Suppress("DEPRECATION") it.recycle()
+                        true
+                    } == true
                 }
+                if (windowDiagnostics) recordWindowDiagnostics(uiAutomation, "external-focused-root-confirmed")
+                instrumentation.runOnMainSync {
+                    assertFalse(compose.activity.hasWindowFocus())
+                    assertFalse(compose.activity.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
+                    assertEquals(0, stops)
+                }
+                val foregroundRoot = requireNotNull(focusedApplicationRoot(uiAutomation, externalPackage))
+                try {
+                    assertEquals(externalPackage, foregroundRoot.packageName?.toString())
+                    val controls = foregroundRoot.findAccessibilityNodeInfosByText(
+                        LiveCallForegroundBystanderActivity.INITIAL_TEXT,
+                    )
+                    try {
+                        assertEquals(1, controls.size)
+                        assertTrue(controls.single().performAction(AccessibilityNodeInfo.ACTION_CLICK))
+                    } finally {
+                        controls.forEach { @Suppress("DEPRECATION") it.recycle() }
+                    }
+                } finally {
+                    @Suppress("DEPRECATION") foregroundRoot.recycle()
+                }
+                compose.waitUntil(5_000) {
+                    focusedApplicationRoot(uiAutomation, externalPackage)?.let { root ->
+                        val controls = root.findAccessibilityNodeInfosByText(
+                            LiveCallForegroundBystanderActivity.CLICKED_TEXT,
+                        )
+                        try { controls.size == 1 }
+                        finally {
+                            controls.forEach { @Suppress("DEPRECATION") it.recycle() }
+                            @Suppress("DEPRECATION") root.recycle()
+                        }
+                    } == true
+                }
+                if (windowDiagnostics) recordWindowDiagnostics(uiAutomation, "external-click-postcondition-confirmed")
+            } catch (failure: Throwable) {
+                if (windowDiagnostics) {
+                    try {
+                        recordWindowDiagnostics(uiAutomation, "original-failure")
+                    } catch (diagnosticFailure: Throwable) {
+                        failure.addSuppressed(diagnosticFailure)
+                    }
+                }
+                throw failure
             } finally {
-                @Suppress("DEPRECATION") foregroundRoot.recycle()
+                if (windowDiagnostics) uiAutomation.setOnAccessibilityEventListener(null)
+                // Return to this fixture, not the real launcher or a running microphone service.
+                val returnIntent = Intent(compose.activity, ComponentActivity::class.java)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+                instrumentation.runOnMainSync { compose.activity.startActivity(returnIntent) }
             }
             compose.waitUntil(5_000) {
-                instrumentation.uiAutomation.rootInActiveWindow?.let { root ->
-                    val controls = root.findAccessibilityNodeInfosByText(
-                        LiveCallForegroundBystanderActivity.CLICKED_TEXT,
-                    )
-                    try { root.packageName?.toString() == externalPackage && controls.size == 1 }
-                    finally {
-                        controls.forEach { @Suppress("DEPRECATION") it.recycle() }
-                        @Suppress("DEPRECATION") root.recycle()
-                    }
-                } == true
+                compose.runOnUiThread {
+                    compose.activity.hasWindowFocus() &&
+                        compose.activity.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
+                }
             }
+            compose.waitForIdle()
+            compose.onNodeWithTag("live_call_screen").assertDoesNotExist()
+            compose.onNodeWithTag("live_call_bar").assertIsDisplayed()
+            compose.runOnIdle { assertEquals(0, stops) }
+        }
+    }
+
+    /** Test-owned service configuration; restore even if the initial foreground proof fails. */
+    private inline fun withInteractiveWindowTracking(automation: UiAutomation, block: () -> Unit) {
+        val originalFlags = automation.serviceInfo.flags
+        try {
+            automation.serviceInfo = automation.serviceInfo.apply {
+                flags = flags or AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
+            }
+            block()
         } finally {
-            // Return to this fixture, not the real launcher or a running microphone service.
-            val returnIntent = Intent(compose.activity, ComponentActivity::class.java)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
-            instrumentation.runOnMainSync { compose.activity.startActivity(returnIntent) }
-        }
-        compose.waitUntil(5_000) {
-            compose.runOnUiThread {
-                compose.activity.hasWindowFocus() &&
-                    compose.activity.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
+            try {
+                automation.setOnAccessibilityEventListener(null)
+            } finally {
+                automation.serviceInfo = automation.serviceInfo.apply { flags = originalFlags }
+                if (InstrumentationRegistry.getArguments().getString("hansLiveCallWindowDiagnostics") == "true") {
+                    Log.i("HansLiveCallWindowProbe", "restored flags=${automation.serviceInfo.flags}")
+                }
             }
         }
-        compose.waitForIdle()
-        compose.onNodeWithTag("live_call_screen").assertDoesNotExist()
-        compose.onNodeWithTag("live_call_bar").assertIsDisplayed()
-        compose.runOnIdle { assertEquals(0, stops) }
+    }
+
+    /** Only input-focused APPLICATION windows qualify; refresh and bind the actual root ID. */
+    private fun focusedApplicationRoot(automation: UiAutomation, expectedPackage: String): AccessibilityNodeInfo? {
+        val windows = automation.windows
+        try {
+            val window = windows.singleOrNull {
+                it.type == AccessibilityWindowInfo.TYPE_APPLICATION && it.isFocused
+            } ?: return null
+            val root = window.root ?: return null
+            try {
+                if (root.refresh() && root.packageName?.toString() == expectedPackage && root.windowId == window.id) {
+                    return root
+                }
+            } catch (failure: Throwable) {
+                @Suppress("DEPRECATION") root.recycle()
+                throw failure
+            }
+            @Suppress("DEPRECATION") root.recycle()
+            return null
+        } finally {
+            windows.forEach { @Suppress("DEPRECATION") it.recycle() }
+        }
+    }
+
+    /** Synthetic fixture metadata only: never record node text, screenshots or real account data. */
+    private fun recordWindowDiagnostics(automation: UiAutomation, stage: String) {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val info = automation.serviceInfo
+        Log.i("HansLiveCallWindowProbe", "$stage service flags=${info.flags}" +
+            " eventTypes=${info.eventTypes} capabilities=${info.capabilities}" +
+            " packageNames=${info.packageNames?.joinToString()}")
+        instrumentation.runOnMainSync {
+            Log.i("HansLiveCallWindowProbe", "$stage target focus=${compose.activity.hasWindowFocus()}" +
+                " lifecycle=${compose.activity.lifecycle.currentState}")
+        }
+        automation.rootInActiveWindow?.let { root ->
+            try {
+                Log.i("HansLiveCallWindowProbe", "$stage activeRoot package=${root.packageName}" +
+                    " windowId=${root.windowId}")
+            } finally { @Suppress("DEPRECATION") root.recycle() }
+        } ?: Log.i("HansLiveCallWindowProbe", "$stage activeRoot=null")
+        val windows = automation.windows
+        try {
+            Log.i("HansLiveCallWindowProbe", "$stage windowCount=${windows.size}")
+            windows.filter { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }.forEach { window ->
+                val root = window.root
+                try {
+                    Log.i("HansLiveCallWindowProbe", "$stage applicationWindow id=${window.id}" +
+                        " active=${window.isActive} focused=${window.isFocused}" +
+                        " accessibilityFocused=${window.isAccessibilityFocused}" +
+                        " rootPackage=${root?.packageName} rootWindowId=${root?.windowId}")
+                } finally { @Suppress("DEPRECATION") root?.recycle() }
+            }
+        } finally { windows.forEach { @Suppress("DEPRECATION") it.recycle() } }
     }
 
     private fun pressBack() {

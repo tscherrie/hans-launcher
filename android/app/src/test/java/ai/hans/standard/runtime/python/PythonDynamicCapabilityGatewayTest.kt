@@ -81,6 +81,39 @@ class PythonDynamicCapabilityGatewayTest {
         PythonDynamicCapabilityGateway(listOf(RecordingExecutor(), RecordingExecutor()))
     }
 
+    @Test fun cancellationDoesNotForgePhysicalCompletionAndRealReceiptSurvivesSuppressedResult() {
+        val executor = RecordingExecutor(deferCompletion = true, supportsPhysicalReceipt = true)
+        val gateway = PythonDynamicCapabilityGateway(listOf(executor))
+        var result = false
+        var quiet = false
+        val handle = gateway.execute(request("phone.read", JSONObject())) { result = true }
+        assertTrue(handle.onQuiescent { quiet = true })
+        handle.cancel()
+        executor.completeDeferred()
+        assertFalse(result)
+        assertFalse(quiet)
+        executor.finishPhysically()
+        assertTrue(quiet)
+    }
+
+    @Test fun unknownPhysicalSupportIsNotInferredFromSuccessfulResult() {
+        val gateway = PythonDynamicCapabilityGateway(listOf(RecordingExecutor()))
+        var result = false
+        var quiet = false
+        val handle = gateway.execute(request("phone.read", JSONObject())) { result = true }
+        assertTrue(result)
+        assertFalse(handle.onQuiescent { quiet = true })
+        assertFalse(quiet)
+    }
+
+    @Test fun preDispatchRejectionHasAnImmediatePhysicalReceipt() {
+        val gateway = PythonDynamicCapabilityGateway(listOf(RecordingExecutor()))
+        val handle = gateway.execute(request("phone.unknown", JSONObject())) {}
+        var quiet = false
+        assertTrue(handle.onQuiescent { quiet = true })
+        assertTrue(quiet)
+    }
+
     private fun request(name: String, arguments: JSONObject) = PythonCapabilityRequest(
         requestId = "py-request",
         sequence = 7,
@@ -105,6 +138,7 @@ class PythonDynamicCapabilityGatewayTest {
 
     private class RecordingExecutor(
         private val deferCompletion: Boolean = false,
+        private val supportsPhysicalReceipt: Boolean = false,
     ) : DynamicToolExecutor {
         override val specs = listOf(
             DynamicToolNamespaceSpec(
@@ -122,6 +156,7 @@ class PythonDynamicCapabilityGatewayTest {
         var lastCall: DynamicToolCallParams? = null
         val cancelled = AtomicBoolean(false)
         private var deferredCompletion: ((DynamicToolExecutionResult) -> Unit)? = null
+        private val physicalReceipt = PythonQuiescenceReceipt()
 
         override fun execute(
             call: DynamicToolCallParams,
@@ -140,6 +175,8 @@ class PythonDynamicCapabilityGatewayTest {
                 completion(DynamicToolExecutionResult("""{"status":"ok"}""", true))
             }
             return object : DynamicToolExecutionHandle {
+                override fun onQuiescent(listener: () -> Unit): Boolean =
+                    if (supportsPhysicalReceipt) physicalReceipt.onQuiescent(listener) else false
                 override fun cancel(): DynamicToolCancellationDisposition {
                     cancelled.set(true)
                     return DynamicToolCancellationDisposition.EXTERNAL_EFFECT_MAY_HAVE_STARTED
@@ -150,6 +187,8 @@ class PythonDynamicCapabilityGatewayTest {
         fun completeDeferred() {
             deferredCompletion?.invoke(DynamicToolExecutionResult("""{"status":"ok"}""", true))
         }
+
+        fun finishPhysically() = physicalReceipt.complete()
 
         override fun failureResult(
             call: DynamicToolCallParams,

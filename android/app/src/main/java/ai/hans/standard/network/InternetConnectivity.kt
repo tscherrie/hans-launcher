@@ -1,5 +1,8 @@
 package ai.hans.standard.network
 
+import ai.hans.standard.R
+import ai.hans.standard.localization.HansTextResolver
+
 /** The Android default data network, not mobile signal strength or Codex process readiness. */
 enum class InternetStatus {
     UNKNOWN,
@@ -13,13 +16,12 @@ enum class InternetStatus {
     val permitsExplicitRequest: Boolean
         get() = this != OFFLINE && this != BLOCKED
 
-    val notice: String
-        get() = when (this) {
-            UNKNOWN -> "Internetverbindung noch nicht geprüft."
-            OFFLINE -> "Keine Internetverbindung. Prüfe WLAN oder mobile Daten; im Ausland auch Datenroaming."
-            LIMITED -> "Netz verbunden, Internetzugang nicht bestätigt. Prüfe WLAN, mobile Daten oder VPN. Ein Sendeversuch ist möglich."
-            CAPTIVE_PORTAL -> "Dieses WLAN benötigt eine Anmeldung. Öffne die Interneteinstellungen."
-            BLOCKED -> "Android blockiert den Internetzugriff für Hans. Prüfe Datensparen und die Datennutzung der App."
+    fun notice(text: HansTextResolver): String = when (this) {
+            UNKNOWN -> text.text(R.string.integration_network_unknown)
+            OFFLINE -> text.text(R.string.integration_network_offline)
+            LIMITED -> text.text(R.string.integration_network_limited)
+            CAPTIVE_PORTAL -> text.text(R.string.integration_network_portal)
+            BLOCKED -> text.text(R.string.integration_network_blocked)
             ONLINE -> ""
         }
 }
@@ -97,9 +99,9 @@ internal class DefaultInternetNetworkState {
 }
 
 /** Network recovery never authorizes re-executing a potentially accepted user instruction. */
-internal fun internetWorkNotice(status: InternetStatus, hasActiveWork: Boolean): String =
-    status.notice + if (hasActiveWork && status != InternetStatus.ONLINE) {
-        " Die laufende Antwort kann unterbrochen sein. Bereits gesendete Aufträge werden nicht erneut gesendet."
+internal fun internetWorkNotice(status: InternetStatus, hasActiveWork: Boolean, text: HansTextResolver): String =
+    status.notice(text) + if (hasActiveWork && status != InternetStatus.ONLINE) {
+        text.text(R.string.integration_network_work)
     } else {
         ""
     }

@@ -8,14 +8,14 @@ schema="$runtime_dir/evidence/codex_app_server_protocol.v2.schemas.json"
 
 jq -e '
   .schemaVersion == 1 and
-  .upstream.tag == "rust-v0.154.0" and
-  .upstream.commit == "6b9826e3aa83b1a5947db50f4332cb9c65f1b340" and
+  .upstream.tag == "rust-v0.160.1" and
+  .upstream.commit == "d27764b82f7118f674371e6d6e76271d9d606edb" and
   .runtime.minimumAndroidApi == 31 and
   .runtime.abi == "arm64-v8a" and
-  .runtime.version == "0.154.0" and
-  .codeModeHost.version == "0.154.0" and
-  .schemaGenerator.extractedBytes == 227482840 and
-  .schemaGenerator.combinedV2SchemaBytes == 723247
+  .runtime.version == "0.160.1" and
+  .codeModeHost.version == "0.160.1" and
+  .schemaGenerator.extractedBytes == 248966648 and
+  .schemaGenerator.combinedV2SchemaBytes == 751818
 ' "$lock_file" >/dev/null
 
 expected_schema_sha=$(jq -er '.schemaGenerator.combinedV2SchemaSha256' "$lock_file")

@@ -9,6 +9,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AppsProfileProjectionTest {
+    private val text = ai.hans.standard.localization.TestResourceTextResolver(java.util.Locale.GERMAN)
+    private fun appUiSections(state: AppsUiState) = ai.hans.standard.ui.appUiSections(state, text)
+
     @Test
     fun privateAppsHaveASeparateSectionWhileUnlocked() {
         val sections = appUiSections(state(privateLocked = false))

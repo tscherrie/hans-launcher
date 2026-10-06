@@ -22,33 +22,18 @@ acceptance is recorded**. Do not assume that a remote host is paired, authorized
 reachable, or able to execute an operation merely because a control is shown.
 There is no supported root edition and no current Play Store distribution.
 
-## Incoming remote access from ChatGPT Desktop
+## Voice and current capabilities
 
-Hans includes an opt-in phone setting named **"Fernzugriff durch ChatGPT Desktop"**
-(remote access through ChatGPT Desktop). Its intended direction is
-**Desktop Codex / ChatGPT Work → your Android phone**, continuing the existing
-Hans conversation. This can extend a compatible desktop session with the
-Android app-control tools you have explicitly allowed on that phone. It is
-different from **"Erweiterte Arbeit"**, which sends work from Hans to another
-computer.
+Sign in with your ChatGPT account. Live Voice and completed-recording dictation
+use that account without a separate API key. Dictation starts on the first
+action-key/microphone tap and submits the final transcript on the second tap.
+The subscription transcription route is an undocumented compatibility feature;
+availability may change. It has no paid API fallback or streaming preview.
 
-This integration is **experimental**: a complete paired desktop-to-phone
-execution has not yet been demonstrated. Availability depends on the account,
-desktop version, and capability-confirmed embedded runtime. A visible setting
-is not proof that a particular desktop can pair or control the phone.
-
-Enable it only through the phone's explicit consent dialog, then pair your own
-compatible desktop using the temporary code. Pairing alone does not grant
-phone-tool permission. Access is session-scoped and is not automatically
-restored after Hans/the runtime restarts or exits; persistent client enrollment,
-if present, does not replace fresh phone consent. There is no 24/7 availability
-guarantee.
-
-A paired, authorized desktop can access private Hans/Codex files within Hans's
-Android app UID and the phone tools you have granted—not other apps' private
-storage, root access, or device unlocking. Use the existing Hans conversation;
-new desktop-created tasks do not receive phone tools in this version. See the
-[phone-side setup and verification steps](docs/BUILDING.md#try-incoming-desktop-remote-access-experimental).
+Incoming desktop remote access is currently disabled and hidden. Existing
+source for that experimental integration is not a promise of availability.
+The embedded App Server and Code Mode host are pinned to Codex 0.160.1; model
+and effort choices depend on the runtime-confirmed account catalog.
 
 ## Build it yourself
 
@@ -56,7 +41,8 @@ See **[Building Hans](docs/BUILDING.md)** for the pinned toolchain, complete
 commands, test scope, and safe installation on a development phone.
 
 With Java 17, Python 3.12+, CMake 3.22+, and the documented Android SDK/NDK
-installed, the main build command is:
+installed, first prepare the sealed dictation helper as described in the build
+guide. Then the main build command is:
 
 ```sh
 ./gradlew --dependency-verification=strict \

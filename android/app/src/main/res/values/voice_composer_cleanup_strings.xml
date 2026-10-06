@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools" tools:locale="en">
+    <string name="voice_composer_start">Start dictation</string>
+    <string name="voice_composer_starting">Starting recording…</string>
+    <string name="voice_composer_transcript_pending">Waiting for your transcript</string>
+    <string name="voice_composer_request">Dictation</string>
+    <string name="voice_composer_listening">Listening</string>
+    <string name="voice_composer_finishing">Transcribing…</string>
+    <string name="voice_composer_microphone_starting">Microphone preparing</string>
+    <string name="voice_composer_microphone_on">Microphone on</string>
+    <string name="voice_composer_microphone_off">Microphone off</string>
+    <string name="voice_composer_output">Speech output</string>
+    <string name="voice_composer_empty_action_key">Type or press the action key.</string>
+    <string name="voice_composer_empty_microphone">Type or tap the microphone.</string>
+</resources>

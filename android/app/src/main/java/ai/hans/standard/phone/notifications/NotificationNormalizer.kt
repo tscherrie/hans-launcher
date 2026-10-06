@@ -35,6 +35,7 @@ data class RawNotificationSnapshot(
     val ongoing: Boolean,
     val clearable: Boolean,
     val actions: List<RawNotificationAction>,
+    val agentChannelSource: ai.hans.standard.notifications.agentchannel.WhatsAppNotificationSource? = null,
 )
 
 object NotificationNormalizer {
@@ -67,6 +68,9 @@ object NotificationNormalizer {
             actions = raw.actions
                 .take(NotificationLimits.MAX_ACTIONS)
                 .mapIndexed(::normalizeAction),
+            agentChannelSource = raw.agentChannelSource?.takeIf {
+                it.packageName == packageName && it.notificationKey == androidKey && packageName == "com.whatsapp"
+            },
         )
         return NotificationSignal.Upsert(
             snapshot = snapshot,
@@ -238,6 +242,9 @@ internal object NotificationFingerprint {
         canonical.field(snapshot.channelId)
         canonical.field(snapshot.ongoing.toString())
         canonical.field(snapshot.clearable.toString())
+        snapshot.agentChannelSource?.let {
+            canonical.field(ai.hans.standard.notifications.agentchannel.AgentChannelSourceCodec.encode(it))
+        }
         snapshot.actions.forEach { action ->
             canonical.field(action.index.toString())
             canonical.field(action.title)

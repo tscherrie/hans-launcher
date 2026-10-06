@@ -1,5 +1,7 @@
 package ai.hans.standard.diagnostics.memory
 
+import ai.hans.standard.localization.TestResourceTextResolver
+
 import java.io.File
 import org.junit.Assert.*
 import org.junit.Test
@@ -38,19 +40,19 @@ class NativeMemoryHealthPresentationTest {
         NativeMemoryUnavailableReason.entries.forEach { reason ->
             val result = NativeMemoryHealthResult.Unavailable(reason)
             assertEquals(result, NativeMemoryHealthWire.decode(NativeMemoryHealthWire.encode(result)))
-            assertFalse(NativeMemoryHealthPresentation.describe(result).contains(reason.name))
+            assertFalse(NativeMemoryHealthPresentation.describe(result, text = TestResourceTextResolver(java.util.Locale.GERMAN)).contains(reason.name))
         }
     }
     @Test fun emptyHealthDoesNotClaimLearningOrUniversalConsumption() {
         val text = NativeMemoryHealthPresentation.describe(NativeMemoryHealthResult.Available(
-            NativeMemoryHealthSnapshot(0,0,0,null,null,emptyList())))
+            NativeMemoryHealthSnapshot(0,0,0,null,null,emptyList())), text = TestResourceTextResolver(java.util.Locale.GERMAN))
         assertTrue(text.contains("Registrierte Nutzungen: 0"))
         assertTrue(text.contains("noch nicht belegt"))
-        assertTrue(NativeMemoryHealthPresentation.DISCLOSURE.contains("nicht, dass jede Antwort"))
+        assertTrue(NativeMemoryHealthPresentation.disclosure(TestResourceTextResolver(java.util.Locale.GERMAN)).contains("nicht, dass jede Antwort"))
     }
     @Test fun extremeTimestampsCannotCrashStatusScreen() {
         val text = NativeMemoryHealthPresentation.describe(NativeMemoryHealthResult.Available(
-            NativeMemoryHealthSnapshot(1,0,0,Long.MAX_VALUE,null,emptyList())))
+            NativeMemoryHealthSnapshot(1,0,0,Long.MAX_VALUE,null,emptyList())), text = TestResourceTextResolver(java.util.Locale.GERMAN))
         assertTrue(text.contains("Zeitwert nicht darstellbar"))
     }
 }

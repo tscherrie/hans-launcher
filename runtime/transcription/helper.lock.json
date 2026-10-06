@@ -1,0 +1,28 @@
+{
+  "helperVersion": "0.1.0",
+  "apkLibraryName": "libcodex_transcribe.so",
+  "artifactOwnership": "Hans project custom native helper; not an official OpenAI release binary",
+  "sha256": "e586e8d0e5eadc8d68db1ecf53b15dda93fc5aca0c6a41ce9b1b87df86bc06d4",
+  "bytes": 17298240,
+  "rustVersion": "1.96.0",
+  "target": "aarch64-unknown-linux-musl",
+  "upstreamVersion": "0.155.0",
+  "upstreamCommit": "f0a1b8f0849d90960bc406b848f32e5a129b0457",
+  "sourceArchiveSha256": "60bdaceda9354f65701d3d67b2b240201b25d1327df36028332d640a42a3e454",
+  "sourceArchiveBytes": 14498329,
+  "cargoLockSha256": "c00276e36d9b44937feb3c90061143f2dbc59ba94ae542fc62c7a1fe7b460b1e",
+  "cargoManifestSha256": "713310cffab2aeeab9e3f3939f4b8bc5706a553d21e2cbe4157515c01de5e881",
+  "helperSourceSha256": "86f1eeae7b33d46b9a502045707e51d7c6407ffe3a0274fdf3e6126e2a8b6b56",
+  "buildEvidence": {
+    "host": "GX10 ephemeral build directory",
+    "compiler": "aarch64-linux-musl-gcc",
+    "rustflags": "-C link-arg=-Wl,-z,max-page-size=16384",
+    "static": true,
+    "minimumLoadAlignment": 16384,
+    "authReadOnly": true,
+    "stdoutMaxBytes": 65536,
+    "nativeOfflineTestsPassed": 17,
+    "packageContractTestsPassed": 9,
+    "liveBackendTested": false
+  }
+}

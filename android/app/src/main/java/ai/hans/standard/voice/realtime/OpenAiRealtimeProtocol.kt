@@ -508,6 +508,13 @@ object OpenAiRealtimeProtocol {
     }
 
     private fun parseServerFailure(root: JSONObject): LiveVoiceFailure {
+        val error = root.optJSONObject("error")
+        val classified = ai.hans.standard.voice.openai.OpenAiApiFailureClassifier.classifyServerError(
+            error?.optString("code"), error?.optString("type"),
+        )
+        if (classified.code in setOf("quota_exhausted", "spending_limit_reached", "project_spending_limit_reached")) {
+            return LiveVoiceFailure("realtime_${classified.code}", retryable = false)
+        }
         val serverCode = parseServerErrorCode(root)?.takeIf { it in SAFE_SERVER_ERROR_CODES }
         val code = serverCode?.let { "realtime_$it" } ?: "realtime_server_error"
         val retryable = serverCode in setOf(

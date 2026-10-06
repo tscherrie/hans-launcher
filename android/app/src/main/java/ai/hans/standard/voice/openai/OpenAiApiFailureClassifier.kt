@@ -28,6 +28,8 @@ object OpenAiApiFailureClassifier {
     const val AUTHENTICATION_FAILED = "authentication_failed"
     const val PERMISSION_DENIED = "permission_denied"
     const val QUOTA_EXHAUSTED = "quota_exhausted"
+    const val SPENDING_LIMIT_REACHED = "spending_limit_reached"
+    const val PROJECT_SPENDING_LIMIT_REACHED = "project_spending_limit_reached"
     const val RATE_LIMITED = "rate_limited"
     const val HTTP_TIMEOUT = "http_timeout"
     const val HTTP_SERVER_ERROR = "http_server_error"
@@ -43,9 +45,11 @@ object OpenAiApiFailureClassifier {
     private val quotaCodes = setOf(
         "insufficient_quota",
         "credit_balance_exhausted",
+    )
+
+    private val spendingLimitCodes = setOf(
         "organization_usage_limit_exceeded",
         "organization_spend_limit_exceeded",
-        "project_spend_limit_exceeded",
         // Older responses used these names; accepting them is harmless and
         // keeps the UI accurate for cached/gateway-projected API errors.
         "billing_hard_limit_reached",
@@ -60,12 +64,7 @@ object OpenAiApiFailureClassifier {
 
     fun classifyHttp(status: Int, boundedErrorBody: String? = null): OpenAiApiFailure {
         val metadata = parseMetadata(boundedErrorBody)
-        if (metadata.code in quotaCodes || metadata.type in quotaCodes) {
-            return OpenAiApiFailure(QUOTA_EXHAUSTED, retryable = false)
-        }
-        if (metadata.code in authenticationCodes || metadata.type in authenticationCodes) {
-            return OpenAiApiFailure(AUTHENTICATION_FAILED, retryable = false)
-        }
+        classifyMetadata(metadata.code, metadata.type)?.let { return it }
         return when (status) {
             401 -> OpenAiApiFailure(AUTHENTICATION_FAILED, retryable = false)
             403 -> OpenAiApiFailure(PERMISSION_DENIED, retryable = false)
@@ -81,19 +80,25 @@ object OpenAiApiFailureClassifier {
     fun classifyServerError(code: String?, type: String? = null): OpenAiApiFailure {
         val normalizedCode = normalize(code)
         val normalizedType = normalize(type)
-        return when {
-            normalizedCode in quotaCodes || normalizedType in quotaCodes ->
-                OpenAiApiFailure(QUOTA_EXHAUSTED, retryable = false)
-            normalizedCode in authenticationCodes || normalizedType in authenticationCodes ->
-                OpenAiApiFailure(AUTHENTICATION_FAILED, retryable = false)
-            normalizedCode == "permission_denied" ->
-                OpenAiApiFailure(PERMISSION_DENIED, retryable = false)
-            normalizedCode == "rate_limit_exceeded" ->
-                OpenAiApiFailure(RATE_LIMITED, retryable = true)
-            normalizedCode in setOf("server_error", "service_unavailable") ->
-                OpenAiApiFailure(HTTP_SERVER_ERROR, retryable = true)
-            else -> OpenAiApiFailure(HTTP_CLIENT_ERROR, retryable = false)
-        }
+        return classifyMetadata(normalizedCode, normalizedType)
+            ?: OpenAiApiFailure(HTTP_CLIENT_ERROR, retryable = false)
+    }
+
+    private fun classifyMetadata(code: String, type: String): OpenAiApiFailure? =
+        // A specific code (for example project_spend_limit_exceeded) overrides the generic
+        // insufficient_quota type. This determines the correct, fixed remediation page.
+        classifyKnownCode(code) ?: classifyKnownCode(type)
+
+    private fun classifyKnownCode(code: String): OpenAiApiFailure? = when {
+        code == "project_spend_limit_exceeded" -> OpenAiApiFailure(PROJECT_SPENDING_LIMIT_REACHED, false)
+        code in spendingLimitCodes -> OpenAiApiFailure(SPENDING_LIMIT_REACHED, false)
+        code in quotaCodes -> OpenAiApiFailure(QUOTA_EXHAUSTED, false)
+        code in authenticationCodes -> OpenAiApiFailure(AUTHENTICATION_FAILED, false)
+        code == "permission_denied" -> OpenAiApiFailure(PERMISSION_DENIED, false)
+        code in setOf("rate_limit_exceeded", "rate_limit_error", "slow_down") ->
+            OpenAiApiFailure(RATE_LIMITED, true)
+        code in setOf("server_error", "service_unavailable") -> OpenAiApiFailure(HTTP_SERVER_ERROR, true)
+        else -> null
     }
 
     /** Classifies only exception types; provider text and exception messages never escape. */

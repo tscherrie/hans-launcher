@@ -1,9 +1,7 @@
 package ai.hans.standard.phone.notifications
 
 import ai.hans.standard.notifications.AtomicFileNotificationTriageStorage
-import ai.hans.standard.notifications.CodexAppServerRestrictedNotificationTriageExecutor
-import ai.hans.standard.notifications.AndroidRootFreeNotificationEnrichmentFactory
-import ai.hans.standard.notifications.AndroidNotificationPersonalMemoryContextFactory
+import ai.hans.standard.notifications.RestrictedNotificationTriageExecutor
 import ai.hans.standard.notifications.HansNotificationExclusionPolicy
 import ai.hans.standard.notifications.NotificationIngressResult
 import ai.hans.standard.notifications.NotificationTriageIntegration
@@ -17,7 +15,6 @@ import ai.hans.standard.notifications.NotificationSupersessionKey
 import ai.hans.standard.phone.publicapi.ActiveNotificationReplyRegistry
 import ai.hans.standard.phone.notifications.facts.AndroidNotificationFactArchiveFactory
 import ai.hans.standard.phone.notifications.facts.NotificationFactRepository
-import ai.hans.standard.notifications.NotificationFactMemoryProjection
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import java.io.Closeable
@@ -49,11 +46,18 @@ class HansNotificationListenerService : NotificationListenerService() {
     private val captureEpochGate = NotificationListenerCaptureEpochGate()
     private val destroying = AtomicBoolean(false)
     private val validatedDeliveryOutputStoppedWhileQuarantined = AtomicBoolean(false)
+    private var nativeHooksActivated = false // Serialized listener worker / capture-privacy lease.
 
     override fun onCreate() {
         super.onCreate()
         destroying.set(false)
         captureEpochGate.beginEpoch()
+        (application as? ai.hans.standard.HansApplication)?.whatsAppAgentChannel?.attachAuthoritativeSource {
+            !destroying.get() && authoritativeSnapshotGate.isReady()
+        }
+        (application as? ai.hans.standard.HansApplication)?.notificationEvents?.attachAuthoritativeSource {
+            !destroying.get() && authoritativeSnapshotGate.isReady()
+        }
         privacyRepository = NotificationPrivacyRepository(applicationContext)
         privacyPurgeFence = AtomicNotificationPrivacyPurgeFence(applicationContext)
         // Construction is lazy: no database is opened on the Android main thread.
@@ -82,27 +86,12 @@ class HansNotificationListenerService : NotificationListenerService() {
         )
         triageRuntime = NotificationTriageRuntime(
             queue = triageQueue,
-            restrictedExecutor = CodexAppServerRestrictedNotificationTriageExecutor(
-                context = applicationContext,
-                contextProvider = NotificationTriageIntegration.contextProvider(),
-                enrichmentProvider = AndroidRootFreeNotificationEnrichmentFactory.create(
-                    context = applicationContext,
-                    inbox = inbox,
-                ),
-                personalMemoryContextProvider =
-                    AndroidNotificationPersonalMemoryContextFactory.create(
-                        applicationContext,
-                        additionalUnverifiedCandidateSource = NotificationFactMemoryProjection(factArchive)::candidates,
-                    ),
-            ),
-            suggestionSink = NotificationTriageIntegration.deliverySink(),
-            processingPermit = {
-                notificationProcessingPermitted(
-                    authoritativeSnapshotReady = authoritativeSnapshotGate.isReady(),
-                    interactiveIdle = NotificationTriageIntegration.isInteractiveIdle(),
-                    privacyPurgeRequired = privacyPurgeFence.isRequired(),
-                )
+            // Retain old durable stores for privacy/recovery only. No second model is started.
+            restrictedExecutor = RestrictedNotificationTriageExecutor {
+                error("legacy_notification_triage_disabled")
             },
+            suggestionSink = NotificationTriageIntegration.deliverySink(),
+            processingPermit = { false },
         )
         triageWakeupRegistration = NotificationTriageIntegration.attachRuntimeWakeup(
             triageRuntime::requestDrain,
@@ -120,18 +109,25 @@ class HansNotificationListenerService : NotificationListenerService() {
                     // the subsequent center purge then removes either outcome.
                     val queueCleared = triageQueue.clearAll()
                     val suggestionsCleared = NotificationTriageIntegration.clearValidatedSuggestions()
-                    return queueCleared && suggestionsCleared
+                    val hooksCleared = (application as? ai.hans.standard.HansApplication)
+                        ?.notificationEvents?.clearPrivateData() == true
+                    return queueCleared && suggestionsCleared && hooksCleared
                 }
 
                 override fun purgeExcluded(): Boolean {
                     triageRuntime.preemptCancelledWork()
                     refreshActiveReplyRegistryForPrivacy()
                     val queuePurged = runCatching { triageQueue.purgeExcluded() }.isSuccess
+                    val agentChannelCleared = if (privacyRepository.captureDecision("com.whatsapp") != NotificationCaptureDecision.Allowed) {
+                        (application as? ai.hans.standard.HansApplication)?.whatsAppAgentChannel?.clearPrivateData() != false
+                    } else true
                     // The validated store intentionally contains no package name, so a privacy
                     // exclusion conservatively clears every still-pending announcement.
                     val suggestionsCleared =
                         NotificationTriageIntegration.clearValidatedSuggestions()
-                    return queuePurged && suggestionsCleared
+                    val hooksPurged = (application as? ai.hans.standard.HansApplication)
+                        ?.notificationEvents?.purgeExcluded() == true
+                    return queuePurged && suggestionsCleared && agentChannelCleared && hooksPurged
                 }
             },
         )
@@ -275,6 +271,16 @@ class HansNotificationListenerService : NotificationListenerService() {
             enforceCaptureDecision(writeResult.decision)
             return
         }
+        if (writeResult is NotificationWriteResult.Stored || writeResult is NotificationWriteResult.Duplicate) {
+            captureEpochGate.mutateIfCurrent(captureLease) {
+                signal.snapshot.agentChannelSource?.let { source ->
+                    check((application as? ai.hans.standard.HansApplication)?.whatsAppAgentChannel?.accept(source) != false) {
+                        "notification_agent_handoff_not_persisted"
+                    }
+                }
+                Unit
+            }
+        }
         if (
             writeResult is NotificationWriteResult.Stored &&
             connectionBaseline.shouldQueueLiveWrite(writeResult)
@@ -295,6 +301,7 @@ class HansNotificationListenerService : NotificationListenerService() {
         beforeAccept: () -> Unit = {},
     ): NotificationWriteResult? {
         val accepted = captureEpochGate.mutateIfCurrent(captureLease) {
+            check(activateNativeNotificationHooks()) { "notification_hooks_activation_failed" }
             beforeAccept()
             runCatching { inbox.accept(signal) }
         } ?: return null
@@ -379,6 +386,7 @@ class HansNotificationListenerService : NotificationListenerService() {
                 check(ensureCapturePolicyAvailable()) {
                     "notification_capture_policy_unavailable"
                 }
+                check(activateNativeNotificationHooks()) { "notification_hooks_activation_failed" }
                 check(ensureNotificationDeliveryStateHealthyBeforeReady()) {
                     "notification_delivery_state_repair_failed"
                 }
@@ -433,12 +441,25 @@ class HansNotificationListenerService : NotificationListenerService() {
                         activeAndroidKeys = normalized.mapTo(mutableSetOf()) { it.androidKey },
                         observedAtEpochMillis = observedAt,
                     )
+                    // Reconcile a missed listener callback after process death. The durable channel
+                    // rejects pre-enrollment history and deduplicates already claimed requests.
+                    normalized.forEach { signal ->
+                        signal.snapshot.agentChannelSource?.let { source ->
+                            (application as? ai.hans.standard.HansApplication)?.whatsAppAgentChannel?.accept(
+                                source,
+                            )
+                        }
+                    }
                 } ?: error("notification_listener_capture_lease_expired")
                 check(drainDurableTriageOutbox()) {
                     "notification_triage_outbox_replay_failed"
                 }
             },
-            wake = triageRuntime::requestDrain,
+            wake = {
+                triageRuntime.requestDrain()
+                (application as? ai.hans.standard.HansApplication)?.whatsAppAgentChannel?.requestDrain()
+                (application as? ai.hans.standard.HansApplication)?.notificationEvents?.externalWake()
+            },
             beforeReady = {
                 captureEpochGate.isCurrent(captureLease) &&
                     !destroying.get() &&
@@ -508,20 +529,31 @@ class HansNotificationListenerService : NotificationListenerService() {
 
     /** Replays the SQLite-atomic Inbox -> Queue/Center handoff before READY can be published. */
     private fun drainDurableTriageOutbox(): Boolean {
+        val lease = captureEpochGate.currentLease() ?: return false
+        if (!activateNativeNotificationHooks()) return false
         repeat(MAX_TRIAGE_OUTBOX_DRAIN_BATCHES) {
             val outcome = drainNotificationOutboxBatch(
                 lock = NotificationPrivacyMutationCoordinator.lock,
                 pending = inbox::pendingTriageOutbox,
                 replay = { event ->
-                    replayDurableNotificationOutboxEvent(
-                        event = event,
-                        applyIngress = ::triageAfterInboxWriteUnlessDestroying,
-                        invalidate = ::invalidatePendingSuggestion,
-                        preempt = triageRuntime::preemptCancelledWork,
-                    )
+                    captureEpochGate.mutateIfCurrent(lease) {
+                        if (destroying.get()) false
+                        else if (privacyRepository.captureDecision(event.snapshot.packageName) != NotificationCaptureDecision.Allowed) true
+                        else {
+                            val app = application as? ai.hans.standard.HansApplication
+                                ?: return@mutateIfCurrent false
+                            replayNativeNotificationHookEvent(
+                                event,
+                                acceptAgentSource = app.whatsAppAgentChannel::accept,
+                                exclusivelyAdmittedAgentSource = app.whatsAppAgentChannel.channel::isExclusivelyAdmittedAgentSource,
+                                acceptHook = app.notificationEvents::accept,
+                                invalidate = ::invalidatePendingSuggestion,
+                            )
+                        }
+                    } == true
                 },
                 acknowledge = inbox::acknowledgeTriageOutbox,
-                onReplayed = triageRuntime::requestDrain,
+                onReplayed = { (application as? ai.hans.standard.HansApplication)?.notificationEvents?.requestDrain() },
             )
             when (outcome) {
                 OutboxDrainBatch.EMPTY -> return true
@@ -530,6 +562,14 @@ class HansNotificationListenerService : NotificationListenerService() {
             }
         }
         return inbox.pendingTriageOutbox(limit = 1).isEmpty()
+    }
+
+    private fun activateNativeNotificationHooks(): Boolean {
+        if (nativeHooksActivated) return true
+        val activated = (application as? ai.hans.standard.HansApplication)?.notificationEvents
+            ?.activateAfter(inbox.maxExistingSequence(), inbox::findEventForHookMigration) == true
+        if (activated) nativeHooksActivated = true
+        return activated
     }
 
     private fun capturePermittedOrQuarantine(notification: StatusBarNotification): Boolean =
@@ -657,11 +697,30 @@ internal fun drainNotificationOutboxBatch(
 }
 
 /** One idempotent crash-replay step; acknowledgement remains a separate durable store write. */
+internal fun replayNativeNotificationHookEvent(
+    event: NotificationInboxEvent,
+    acceptAgentSource: (ai.hans.standard.notifications.agentchannel.WhatsAppNotificationSource) -> Boolean,
+    exclusivelyAdmittedAgentSource: (ai.hans.standard.notifications.agentchannel.WhatsAppNotificationSource) -> Boolean,
+    acceptHook: (NotificationInboxEvent) -> Boolean,
+    invalidate: (String, String) -> Boolean,
+): Boolean {
+    if (event.kind == NotificationEventKind.REMOVED) {
+        // Removed sources revoke unsent work; never create new agent commands.
+        return acceptHook(event) && invalidate(event.snapshot.packageName, event.snapshot.androidKey)
+    }
+    event.snapshot.agentChannelSource?.let { source ->
+        if (!acceptAgentSource(source)) return false
+        if (exclusivelyAdmittedAgentSource(source)) return true
+    }
+    return acceptHook(event)
+}
+
 internal fun replayDurableNotificationOutboxEvent(
     event: NotificationInboxEvent,
     applyIngress: (NotificationSignal, NotificationWriteResult) -> NotificationIngressResult?,
     invalidate: (packageName: String, androidKey: String) -> Boolean,
     preempt: () -> Unit,
+    acceptAgentSource: (ai.hans.standard.notifications.agentchannel.WhatsAppNotificationSource) -> Boolean = { true },
 ): Boolean {
     val signal: NotificationSignal = if (event.kind == NotificationEventKind.REMOVED) {
         NotificationSignal.Removed(
@@ -672,6 +731,11 @@ internal fun replayDurableNotificationOutboxEvent(
         )
     } else {
         NotificationSignal.Upsert(event.snapshot, event.observedAtEpochMillis)
+    }
+    // Both durable consumers must accept before the shared SQLite outbox can be acknowledged.
+    // Core enrollment/timestamps/dedup still apply; removed notifications cannot create work.
+    if (signal is NotificationSignal.Upsert) {
+        event.snapshot.agentChannelSource?.let { if (!acceptAgentSource(it)) return false }
     }
     val result = applyIngress(
         signal,
@@ -696,13 +760,16 @@ internal class NotificationAuthoritativeSnapshotGate {
 
     private var generation = 0L
     private var readyGeneration: Long? = null
+    @Volatile private var publishedReady = false
 
-    @Synchronized
-    fun isReady(): Boolean = readyGeneration == generation
+    // Read-only dispatch probes must not acquire this monitor while holding privacy/host locks:
+    // commitReady deliberately invokes the publication callback under this generation monitor.
+    fun isReady(): Boolean = publishedReady
 
     /** Invalidates every reconcile that began before this exact unknown-state boundary. */
     @Synchronized
     fun quarantine() {
+        publishedReady = false
         generation = if (generation == Long.MAX_VALUE) 0L else generation + 1L
         readyGeneration = null
     }
@@ -717,6 +784,7 @@ internal class NotificationAuthoritativeSnapshotGate {
     @Synchronized
     fun markReady() {
         readyGeneration = generation
+        publishedReady = true
     }
 
     /**
@@ -733,12 +801,16 @@ internal class NotificationAuthoritativeSnapshotGate {
         if (!publishDownstreamReady()) return false
         if (lease.generation != generation) return false
         readyGeneration = generation
+        publishedReady = true
         return true
     }
 
     @Synchronized
     fun keepQuarantinedIfCurrent(lease: ReconciliationLease) {
-        if (lease.generation == generation) readyGeneration = null
+        if (lease.generation == generation) {
+            publishedReady = false
+            readyGeneration = null
+        }
     }
 }
 

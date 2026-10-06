@@ -13,6 +13,69 @@ import org.junit.Test
 
 class ActiveNotificationSnapshotSourceTest {
     @Test
+    fun readinessProbeDoesNotTakeGenerationMonitorWhileReadyPublicationIsBlocked() {
+        val gate = NotificationAuthoritativeSnapshotGate()
+        val lease = gate.beginReconciliation()
+        val publicationEntered = CountDownLatch(1)
+        val releasePublication = CountDownLatch(1)
+        val probeFinished = CountDownLatch(1)
+        val failure = AtomicReference<Throwable?>(null)
+        val probeValue = AtomicReference<Boolean>()
+        val committed = AtomicReference<Boolean>()
+        val publisher = Thread {
+            try {
+                committed.set(gate.commitReady(lease) {
+                    publicationEntered.countDown()
+                    check(releasePublication.await(3, TimeUnit.SECONDS))
+                    true
+                })
+            } catch (error: Throwable) { failure.set(error) }
+        }.apply { isDaemon = true }
+        val reader = Thread {
+            try {
+                // Models the host probing authority while holding its unrelated dispatch lock.
+                synchronized(Any()) { probeValue.set(gate.isReady()) }
+            } catch (error: Throwable) { failure.set(error) }
+            finally { probeFinished.countDown() }
+        }.apply { isDaemon = true }
+        publisher.start()
+        try {
+            assertTrue(publicationEntered.await(2, TimeUnit.SECONDS))
+            reader.start()
+            assertTrue("Readiness probe waited on the generation/publication monitor",
+                probeFinished.await(1, TimeUnit.SECONDS))
+            assertEquals(false, probeValue.get())
+        } finally {
+            releasePublication.countDown()
+            publisher.join(2_000)
+            reader.join(2_000)
+        }
+        assertNull(failure.get())
+        assertEquals(true, committed.get())
+        assertTrue(gate.isReady())
+        gate.quarantine()
+        assertFalse(gate.isReady())
+    }
+
+    @Test
+    fun lockFreePublicationRemainsGenerationBoundAfterQuarantineOrFailedCommit() {
+        val gate = NotificationAuthoritativeSnapshotGate()
+        val stale = gate.beginReconciliation()
+        gate.quarantine()
+        val current = gate.beginReconciliation()
+        assertFalse(gate.commitReady(current) { false })
+        assertFalse(gate.isReady())
+        assertTrue(gate.commitReady(current) { true })
+        gate.keepQuarantinedIfCurrent(stale)
+        assertTrue(gate.isReady())
+        gate.keepQuarantinedIfCurrent(current)
+        assertFalse(gate.isReady())
+        val interrupted = gate.beginReconciliation()
+        assertFalse(gate.commitReady(interrupted) { gate.quarantine(); true })
+        assertFalse(gate.isReady())
+    }
+
+    @Test
     fun transientRepairPreservesValidatedFactOutboxAndCapacityCounters() {
         var health = NotificationTriageQueueHealth.Available(
             recordCount = 3, factOutboxCount = 2, factOutboxCapacityDrops = 7,

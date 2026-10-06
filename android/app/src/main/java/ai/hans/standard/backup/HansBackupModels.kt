@@ -101,7 +101,7 @@ data class HansBackupImportPreview(
     val skillChoicesRequested: Int,
     /** Dispatch is staged separately because model/effort are effective only after App Server proof. */
     val dispatchSelectionWillBeStaged: Boolean,
-    val warnings: List<String>,
+    val warnings: List<HansBackupPreviewWarning>,
 ) {
     init {
         require(confirmationToken.matches(Regex("[A-Za-z0-9_-]{24,128}")))

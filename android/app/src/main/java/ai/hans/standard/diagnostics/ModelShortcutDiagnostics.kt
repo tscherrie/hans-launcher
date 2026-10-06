@@ -17,7 +17,8 @@ internal object ModelShortcutDiagnostics {
             "metaState" to modelKey?.metaState,
             "trigger" to modelKey?.trigger?.name,
             "scope" to "hans_foreground_only",
-            "lowPreset" to "gpt-5.6-luna/max",
+            "lowPreset" to "gpt-6-luna/max",
+            "lowPresetFallback" to "gpt-5.6-luna/max",
             "highPreset" to "gpt-6-astra/ultra",
         ))
     }

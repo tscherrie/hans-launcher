@@ -1,5 +1,11 @@
 package ai.hans.standard.ui
 
+import ai.hans.standard.R
+import ai.hans.standard.localization.HansTextResolver
+import ai.hans.standard.localization.AndroidHansTextResolver
+import ai.hans.standard.localization.rememberHansTextResolver
+import androidx.compose.ui.res.stringResource
+
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -32,6 +38,7 @@ import kotlinx.coroutines.withContext
 
 @Composable
 internal fun ThirdPartyNoticesScreen(onBack: () -> Unit, loaderOverride: ThirdPartyNoticesLoader? = null) {
+    val uiText = rememberHansTextResolver()
     val assets = LocalContext.current.applicationContext.assets
     val loader = remember(assets, loaderOverride) { loaderOverride ?: ThirdPartyNoticesLoader(assets::open) }
     var components by remember { mutableStateOf<List<ThirdPartyNoticeComponent>?>(null) }
@@ -54,21 +61,21 @@ internal fun ThirdPartyNoticesScreen(onBack: () -> Unit, loaderOverride: ThirdPa
     val back: () -> Unit = { if (selected != null) selected = null else onBack() }
     BackHandler(onBack = back)
     Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing).testTag("third_party_notices")) {
-        ScreenHeader(title = "Open-Source-Lizenzen", onBack = back)
-        Text("Originaltexte der enthaltenen Quellen. Diese Ansicht ist keine Aussage über eine vollständige Lizenzprüfung.",
+        ScreenHeader(title = stringResource(R.string.ui_open_source_licenses), onBack = back)
+        Text(stringResource(R.string.ui_original_texts_from_the_included_sources_this_vi_6ca068),
             modifier = Modifier.padding(16.dp), style = MaterialTheme.typography.bodySmall)
         if (failed) {
-            Text("Die Lizenztexte sind derzeit nicht verfügbar oder konnten nicht geprüft werden. Bitte zurückgehen und später erneut versuchen.",
+            Text(stringResource(R.string.ui_license_texts_are_currently_unavailable_or_could_be173f),
                 Modifier.padding(16.dp).testTag("third_party_notices_unavailable"))
         } else if (selected != null) {
             val text = content
-            if (text == null) Text("Lizenztext wird geladen …", Modifier.padding(16.dp))
+            if (text == null) Text(stringResource(R.string.ui_loading_license_text_8b5b30), Modifier.padding(16.dp))
             else SelectionContainer(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(16.dp)) {
                 Text(text, modifier = Modifier.testTag("third_party_notice_original"), style = MaterialTheme.typography.bodySmall)
             }
         } else {
             val list = components
-            if (list == null) Text("Lizenzübersicht wird geladen …", Modifier.padding(16.dp))
+            if (list == null) Text(stringResource(R.string.ui_loading_license_overview_2b99b4), Modifier.padding(16.dp))
             else LazyColumn(Modifier.weight(1f).testTag("third_party_notice_list")) {
                 items(list, key = { it.id }) { component ->
                     Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {

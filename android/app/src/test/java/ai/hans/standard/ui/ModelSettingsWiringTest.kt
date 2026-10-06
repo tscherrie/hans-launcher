@@ -1,6 +1,9 @@
 package ai.hans.standard.ui
 
+import ai.hans.standard.R
+import ai.hans.standard.localization.TestResourceTextResolver
 import java.io.File
+import java.util.Locale
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -37,6 +40,8 @@ class ModelSettingsWiringTest {
         assertTrue(preset.contains("HansModelPreset.ASTRA_ULTRA"))
         assertFalse(preset.contains("HansModelPreset.SOL_ULTRA"))
         assertTrue(preset.contains("requestSelection("))
+        assertTrue(preset.contains("resolveModelShortcutPreset(next, clientSnapshot?.models.orEmpty())"))
+        assertTrue(preset.contains("requireExactEffort = true"))
     }
 
     @Test
@@ -45,19 +50,58 @@ class ModelSettingsWiringTest {
             .substringBefore("val attachments = localUi.attachments")
         assertTrue(source.contains("snapshot?.pendingSettingsSelection != null"))
         assertTrue(source.contains("snapshot.sessionPhase != ClientSessionPhase.BUSY"))
-        assertTrue(source.contains("Bitte gleich erneut senden."))
+        assertTrue(source.contains(
+            "showShortMessage(tr(R.string.integration_the_model_selection_is_still_being_confirmed_please_sen_663a0ad))",
+        ))
+        assertEquals("Die Modellauswahl wird noch bestätigt. Bitte gleich erneut senden.",
+            TestResourceTextResolver(Locale.GERMAN).text(
+                R.string.integration_the_model_selection_is_still_being_confirmed_please_sen_663a0ad))
+        assertEquals("The model selection is still being confirmed. Please send again shortly.",
+            TestResourceTextResolver(Locale.ENGLISH).text(
+                R.string.integration_the_model_selection_is_still_being_confirmed_please_sen_663a0ad))
         assertFalse(source.contains("sessionHost.dispatch("))
         assertFalse(source.contains("localUi.copy("))
-        assertFalse(source.contains("Prüfe den Chat"))
+        assertFalse(source.contains("R.string.integration_the_message_could_not_be_confirmed_the_draft_is_preserv_873e84b"))
     }
 
     @Test
-    fun confirmationNoticePrecedesModelControlsAndRuntimeUpdater() {
+    fun confirmationNoticePrecedesModelEffortAndSpeedControlsWithoutUnrelatedUpdates() {
         val source = source("ui/SettingsScreen.kt").substringAfter("private fun RuntimeSettings(")
-            .substringBefore("private fun SpeechSettings(")
+            .substringBefore("private fun UpdateSettings(")
         assertEquals(1, Regex("testTag\\(\"runtime_notice\"\\)").findAll(source).count())
-        assertTrue(source.indexOf("testTag(\"runtime_notice\")") < source.indexOf("SettingsSection(title = \"Modell\")"))
+        val notice = source.indexOf("testTag(\"runtime_notice\")")
+        val models = source.indexOf("SettingsSection(title = uiText.text(R.string.ui_model_ff461e))")
+        val efforts = source.indexOf("SettingsSection(title = uiText.text(R.string.ui_reasoning_effort_cd8569))")
+        val speed = source.indexOf("SettingsSection(title = uiText.text(R.string.ui_response_speed_3ec789))")
+        assertTrue("Each notice/model-control section must exist", listOf(notice, models, efforts, speed).all { it >= 0 })
+        assertTrue("Confirmation notice must precede model, effort and speed controls",
+            notice < models && models < efforts && efforts < speed)
+        assertFalse("Updating Hans is not a runtime-selection setting", source.contains("testTag(\"codex_update\")"))
+        assertFalse(source.contains("UpdateSettings(state, callbacks)"))
+        assertEquals("Modell", TestResourceTextResolver(Locale.GERMAN).text(R.string.ui_model_ff461e))
+        assertEquals("Model", TestResourceTextResolver(Locale.ENGLISH).text(R.string.ui_model_ff461e))
         assertFalse(source.contains("Die Markierung ändert sich erst"))
+    }
+
+    @Test
+    fun systemOwnsTheUpdateActionAndStillShowsOnlyConfirmedRuntimeReadiness() {
+        val screen = source("ui/SettingsScreen.kt")
+        val updates = screen.substringAfter("private fun UpdateSettings(")
+            .substringBefore("private fun SpeechSettings(")
+        val system = screen.substringAfter("private fun SystemSettings(")
+            .substringBefore("private fun privateSpaceSettingsDescription(")
+        assertEquals(1, Regex("testTag\\(\"codex_update\"\\)").findAll(updates).count())
+        assertTrue(updates.contains("onClick = callbacks.onUpdateCodex"))
+        assertTrue(updates.contains("state.codexUpdate.runtimeReady"))
+        assertTrue(updates.contains("testTag(\"codex_runtime_state\")"))
+        assertTrue(updates.contains("state.codexUpdate.bundledRuntimeVersion"))
+        assertTrue(updates.contains("testTag(\"hans_app_version\")"))
+        val update = system.indexOf("UpdateSettings(state, callbacks)")
+        val backup = system.indexOf("SettingsSection(title = uiText.text(R.string.ui_backup_07ad3e))")
+        assertTrue("System puts updates before its backup controls", update >= 0 && backup > update)
+        assertFalse(system.contains("RuntimeSettings(state, callbacks)"))
+        assertEquals("Hans aktualisieren", TestResourceTextResolver(Locale.GERMAN).text(R.string.ui_update_codex_62b143))
+        assertEquals("Update Hans", TestResourceTextResolver(Locale.ENGLISH).text(R.string.ui_update_codex_62b143))
     }
 
     private fun source(path: String): String = sequenceOf(

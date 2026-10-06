@@ -29,6 +29,35 @@ class AndroidHansSetupFreshProbeTest {
     private val probe = AndroidHansSetupFreshProbe(context)
 
     @Test
+    fun voiceHelpFollowsEffectiveActionKeyWithoutRewritingLegacyHoldPreference() {
+        withIsolatedPolicyContext { isolated, _ ->
+            val localProbe = AndroidHansSetupFreshProbe(isolated)
+            val store = ai.hans.standard.phone.keys.ActionKeyMappingPreferencesStore(isolated)
+            assertEquals(null, localProbe.configuredInputChoice())
+            assertEquals(isolated.getString(ai.hans.standard.R.string.voice_setup_short_task_screen),
+                localProbe.voiceUsageInstructions().first())
+            val legacy = ai.hans.standard.phone.keys.ActionKeyMapping(
+                "setup_voice_key", ai.hans.standard.phone.keys.PhysicalKeyDeviceSelector(1, 1, "a".repeat(64)),
+                android.view.InputDevice.SOURCE_KEYBOARD, 42, android.view.KeyEvent.KEYCODE_F1, 0,
+                ai.hans.standard.phone.keys.ActionKeyTrigger.HOLD_TO_TALK,
+                ai.hans.standard.phone.keys.KeySemanticAction.DICTATION,
+            )
+            store.save(legacy)
+            val before = store.read().mappings
+            assertEquals(listOf(legacy), before)
+            assertEquals(HansSetupInputChoice.HARDWARE_TOGGLE, localProbe.configuredInputChoice())
+            val help = localProbe.voiceUsageInstructions()
+            assertEquals(isolated.getString(ai.hans.standard.R.string.voice_setup_short_task_hardware), help[0])
+            assertEquals(isolated.getString(ai.hans.standard.R.string.voice_setup_phone), help[1])
+            assertEquals(isolated.getString(ai.hans.standard.R.string.voice_setup_optional_practice), help[2])
+            val after = store.read().mappings
+            assertEquals(before, after)
+            assertEquals(ai.hans.standard.phone.keys.ActionKeyTrigger.HOLD_TO_TALK,
+                after.single().trigger)
+        }
+    }
+
+    @Test
     fun runtimePolicyProjectionUsesTrustedInjectionWithoutGrantingAndroidAccessOrCreatingABundle() {
         listOf(
             null to emptySet(), // The real Runtime constructor's fallback must stay CONFIRM_ACTIONS.

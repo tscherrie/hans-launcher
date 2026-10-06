@@ -1,5 +1,8 @@
 package ai.hans.standard.diagnostics.memory
 
+import ai.hans.standard.R
+import ai.hans.standard.localization.HansTextResolver
+
 import ai.hans.standard.notifications.isStrictNotificationJsonObject
 import org.json.JSONArray
 import org.json.JSONObject
@@ -87,28 +90,37 @@ internal object NativeMemoryHealthWire {
 }
 
 internal object NativeMemoryHealthPresentation {
-    const val DISCLOSURE = "Nur Statusdaten des nativen Codex-Gedächtnisses, keine Erinnerungsinhalte. Erzeugte Einträge oder registrierte Nutzungen beweisen nicht, dass jede Antwort Erinnerungen verwendet. Das Benachrichtigungsarchiv ist davon getrennt."
-    fun describe(result: NativeMemoryHealthResult): String = when (result) {
+    fun disclosure(text: HansTextResolver): String = text.text(R.string.integration_memory_disclosure)
+    fun describe(result: NativeMemoryHealthResult, text: HansTextResolver): String = when (result) {
         is NativeMemoryHealthResult.Unavailable -> when (result.reason) {
-            NativeMemoryUnavailableReason.CONFIGURATION_UNRESOLVED -> "Codex ist noch nicht bereit oder der Speicherort ist noch nicht bestätigt. Bitte später aktualisieren."
-            NativeMemoryUnavailableReason.MISSING -> "Noch keine Gedächtnisdatenbank vorhanden. Das allein bedeutet nicht, dass das Gedächtnis deaktiviert ist."
-            NativeMemoryUnavailableReason.BUSY -> "Der Gedächtnisstatus ist gerade beschäftigt. Bitte später aktualisieren."
-            NativeMemoryUnavailableReason.CORRUPT -> "Die Gedächtnisdatenbank konnte nicht sicher gelesen werden. Es wurde nichts repariert oder gelöscht."
-            NativeMemoryUnavailableReason.TOO_LARGE -> "Die Statusprüfung überschreitet ihre sichere Größenbegrenzung."
-            NativeMemoryUnavailableReason.UNSAFE_PATH -> "Der bestätigte Speicherort konnte nicht sicher geprüft werden."
-            NativeMemoryUnavailableReason.MAIN_THREAD, NativeMemoryUnavailableReason.IO -> "Der Gedächtnisstatus ist derzeit nicht erreichbar. Bitte später aktualisieren."
+            NativeMemoryUnavailableReason.CONFIGURATION_UNRESOLVED -> text.text(R.string.integration_memory_unconfirmed)
+            NativeMemoryUnavailableReason.MISSING -> text.text(R.string.integration_memory_missing)
+            NativeMemoryUnavailableReason.BUSY -> text.text(R.string.integration_memory_busy)
+            NativeMemoryUnavailableReason.CORRUPT -> text.text(R.string.integration_memory_corrupt)
+            NativeMemoryUnavailableReason.TOO_LARGE -> text.text(R.string.integration_memory_large)
+            NativeMemoryUnavailableReason.UNSAFE_PATH -> text.text(R.string.integration_memory_path)
+            NativeMemoryUnavailableReason.MAIN_THREAD, NativeMemoryUnavailableReason.IO -> text.text(R.string.integration_memory_unreachable)
         }
-        is NativeMemoryHealthResult.Unsupported -> "Für diese Codex-Version oder dieses Datenformat ist noch keine sichere Statusprüfung verfügbar."
+        is NativeMemoryHealthResult.Unsupported -> text.text(R.string.integration_memory_unsupported)
         is NativeMemoryHealthResult.Available -> with(result.snapshot) {
             buildString {
-                append("Extrahierte Einträge: $stage1Count\nFür Konsolidierung ausgewählt: $selectedCount\nRegistrierte Nutzungen: $totalUsageCount")
-                append("\nZuletzt erzeugt: ${time(lastGeneratedAtSeconds)}\nZuletzt genutzt: ${time(lastUsedAtSeconds)}")
+                append(text.text(R.string.integration_memory_counts, stage1Count, selectedCount, totalUsageCount))
+                append(text.text(R.string.integration_memory_times, time(lastGeneratedAtSeconds, text), time(lastUsedAtSeconds, text)))
                 jobs.forEach { job ->
-                    append("\n\n${if (job.kind == NativeMemoryJobKind.EXTRACTION) "Extraktion" else "Konsolidierung"}: ${when(job.status) { NativeMemoryJobStatus.PENDING -> "wartend"; NativeMemoryJobStatus.RUNNING -> "laufend"; NativeMemoryJobStatus.DONE -> "abgeschlossen"; NativeMemoryJobStatus.ERROR -> "Fehler" }} (${job.count})")
-                    append("\nLetzter Start: ${time(job.lastStartedAtSeconds)}\nLetzter Abschluss: ${time(job.lastFinishedAtSeconds)}")
+                    val kind = if (job.kind == NativeMemoryJobKind.EXTRACTION) text.text(R.string.integration_memory_extraction) else text.text(R.string.integration_memory_consolidation)
+                    val status = when(job.status) {
+                        NativeMemoryJobStatus.PENDING -> text.text(R.string.integration_memory_pending)
+                        NativeMemoryJobStatus.RUNNING -> text.text(R.string.integration_memory_running)
+                        NativeMemoryJobStatus.DONE -> text.text(R.string.integration_memory_done)
+                        NativeMemoryJobStatus.ERROR -> text.text(R.string.integration_memory_error)
+                    }
+                    append(text.text(R.string.integration_memory_job, kind, status, job.count))
+                    append(text.text(R.string.integration_memory_job_times, time(job.lastStartedAtSeconds, text), time(job.lastFinishedAtSeconds, text)))
                 }
             }
         }
     }
-    private fun time(seconds: Long?): String = seconds?.let { runCatching { Instant.ofEpochSecond(it).toString() }.getOrDefault("Zeitwert nicht darstellbar") } ?: "noch nicht belegt"
+    private fun time(seconds: Long?, text: HansTextResolver): String = seconds?.let {
+        runCatching { Instant.ofEpochSecond(it).toString() }.getOrElse { text.text(R.string.integration_memory_invalid_time) }
+    } ?: text.text(R.string.integration_memory_no_evidence)
 }

@@ -27,6 +27,80 @@ class LiveVoiceAudioActivityMeterTest {
     }
 
     @Test
+    fun continuousDictationAcceptsImmediateLongSpeechWithoutFarewellTailFailure() {
+        val harness = Harness(LiveVoiceAudioDirection.INPUT, requireInitialInputQuiet = false)
+        assertTrue(harness.frames(4_000, 3).isEmpty())
+        assertTrue(harness.frames(4_000, 1).single().speechActive)
+        val longSpeech = harness.frames(4_000, 1_000)
+        assertEquals(40, longSpeech.size)
+        assertTrue(longSpeech.all { it.reliable && it.speechActive })
+        assertFalse(harness.frames(0, 30).single().speechActive)
+        assertTrue(harness.frames(0, 100).all { it.reliable && !it.speechActive })
+    }
+
+    @Test
+    fun continuousInputResetStillAcceptsSpeechWithoutRequiringAnInitialQuietPeriod() {
+        val harness = Harness(LiveVoiceAudioDirection.INPUT, requireInitialInputQuiet = false)
+        harness.frames(4_000, 100)
+        harness.meter.reset()
+        assertTrue(harness.frames(4_000, 4).single().speechActive)
+        harness.advance(1_000_000_000L)
+        assertFalse(harness.frames(0, 1).single().reliable) // Gap protection remains unchanged.
+    }
+
+    @Test
+    fun continuousInputGapInvalidatesOldEvidenceThenRequiresEntirelyFreshQuietFrames() {
+        val harness = Harness(LiveVoiceAudioDirection.INPUT,
+            requireInitialInputQuiet = false, recoverAfterUnreliable = true)
+        assertTrue(harness.frames(4_000, 4).single().speechActive)
+        assertTrue(harness.frames(0, 20).isEmpty())
+        harness.advance(1_000_000_000L)
+        assertFalse(harness.frames(0, 1).single().reliable)
+        assertTrue(harness.frames(0, 29).isEmpty()) // Old 200ms plus gap cannot count as quiet.
+        val quiet = harness.frames(0, 1).single()
+        assertTrue(quiet.reliable)
+        assertFalse(quiet.speechActive)
+        assertTrue(harness.frames(4_000, 4).single().speechActive)
+    }
+
+    @Test
+    fun continuousOutputGapNeedsNewSustainedPcmAttackAndNewQuietAfterwards() {
+        val harness = Harness(LiveVoiceAudioDirection.OUTPUT, recoverAfterUnreliable = true)
+        assertTrue(harness.frames(1_000, 4).single().speechActive)
+        harness.advance(500_000_000L)
+        assertFalse(harness.frames(1_000, 1).single().reliable)
+        assertTrue(harness.frames(1_000, 3).isEmpty()) // The gap boundary frame proves no attack.
+        val newSpeech = harness.frames(1_000, 1).single()
+        assertTrue(newSpeech.reliable && newSpeech.speechActive)
+        assertTrue(harness.frames(0, 29).isEmpty())
+        val quiet = harness.frames(0, 1).single()
+        assertTrue(quiet.reliable && !quiet.speechActive)
+    }
+
+    @Test
+    fun continuousRecoveryDoesNotFloodUnsupportedFramesOrTreatThemAsSilence() {
+        val harness = Harness(LiveVoiceAudioDirection.OUTPUT, recoverAfterUnreliable = true)
+        assertFalse(harness.observe(pcm(0), format = 4)!!.reliable)
+        repeat(100) { assertNull(harness.observe(pcm(0), format = 4)) }
+        assertTrue(harness.frames(0, 29).isEmpty())
+        assertTrue(harness.frames(0, 1).single().reliable)
+    }
+
+    @Test
+    fun continuousRecoveryCannotRestartFromOldOrDuplicateTimestamps() {
+        val meter = LiveVoiceAudioActivityMeter(LiveVoiceAudioDirection.OUTPUT,
+            recoverAfterUnreliable = true)
+        assertNull(meter.observe(pcm(1_000), 2, 1, 16_000, 20_000_000L))
+        assertFalse(meter.observe(pcm(1_000), 2, 1, 16_000, 10_000_000L)!!.reliable)
+        assertNull(meter.observe(pcm(1_000), 2, 1, 16_000, 20_000_000L))
+        listOf(30L, 40L, 50L).forEach { millis ->
+            assertNull(meter.observe(pcm(1_000), 2, 1, 16_000, millis * 1_000_000L))
+        }
+        val speech = meter.observe(pcm(1_000), 2, 1, 16_000, 60_000_000L)!!
+        assertTrue(speech.reliable && speech.speechActive)
+    }
+
+    @Test
     fun userContinuationCannotBeHiddenBehindInitialFarewellTail() {
         val harness = Harness(LiveVoiceAudioDirection.INPUT)
         assertTrue(harness.frames(4_000, 19).isEmpty())
@@ -151,8 +225,9 @@ class LiveVoiceAudioActivityMeterTest {
         assertTrue(harness.observe(pcm(-32_768, samples = 320), channels = 2)!!.speechActive)
     }
 
-    private class Harness(direction: LiveVoiceAudioDirection) {
-        val meter = LiveVoiceAudioActivityMeter(direction)
+    private class Harness(direction: LiveVoiceAudioDirection, requireInitialInputQuiet: Boolean = true,
+        recoverAfterUnreliable: Boolean = false) {
+        val meter = LiveVoiceAudioActivityMeter(direction, requireInitialInputQuiet, recoverAfterUnreliable)
         private var now = 1_000_000_000L
 
         fun frames(level: Int, count: Int): List<LiveVoiceAudioActivity> =

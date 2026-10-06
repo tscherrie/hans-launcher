@@ -3,13 +3,13 @@ package ai.hans.standard.codex
 import org.json.JSONObject
 
 object CodexProtocolContract {
-    const val APP_SERVER_VERSION = "0.154.0"
+    const val APP_SERVER_VERSION = "0.155.0"
     const val SCHEMA_GENERATION_MODE = "v2"
     const val APP_LIST_UPDATED_NOTIFICATION = "app/list/updated"
 }
 
 /**
- * The subset of the Codex App Server 0.154.0 v2 protocol owned by Hans.
+ * The subset of the Codex App Server 0.155.0 v2 protocol owned by Hans.
  *
  * App Server uses JSON-RPC request/response semantics but intentionally omits
  * the `jsonrpc` member on the wire. Keeping the method set closed makes an
@@ -23,9 +23,11 @@ enum class AppServerMethod(val wireName: String) {
     MODEL_LIST("model/list"),
     THREAD_START("thread/start"),
     THREAD_RESUME("thread/resume"),
+    THREAD_READ("thread/read"),
     THREAD_SETTINGS_UPDATE("thread/settings/update"),
     THREAD_MEMORY_MODE_SET("thread/memoryMode/set"),
     THREAD_LIST("thread/list"),
+    THREAD_TURNS_LIST("thread/turns/list"),
     TURN_START("turn/start"),
     TURN_STEER("turn/steer"),
     TURN_INTERRUPT("turn/interrupt"),
@@ -79,6 +81,9 @@ internal sealed interface RequestContext {
         }
     }
 
+    /** Only for the just-created personal thread, never general history hydration. */
+    data class ThreadMaterialize(val threadId: String) : RequestContext
+
     data class ModelList(
         val requestedCursor: String?,
     ) : RequestContext
@@ -94,6 +99,9 @@ internal sealed interface RequestContext {
         val threadId: String,
         val requestedOptions: DispatchOptions,
     ) : RequestContext
+
+    /** Native external tool data preserves thread defaults and must not claim model proof. */
+    data class NotificationToolOutputTurn(val threadId: String) : RequestContext
 
     data class TurnSteer(
         val threadId: String,
@@ -148,6 +156,7 @@ class UnsupportedProtocolValueException(message: String) : ProtocolException(mes
 object ProtocolLimits {
     const val MAX_OUTBOUND_FRAME_BYTES = 4 * 1024 * 1024
     const val MAX_INBOUND_FRAME_BYTES = 8 * 1024 * 1024
+    const val MAX_FRESH_THREAD_RECEIPT_BYTES = 64 * 1024
     const val MAX_EVENT_FRAME_BYTES = 8 * 1024 * 1024
     const val MAX_INPUT_TEXT_BYTES = 1024 * 1024
     const val MAX_STRING_BYTES = 2 * 1024 * 1024

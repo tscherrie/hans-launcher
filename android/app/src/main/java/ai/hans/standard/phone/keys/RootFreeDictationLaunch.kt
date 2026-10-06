@@ -120,7 +120,11 @@ object RootFreeDictationLaunchCoordinator {
 
     @Synchronized
     fun requestToggleFromBackground(context: Context): Boolean {
-        if (isRecordingActive() || gate.hasPending(SystemClock.elapsedRealtime())) {
+        if (isRecordingActive()) {
+            if (HansDictationRuntime.snapshotUi().phase == DictationUiPhase.FINALIZING) return true
+            return requestStop(context)
+        }
+        if (gate.hasPending(SystemClock.elapsedRealtime())) {
             return requestStop(context)
         }
         val launch = prepareStart(context) ?: return true

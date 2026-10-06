@@ -190,6 +190,7 @@ class WorkUtilityDynamicToolExecutor(
         }
         if (!scheduled) gate.complete(failureResult(call, "work_executor_rejected"))
         return object : DynamicToolExecutionHandle {
+            override fun onQuiescent(listener: () -> Unit): Boolean = gate.onQuiescent(listener)
             override fun cancel(): DynamicToolCancellationDisposition {
                 runCatching { httpCall.get()?.cancel() }
                 return gate.cancel()

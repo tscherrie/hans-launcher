@@ -362,7 +362,7 @@ class DisplayMotionUiTest {
         lateinit var fixture: Fixture
         compose.runOnUiThread { fixture = Fixture(mode, working, observerRegistrationFails) }
         compose.mainClock.autoAdvance = false
-        compose.setContent {
+        compose.setGermanContent {
             compositionView = LocalView.current
             CompositionLocalProvider(
                 LocalSystemAnimationSource provides fixture.source,

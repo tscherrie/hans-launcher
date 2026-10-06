@@ -144,8 +144,9 @@ class AndroidGlobalActionKeyAccessibilityController(
 
     private fun applyEffectiveMappings() {
         val evidence = vendorActionRemediation.probe()
+        val voiceMappings = latestMappings.forTaskVoiceControls()
         var gate = Mp01VendorActionConflictResolver.gate(
-            mappings = latestMappings,
+            mappings = voiceMappings,
             vendorEvidence = evidence,
             confirmation = vendorActionConfirmation.confirmation(),
         )
@@ -153,7 +154,7 @@ class AndroidGlobalActionKeyAccessibilityController(
             vendorActionConfirmation.synchronize(gate.conflict?.mappings.orEmpty(), evidence)
         }.onSuccess {
             gate = Mp01VendorActionConflictResolver.gate(
-                mappings = latestMappings,
+                mappings = voiceMappings,
                 vendorEvidence = evidence,
                 confirmation = vendorActionConfirmation.confirmation(),
             )

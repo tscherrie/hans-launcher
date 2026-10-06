@@ -2,11 +2,12 @@ package ai.hans.standard.integration
 
 import android.content.Context
 import android.content.SharedPreferences
-import java.io.File
+import ai.hans.standard.workspace.HansDesktopProject
 import java.util.Collections
 import java.util.WeakHashMap
 import org.json.JSONArray
 import org.json.JSONObject
+import org.json.JSONTokener
 
 class AppPrivateCodexSessionStore internal constructor(
     private val preferences: SharedPreferences,
@@ -45,6 +46,67 @@ class AppPrivateCodexSessionStore internal constructor(
                 )
             }
         }
+    }
+
+    /** Explicit user recovery only: retain the old reference without changing any input receipts. */
+    @Synchronized
+    fun preserveSelectedThreadForExplicitRecovery(expectedThreadId: String): Boolean =
+        withDurablePreferences {
+            if (!isValidThreadId(expectedThreadId) ||
+                preferences.getString(KEY_THREAD_ID, null) != expectedThreadId
+            ) return@withDurablePreferences false
+
+            val preserved = readExplicitRecoveryThreadIds() ?: return@withDurablePreferences false
+            val alreadyPreserved = expectedThreadId in preserved
+            if (!alreadyPreserved && preserved.size >= MAX_EXPLICIT_RECOVERY_THREADS) {
+                return@withDurablePreferences false
+            }
+            val editor = preferences.edit().remove(KEY_THREAD_ID)
+            if (!alreadyPreserved) {
+                editor.putString(
+                    KEY_EXPLICIT_RECOVERY_THREAD_IDS,
+                    JSONArray(preserved + expectedThreadId).toString(),
+                )
+            }
+            commit(editor)
+            true
+        }
+
+    /** Parse only a bounded string array; never discard a malformed preservation journal. */
+    private fun readExplicitRecoveryThreadIds(): List<String>? = try {
+        val raw = preferences.getString(KEY_EXPLICIT_RECOVERY_THREAD_IDS, null)
+        if (raw == null) {
+            if (preferences.contains(KEY_EXPLICIT_RECOVERY_THREAD_IDS)) null else emptyList()
+        } else if (raw.length > MAX_EXPLICIT_RECOVERY_JSON_CHARACTERS) {
+            null
+        } else {
+            // Parse strings directly instead of a recursive JSONArray: corrupted nesting must
+            // not overflow the stack before the reference-count/type checks can reject it.
+            require(raw.none { it.isISOControl() && it !in "\t\n\r" })
+            val tokens = JSONTokener(raw)
+            require(tokens.nextClean() == '[')
+            val result = mutableListOf<String>()
+            if (tokens.nextClean() != ']') {
+                tokens.back()
+                while (true) {
+                    require(result.size < MAX_EXPLICIT_RECOVERY_THREADS)
+                    require(tokens.nextClean() == '"')
+                    val id = tokens.nextString('"')
+                    require(isValidThreadId(id) && id !in result)
+                    result += id
+                    when (tokens.nextClean()) {
+                        ']' -> break
+                        ',' -> Unit
+                        else -> error("Invalid preserved thread reference array")
+                    }
+                }
+            }
+            require(tokens.nextClean() == '\u0000')
+            require(!tokens.more())
+            result
+        }
+    } catch (_: Exception) {
+        null
     }
 
     @Synchronized
@@ -177,17 +239,18 @@ class AppPrivateCodexSessionStore internal constructor(
         const val PREFERENCES_NAME = "hans_codex_session_v1"
         const val KEY_THREAD_ID = "thread_id"
         const val KEY_VISIBLE_INPUT_RECEIPTS = "visible_input_receipts"
-        const val WORKSPACE_DIRECTORY = "codex-workspace"
+        const val KEY_EXPLICIT_RECOVERY_THREAD_IDS = "explicit_recovery_thread_ids"
         const val MAX_THREAD_ID_CHARACTERS = 256
+        const val MAX_EXPLICIT_RECOVERY_THREADS = 64
+        // Includes worst-case JSON escaping of every character in all 64 thread references.
+        const val MAX_EXPLICIT_RECOVERY_JSON_CHARACTERS =
+            MAX_EXPLICIT_RECOVERY_THREADS * (MAX_THREAD_ID_CHARACTERS * 6 + 3) + 2
         const val MAX_VISIBLE_INPUT_RECEIPTS = 128
         const val VISIBLE_INPUT_RECEIPT_VERSION = 1
         val failedPreferences: MutableSet<SharedPreferences> =
             Collections.newSetFromMap(WeakHashMap<SharedPreferences, Boolean>())
 
-        fun workspacePath(context: Context): String = File(context.filesDir, WORKSPACE_DIRECTORY).also {
-            check((it.isDirectory || it.mkdirs()) && it.isDirectory) {
-                "Could not create app-private Codex workspace"
-            }
-        }.canonicalPath
+        fun workspacePath(context: Context): String =
+            HansDesktopProject.ensure(context.filesDir).canonicalPath
     }
 }

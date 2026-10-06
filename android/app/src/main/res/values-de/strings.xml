@@ -1,0 +1,16 @@
+<resources>
+    <string name="dictation_continuous_active">Diktat ist aktiv</string>
+    <string name="dictation_microphone_muted">Mikrofon stumm</string>
+    <string name="dictation_voice_finish_unconfirmed">Der Sprachabschluss konnte nicht bestätigt werden. Prüfe das Ergebnis im Chat, bevor du den Auftrag wiederholst.</string>
+    <string name="dictation_work_completion_unconfirmed">Es konnte nicht bestätigt werden, ob Codex den Auftrag beendet hat. Prüfe den Chat, bevor du den Auftrag wiederholst.</string>
+    <string name="notification_listener_label">Hans Benachrichtigungszugriff</string>
+    <string name="runtime_bind_failed">Runtime konnte nicht verbunden werden.</string>
+    <string name="runtime_binding_died">Runtime wurde unerwartet beendet.</string>
+    <string name="runtime_not_connected">Runtime ist noch nicht verbunden.</string>
+    <string name="backup_recovery_title">Hans – Wiederherstellung erforderlich</string>
+    <string name="backup_recovery_message">Hans konnte einen unterbrochenen Sicherungsimport noch nicht sicher wiederherstellen. Automationen und weitere Importe bleiben gesperrt. Die Sicherung wurde nicht gelöscht. Du kannst Android weiter verwenden oder die Wiederherstellung erneut prüfen.</string>
+    <string name="backup_recovery_retry">Wiederherstellung erneut prüfen</string>
+    <string name="backup_recovery_android_settings">Android-Einstellungen</string>
+    <string name="backup_recovery_home_settings">Anderen Standard-Launcher wählen</string>
+    <string name="codex_read_aloud_failed">Hans konnte diese Antwort nicht vollständig vorlesen. Sie bleibt im Chat; sie wird nicht automatisch wiederholt.</string>
+</resources>

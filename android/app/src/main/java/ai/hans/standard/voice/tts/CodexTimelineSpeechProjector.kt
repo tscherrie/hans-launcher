@@ -1,8 +1,11 @@
 package ai.hans.standard.voice.tts
 
+import ai.hans.standard.localization.HansTextResolver
+
 import ai.hans.standard.codex.AgentMessagePhase
 import ai.hans.standard.integration.ClientSessionPhase
 import ai.hans.standard.integration.ClientTimelineRole
+import ai.hans.standard.integration.ClientTimelineItem
 import ai.hans.standard.integration.CodexClientSnapshot
 import ai.hans.standard.setup.HansSetupOutputSanitizer
 import ai.hans.standard.text.AssistantMarkdown
@@ -15,6 +18,7 @@ import java.util.LinkedHashMap
  */
 class CodexTimelineSpeechProjector(
     private val maxTrackedIds: Int = DEFAULT_MAX_TRACKED_IDS,
+    private val text: HansTextResolver,
 ) {
     private val revisions = LinkedHashMap<String, Long>()
     private var baselineEstablished = false
@@ -67,6 +71,7 @@ class CodexTimelineSpeechProjector(
                     HansSetupOutputSanitizer.sanitizeAssistantText(
                         item.text,
                         item.turnId != null && item.turnId in snapshot.setupTurnIds,
+                        text,
                     ),
                     complete = item.complete,
                 ).spokenText,

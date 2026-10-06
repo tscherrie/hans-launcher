@@ -22,6 +22,16 @@ import org.junit.Test
 
 class HansBackupDocumentCodecTest {
     @Test
+    fun `Codex voice survives portable backup independently from API and speech voices`() {
+        val input = payload().let { it.copy(settings = it.settings.copy(codexLiveVoice = "ember")) }
+        val restored = HansBackupDocumentCodec.decode(HansBackupDocumentCodec.encode(input, 1L)).payload
+        assertEquals(input, restored)
+        assertEquals("ember", restored.settings.codexLiveVoice)
+        assertEquals("willow", restored.settings.liveVoice)
+        assertEquals("nova", restored.settings.voice)
+    }
+
+    @Test
     fun `round trip contains only portable state`() {
         val payload = payload()
 

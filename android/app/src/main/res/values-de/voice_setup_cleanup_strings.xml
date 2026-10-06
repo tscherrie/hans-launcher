@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="voice_setup_short_task_hardware">Zum Diktieren drücke die Aktionstaste einmal und sprich sofort los. Erneutes Drücken beendet die Aufnahme. Hans transkribiert sie und sendet den fertigen Text an deine aktuelle Aufgabe.</string>
+    <string name="voice_setup_short_task_screen">Zum Diktieren tippe auf das Mikrofon und sprich sofort los. Erneutes Tippen beendet die Aufnahme. Hans transkribiert sie und sendet den fertigen Text an deine aktuelle Aufgabe. Das Bildschirmmikrofon erscheint nur, wenn keine physische Aktionstaste zugewiesen ist.</string>
+    <string name="voice_setup_phone">Für ein längeres Gespräch tippe auf Hans. Eine Verabschiedung oder die Bitte aufzulegen beendet das Telefonat.</string>
+    <string name="voice_setup_optional_practice">Nach der Einrichtung kannst du beide Sprachfunktionen ausprobieren, wann du möchtest. Das ist freiwillig; die Einrichtung hat keine Aufnahme oder Aufgabe für dich getestet.</string>
+    <string name="voice_setup_optional_action_key">Möchtest du eine physische Aktionstaste zuweisen? Das ist freiwillig.</string>
+    <string name="voice_setup_capture_action_key">Drücke einmal die Taste, die du für Diktate verwenden möchtest.</string>
+</resources>

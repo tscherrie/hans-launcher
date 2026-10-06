@@ -79,6 +79,9 @@ object OpenAiLiveProtocol {
             // Live is not a model alias on the Realtime endpoint.
             .put("model", MODEL)
             .put("instructions", setup.instructions)
+            // Client mode leaves ALL backend work with our Codex session. Live-managed
+            // web_search belongs to Responses delegation, which is deliberately absent.
+            // Do not add Realtime tools/tool_choice or invented audio filler switches.
             .put("delegation", JSONObject().put("type", "client"))
             .put("audio", JSONObject().put("output", JSONObject().put("voice", setup.config.voice)))
             .put("input", input)

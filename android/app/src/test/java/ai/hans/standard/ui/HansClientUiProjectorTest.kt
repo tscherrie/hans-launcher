@@ -1,5 +1,8 @@
 package ai.hans.standard.ui
 
+import ai.hans.standard.localization.TestResourceTextResolver
+import java.util.Locale
+
 import ai.hans.standard.codex.AccountPhase
 import ai.hans.standard.codex.AccountUiSnapshot
 import ai.hans.standard.codex.DeliveryUiSnapshot
@@ -10,6 +13,8 @@ import ai.hans.standard.codex.ReasoningEffort
 import ai.hans.standard.codex.SessionUiSnapshot
 import ai.hans.standard.integration.ClientRuntimePhase
 import ai.hans.standard.integration.ClientSessionPhase
+import ai.hans.standard.integration.ClientWorkInterruptPhase
+import ai.hans.standard.integration.ClientWorkInterruptSnapshot
 import ai.hans.standard.integration.ClientTimelineItem
 import ai.hans.standard.integration.ClientTimelineRole
 import ai.hans.standard.integration.ClientTimelineStatus
@@ -50,6 +55,158 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class HansClientUiProjectorTest {
+    private val localizationText by lazy { TestResourceTextResolver(Locale.GERMAN) }
+
+    @Test fun dictationMuteRemainsSeparateFromPhonePresentationWhileConnectingAndWorking() {
+        val local = HansLocalUiState(dictationStatus = DictationUiStatus.LISTENING,
+            dictationInputMuted = true, liveVoiceInputMuted = false)
+        listOf(null, snapshot(AccountPhase.SIGNED_IN, ClientSessionPhase.BUSY)).forEach { client ->
+            val chat = HansClientUiProjector.project(client, local, HansSettings(), localizationText).chat
+            assertTrue(chat.dictationInputMuted)
+            assertFalse(chat.liveVoiceInputMuted)
+            assertNull(chat.liveVoiceStatus)
+            assertEquals(DictationUiStatus.LISTENING, chat.dictationStatus)
+        }
+    }
+
+    @Test
+    fun changingPresentationLanguagePreservesUserTextSteeringAndPendingStopProof() {
+        val userText = "Menü: Stop — مرحبا — %s — https://example.test/de"
+        val assistantText = "This response stays exactly as received. ÄÖÜ"
+        val client = snapshot(AccountPhase.SIGNED_IN, ClientSessionPhase.BUSY).copy(
+            workInterrupt = ClientWorkInterruptSnapshot(ClientWorkInterruptPhase.PENDING, 19),
+            problem = CodexClientProblem(ClientProblemCode.INTERRUPT_REJECTED, retryable = true),
+            timeline = listOf(
+                ClientTimelineItem("user-locale", ClientTimelineRole.USER, userText,
+                    1, 0, true, ClientTimelineStatus.COMPLETE),
+                ClientTimelineItem("hans-locale", ClientTimelineRole.HANS, assistantText,
+                    2, 0, true, ClientTimelineStatus.COMPLETE),
+            ),
+        )
+        val local = HansLocalUiState(text = "Ungesendeter Entwurf 📝")
+        val english = HansClientUiProjector.project(client, local, HansSettings(),
+            TestResourceTextResolver(Locale.ENGLISH))
+        val german = HansClientUiProjector.project(client, local, HansSettings(), localizationText)
+        assertEquals(listOf(userText, assistantText), english.chat.messages.map { it.text })
+        assertEquals(english.chat.messages, german.chat.messages)
+        assertEquals(local.text, english.chat.composer.text)
+        assertEquals(english.chat.composer, german.chat.composer)
+        assertTrue(english.chat.composer.enabled)
+        assertTrue(english.chat.workInterrupt.pending)
+        assertFalse(english.chat.workInterrupt.enabled)
+        assertEquals(19L, english.chat.workInterrupt.revision)
+        assertEquals(english.chat.workInterrupt, german.chat.workInterrupt)
+        assertEquals("The interruption was not confirmed. You can try again.",
+            english.chat.connectionFailureMessage)
+        assertEquals("Das Unterbrechen wurde nicht bestätigt. Du kannst es erneut versuchen.",
+            german.chat.connectionFailureMessage)
+        assertEquals(english.settings.selectedModelId, german.settings.selectedModelId)
+        assertEquals(english.settings.selectedReasoningEffortId, german.settings.selectedReasoningEffortId)
+        assertEquals(ClientWorkInterruptPhase.PENDING, client.workInterrupt.phase)
+    }
+
+    @Test
+    fun localizedFailedMessageSuffixDoesNotTranslateOrReplaceOriginalInput() {
+        val original = "Nicht gesendet. is the literal text I wrote."
+        val client = snapshot(AccountPhase.SIGNED_IN, ClientSessionPhase.READY).copy(
+            timeline = listOf(ClientTimelineItem("failed-locale", ClientTimelineRole.USER,
+                original, 1, 0, true, ClientTimelineStatus.FAILED)),
+        )
+        val english = HansClientUiProjector.project(client, HansLocalUiState(), HansSettings(),
+            TestResourceTextResolver(Locale.ENGLISH))
+        assertEquals("$original\nNot sent.", english.chat.messages.single().text)
+    }
+
+    @Test
+    fun failedVisualInspectionIsAnActionFailureNotAnUnsentMessageInBothLanguages() {
+        val original = "inspect_visual_ui\nvisual_capture_content_changed"
+        val client = snapshot(AccountPhase.SIGNED_IN, ClientSessionPhase.READY).copy(
+            timeline = listOf(ClientTimelineItem("failed-visual", ClientTimelineRole.TOOL,
+                original, 1, 0, true, ClientTimelineStatus.FAILED)),
+        )
+        listOf(Locale.ENGLISH to "Action failed.", Locale.GERMAN to "Aktion fehlgeschlagen.")
+            .forEach { (locale, caption) ->
+                val projected = HansClientUiProjector.project(client, HansLocalUiState(),
+                    HansSettings(), TestResourceTextResolver(locale)).chat.messages.single()
+                assertEquals("$original\n$caption", projected.text)
+                assertEquals(ChatMessageAuthor.SYSTEM, projected.author)
+                assertTrue(projected.complete)
+            }
+    }
+
+    @Test
+    fun failedToolWithoutOutputIsNotDisplayedAsStillRunning() {
+        val client = snapshot(AccountPhase.SIGNED_IN, ClientSessionPhase.READY).copy(
+            timeline = listOf(ClientTimelineItem("failed-empty-tool", ClientTimelineRole.TOOL,
+                "  ", 1, 0, true, ClientTimelineStatus.FAILED)),
+        )
+        val projected = HansClientUiProjector.project(client, HansLocalUiState(), HansSettings(),
+            TestResourceTextResolver(Locale.ENGLISH))
+        assertEquals("Action failed.", projected.chat.messages.single().text)
+    }
+
+    @Test
+    fun failedAssistantAndSystemItemsNeverClaimAnOutboundMessageWasNotSent() {
+        val client = snapshot(AccountPhase.SIGNED_IN, ClientSessionPhase.READY).copy(
+            timeline = listOf(ClientTimelineRole.HANS, ClientTimelineRole.SYSTEM).mapIndexed { index, role ->
+                ClientTimelineItem("failed-non-user-$index", role, "Original failure $index",
+                    index.toLong(), 0, true, ClientTimelineStatus.FAILED)
+            },
+        )
+        val projected = HansClientUiProjector.project(client, HansLocalUiState(), HansSettings(),
+            TestResourceTextResolver(Locale.ENGLISH))
+        assertEquals(listOf("Original failure 0", "Original failure 1"),
+            projected.chat.messages.map { it.text })
+    }
+
+    @Test
+    fun successfulAndRunningToolTextKeepTheirExistingPresentation() {
+        val client = snapshot(AccountPhase.SIGNED_IN, ClientSessionPhase.BUSY).copy(
+            timeline = listOf(
+                ClientTimelineItem("successful-tool", ClientTimelineRole.TOOL, "inspect_ui",
+                    1, 0, true, ClientTimelineStatus.COMPLETE),
+                ClientTimelineItem("running-tool", ClientTimelineRole.TOOL, "",
+                    2, 0, false, ClientTimelineStatus.IN_PROGRESS),
+            ),
+        )
+        val projected = HansClientUiProjector.project(client, HansLocalUiState(), HansSettings(),
+            TestResourceTextResolver(Locale.ENGLISH))
+        assertEquals(listOf("inspect_ui", "Phone action in progress"),
+            projected.chat.messages.map { it.text })
+    }
+
+    @Test
+    fun composerStopUsesRuntimeInterruptProofAndLeavesSteeringAndDraftsUsable() {
+        val local = HansLocalUiState(text = "Noch eine Ergänzung")
+        for (phase in ClientWorkInterruptPhase.entries) {
+            val client = snapshot(AccountPhase.SIGNED_IN, ClientSessionPhase.BUSY).copy(
+                workInterrupt = ClientWorkInterruptSnapshot(phase, revision = 8),
+            )
+            val chat = HansClientUiProjector.project(client, local, HansSettings(), text = localizationText).chat
+            assertEquals(phase != ClientWorkInterruptPhase.IDLE, chat.workInterrupt.visible)
+            assertEquals(phase == ClientWorkInterruptPhase.AVAILABLE, chat.workInterrupt.enabled)
+            assertEquals(phase == ClientWorkInterruptPhase.PENDING, chat.workInterrupt.pending)
+            assertEquals(8L, chat.workInterrupt.revision)
+            assertTrue(chat.composer.enabled)
+            assertEquals(local.text, chat.composer.text)
+        }
+        val absent = HansClientUiProjector.project(null, local, HansSettings(), text = localizationText).chat
+        assertFalse(absent.workInterrupt.visible)
+    }
+
+    @Test
+    fun interruptRejectionIsNotMisrepresentedAsASendFailureOrConfirmedStop() {
+        val client = snapshot(AccountPhase.SIGNED_IN, ClientSessionPhase.BUSY).copy(
+            workInterrupt = ClientWorkInterruptSnapshot(ClientWorkInterruptPhase.AVAILABLE, 1),
+            problem = CodexClientProblem(ClientProblemCode.INTERRUPT_REJECTED, retryable = true),
+        )
+        val chat = HansClientUiProjector.project(client, HansLocalUiState(), HansSettings(), text = localizationText).chat
+        assertTrue(chat.isWorking)
+        assertTrue(chat.workInterrupt.enabled)
+        assertEquals("Das Unterbrechen wurde nicht bestätigt. Du kannst es erneut versuchen.",
+            chat.connectionFailureMessage)
+    }
+
     @Test
     fun incomingDesktopStateComesOnlyFromRuntimeAndIdentifiesOnlyCurrentThread() {
         val remote = ai.hans.standard.remotecontrol.RemoteControlSnapshot(
@@ -64,13 +221,13 @@ class HansClientUiProjectorTest {
             localConsentGranted = false,
         )
         val client = snapshot(AccountPhase.SIGNED_IN, ClientSessionPhase.READY).copy(remoteControl = remote)
-        val ui = HansClientUiProjector.project(client, HansLocalUiState(), HansSettings()).settings
+        val ui = HansClientUiProjector.project(client, HansLocalUiState(), HansSettings(), text = localizationText).settings
         assertEquals(remote, ui.remoteControl)
         assertEquals("thread-1", ui.remoteControlThreadId)
         assertNull(ui.remoteControlThreadName)
         assertFalse(ui.remoteControl.mayUsePhoneToolsRemotely)
 
-        val unavailable = HansClientUiProjector.project(null, HansLocalUiState(), HansSettings()).settings
+        val unavailable = HansClientUiProjector.project(null, HansLocalUiState(), HansSettings(), text = localizationText).settings
         assertFalse(unavailable.remoteControl.runtimeReady)
         assertFalse(unavailable.remoteControl.localConsentGranted)
         assertNull(unavailable.remoteControlThreadId)
@@ -82,20 +239,17 @@ class HansClientUiProjectorTest {
         val checking = HansClientUiProjector.project(
             null,
             HansLocalUiState(),
-            HansSettings(),
-        ).settings.codexUpdate
+            HansSettings(), text = localizationText).settings.codexUpdate
         val ready = HansClientUiProjector.project(
             snapshot(AccountPhase.SIGNED_IN, ClientSessionPhase.READY),
             HansLocalUiState(),
-            HansSettings(),
-        ).settings.codexUpdate
+            HansSettings(), text = localizationText).settings.codexUpdate
         val failed = HansClientUiProjector.project(
             snapshot(AccountPhase.SIGNED_IN, ClientSessionPhase.READY).copy(
                 runtimePhase = ClientRuntimePhase.FAILED,
             ),
             HansLocalUiState(),
-            HansSettings(),
-        ).settings.codexUpdate
+            HansSettings(), text = localizationText).settings.codexUpdate
 
         assertEquals(ai.hans.standard.BuildConfig.CODEX_RUNTIME_VERSION, checking.bundledRuntimeVersion)
         assertEquals(ai.hans.standard.BuildConfig.CODEX_RUNTIME_VERSION, ready.bundledRuntimeVersion)
@@ -122,8 +276,7 @@ class HansClientUiProjectorTest {
                 requestedDestination = HansDestination.WORKBENCH,
                 workbench = workbench,
             ),
-            HansSettings(),
-        )
+            HansSettings(), text = localizationText)
 
         assertEquals(HansDestination.WORKBENCH, ui.destination)
         assertEquals(workbench, ui.workbench)
@@ -136,7 +289,7 @@ class HansClientUiProjectorTest {
             "Sieh [diese Veranstaltung](https://example.test/event). Mehr dazu: https://example.test/secret", 2)
         val client = snapshot(AccountPhase.SIGNED_IN, ClientSessionPhase.READY)
             .copy(timeline = listOf(user, answer))
-        val visible = HansClientUiProjector.project(client, HansLocalUiState(), HansSettings()).chat.messages
+        val visible = HansClientUiProjector.project(client, HansLocalUiState(), HansSettings(), text = localizationText).chat.messages
         assertEquals(user.text, visible.first().text)
         // The native rich-text component creates the visible name and its clickable span.
         // Losing the destination in this transport projection was the original regression.
@@ -145,7 +298,7 @@ class HansClientUiProjectorTest {
         assertEquals(answer.text, client.timeline.last().text)
 
         val stream = client.copy(timeline = listOf(answer.copy(text = "Fertig. htt", complete = false)))
-        val streamed = HansClientUiProjector.project(stream, HansLocalUiState(), HansSettings()).chat.messages
+        val streamed = HansClientUiProjector.project(stream, HansLocalUiState(), HansSettings(), text = localizationText).chat.messages
         assertEquals("Fertig. htt", streamed.single().text)
         assertFalse(streamed.single().complete)
         assertEquals("Fertig. htt", stream.timeline.single().text)
@@ -157,13 +310,12 @@ class HansClientUiProjectorTest {
             .copy(complete = false, revision = 1)
         val client = snapshot(AccountPhase.SIGNED_IN, ClientSessionPhase.BUSY)
             .copy(timeline = listOf(answer))
-        val streaming = HansClientUiProjector.project(client, HansLocalUiState(), HansSettings())
+        val streaming = HansClientUiProjector.project(client, HansLocalUiState(), HansSettings(), text = localizationText)
             .chat.messages.single()
         val final = HansClientUiProjector.project(
             client.copy(timeline = listOf(answer.copy(complete = true, revision = 2))),
             HansLocalUiState(),
-            HansSettings(),
-        ).chat.messages.single()
+            HansSettings(), text = localizationText).chat.messages.single()
 
         assertEquals(streaming.text, final.text)
         assertFalse(streaming.complete)
@@ -185,9 +337,9 @@ class HansClientUiProjectorTest {
             ),
         )
         val client = snapshot(AccountPhase.SIGNED_IN, ClientSessionPhase.READY)
-        assertTrue(HansClientUiProjector.project(client, local, HansSettings()).chat.speechAudioRoute.active)
+        assertTrue(HansClientUiProjector.project(client, local, HansSettings(), text = localizationText).chat.speechAudioRoute.active)
         val speaking = HansClientUiProjector.project(client,
-            local.copy(liveVoiceStatus = LiveVoiceUiStatus.HANS_SPEAKING), HansSettings())
+            local.copy(liveVoiceStatus = LiveVoiceUiStatus.HANS_SPEAKING), HansSettings(), text = localizationText)
         assertTrue(speaking.chat.speechAudioRoute.active)
         assertEquals(ai.hans.standard.voice.audio.SpeechAudioRoute.EARPIECE, speaking.chat.speechAudioRoute.effective)
         assertEquals(local.liveVoiceVoiceSelection, speaking.chat.liveVoiceVoiceSelection)
@@ -200,8 +352,7 @@ class HansClientUiProjectorTest {
             internet = InternetSnapshot(InternetStatus.OFFLINE, 3),
         )
         val ui = HansClientUiProjector.project(
-            snapshot(AccountPhase.SIGNED_IN, ClientSessionPhase.READY), local, HansSettings(),
-        )
+            snapshot(AccountPhase.SIGNED_IN, ClientSessionPhase.READY), local, HansSettings(), text = localizationText)
         assertTrue(ui.chat.internetNotice.contains("Keine Internetverbindung"))
         assertTrue(ui.chat.composer.enabled)
         assertEquals("Meine Frage", ui.chat.composer.text)
@@ -213,8 +364,7 @@ class HansClientUiProjectorTest {
         val ui = HansClientUiProjector.project(
             snapshot(AccountPhase.SIGNED_IN, ClientSessionPhase.BUSY),
             HansLocalUiState(internet = InternetSnapshot(InternetStatus.OFFLINE, 3)),
-            HansSettings(),
-        )
+            HansSettings(), text = localizationText)
         assertTrue(ui.chat.isWorking)
         assertTrue(ui.chat.internetNotice.contains("laufende Antwort"))
         assertTrue(ui.chat.internetNotice.contains("nicht erneut gesendet"))
@@ -229,8 +379,7 @@ class HansClientUiProjectorTest {
         val ui = HansClientUiProjector.project(
             client,
             HansLocalUiState(internet = InternetSnapshot(InternetStatus.ONLINE, 4)),
-            HansSettings(),
-        )
+            HansSettings(), text = localizationText)
         assertEquals("", ui.chat.internetNotice)
         assertTrue(ui.chat.connectionFailureMessage.contains("brach beim Senden ab"))
     }
@@ -238,30 +387,27 @@ class HansClientUiProjectorTest {
     @Test
     fun offlineLoginShowsInternetProblemInsteadOfOnlyCheckingAccount() {
         val ui = HansClientUiProjector.project(
-            null, HansLocalUiState(internet = InternetSnapshot(InternetStatus.OFFLINE, 1)), HansSettings(),
-        )
+            null, HansLocalUiState(internet = InternetSnapshot(InternetStatus.OFFLINE, 1)), HansSettings(), text = localizationText)
         assertEquals(HansDestination.AUTH_GATE, ui.destination)
         assertTrue(ui.authGate.internetNotice.contains("Keine Internetverbindung"))
     }
 
     @Test
     fun secureDefaultKeepsChatHiddenUntilConfirmedAccountAndThreadReady() {
-        val checking = HansClientUiProjector.project(null, HansLocalUiState(), HansSettings())
+        val checking = HansClientUiProjector.project(null, HansLocalUiState(), HansSettings(), text = localizationText)
         assertEquals(HansDestination.AUTH_GATE, checking.destination)
         assertEquals(AuthGateStage.CHECKING, checking.authGate.stage)
 
         val signedOut = HansClientUiProjector.project(
             snapshot(accountPhase = AccountPhase.SIGNED_OUT, sessionPhase = ClientSessionPhase.AUTH_REQUIRED),
             HansLocalUiState(),
-            HansSettings(),
-        )
+            HansSettings(), text = localizationText)
         assertEquals(AuthGateStage.SIGNED_OUT, signedOut.authGate.stage)
 
         val signedIn = HansClientUiProjector.project(
             snapshot(accountPhase = AccountPhase.SIGNED_IN, sessionPhase = ClientSessionPhase.READY),
             HansLocalUiState(),
-            HansSettings(),
-        )
+            HansSettings(), text = localizationText)
         assertEquals(HansDestination.CHAT, signedIn.destination)
         assertTrue(signedIn.chat.composer.enabled)
     }
@@ -277,7 +423,7 @@ class HansClientUiProjectorTest {
                 "https://auth.openai.com/device",
             ),
         )
-        val loginUi = HansClientUiProjector.project(login, HansLocalUiState(), HansSettings())
+        val loginUi = HansClientUiProjector.project(login, HansLocalUiState(), HansSettings(), text = localizationText)
         assertEquals(AuthGateStage.DEVICE_CODE_AWAITING, loginUi.authGate.stage)
         assertEquals("ABCD-EFGH", loginUi.authGate.userCode)
 
@@ -289,8 +435,7 @@ class HansClientUiProjectorTest {
         val chat = HansClientUiProjector.project(
             snapshot(AccountPhase.SIGNED_IN, ClientSessionPhase.BUSY).copy(timeline = timeline),
             HansLocalUiState(),
-            HansSettings(),
-        ).chat
+            HansSettings(), text = localizationText).chat
         assertEquals(listOf("Hallo", "Hi", "Weiter"), chat.messages.map { it.text })
         assertEquals(
             listOf(ChatMessageAuthor.USER, ChatMessageAuthor.HANS, ChatMessageAuthor.USER),
@@ -308,8 +453,7 @@ class HansClientUiProjectorTest {
             val ui = HansClientUiProjector.project(
                 base.copy(session = base.session.copy(currentThreadId = threadId)),
                 HansLocalUiState(),
-                HansSettings(),
-            )
+                HansSettings(), text = localizationText)
             assertEquals(HansDestination.AUTH_GATE, ui.destination)
             assertEquals(AuthGateStage.ERROR, ui.authGate.stage)
             assertTrue(ui.authGate.sessionRecovery)
@@ -331,8 +475,7 @@ class HansClientUiProjectorTest {
                 problem = CodexClientProblem(ClientProblemCode.RUNTIME_FAILED, retryable = true),
             ),
             HansLocalUiState(),
-            HansSettings(),
-        )
+            HansSettings(), text = localizationText)
         assertEquals(AuthGateStage.ERROR, ui.authGate.stage)
         assertEquals("Hans konnte nicht verbunden werden", ui.authGate.errorTitle)
         assertTrue(ui.authGate.sessionRecovery)
@@ -344,8 +487,7 @@ class HansClientUiProjectorTest {
         val ui = HansClientUiProjector.project(
             snapshot(AccountPhase.SIGNED_IN, ClientSessionPhase.RECOVERING_THREAD),
             HansLocalUiState(),
-            HansSettings(),
-        )
+            HansSettings(), text = localizationText)
         assertEquals(HansDestination.AUTH_GATE, ui.destination)
         assertEquals(AuthGateStage.CHECKING, ui.authGate.stage)
         assertTrue(ui.authGate.sessionRecovery)
@@ -360,8 +502,7 @@ class HansClientUiProjectorTest {
                     problem = CodexClientProblem(ClientProblemCode.AUTHENTICATION, retryable = true),
                 ),
                 HansLocalUiState(),
-                HansSettings(),
-            )
+                HansSettings(), text = localizationText)
             assertEquals(HansDestination.AUTH_GATE, ui.destination)
             assertEquals(AuthGateStage.ERROR, ui.authGate.stage)
             assertEquals("Anmeldung nicht abgeschlossen", ui.authGate.errorTitle)
@@ -383,8 +524,7 @@ class HansClientUiProjectorTest {
                 setupTurnIds = setOf("setup-turn"),
             ),
             local = HansLocalUiState(),
-            settings = HansSettings(),
-        )
+            settings = HansSettings(), text = localizationText)
 
         assertEquals(leaked, ui.chat.messages.first().text)
         assertEquals(
@@ -423,8 +563,7 @@ class HansClientUiProjectorTest {
                 setupTurnIds = setOf("setup-turn"),
             ),
             local = HansLocalUiState(),
-            settings = HansSettings(),
-        )
+            settings = HansSettings(), text = localizationText)
 
         assertEquals(
             listOf("Die Einrichtung ist bereit. Möchtest du beginnen?"),
@@ -444,9 +583,8 @@ class HansClientUiProjectorTest {
         val visible = HansClientUiProjector.project(
             client.copy(models = distinctEffortModels() + astra),
             HansLocalUiState(),
-            HansSettings(),
-        ).settings
-        assertEquals("Astra", visible.models.single { it.id == "gpt-6-astra" }.label)
+            HansSettings(), text = localizationText).settings
+        assertEquals("Astra 6", visible.models.single { it.id == "gpt-6-astra" }.label)
 
         for (unavailable in listOf(
             emptyList(),
@@ -459,10 +597,51 @@ class HansClientUiProjectorTest {
             val hidden = HansClientUiProjector.project(
                 client.copy(models = distinctEffortModels() + unavailable),
                 HansLocalUiState(),
-                HansSettings(),
-            ).settings
+                HansSettings(), text = localizationText).settings
             assertFalse(hidden.models.any { it.id == "gpt-6-astra" })
         }
+    }
+
+    @Test
+    fun latestModelChoicesComeOnlyFromAuthoritativeRuntimeCatalogInCurrentFirstOrder() {
+        val current = HansSettings.CURRENT_MODEL_ORDER.map { model(it, ReasoningEffort.MEDIUM, setOf(ReasoningEffort.MEDIUM)) }
+        val legacy = HansSettings.LEGACY_MODEL_ORDER.map { model(it, ReasoningEffort.HIGH, setOf(ReasoningEffort.HIGH)) }
+        val client = snapshot(AccountPhase.SIGNED_IN, ClientSessionPhase.READY).copy(models = (legacy + current).reversed())
+        val projected = HansClientUiProjector.project(client, HansLocalUiState(), HansSettings(), localizationText).settings
+        assertEquals(HansSettings.MODEL_ORDER, projected.models.map { it.id })
+        assertEquals("Astra 6", projected.models.single { it.id == "gpt-6-astra" }.label)
+        assertEquals("gpt-6-astra", projected.selectedModelId)
+        assertEquals("medium", projected.selectedReasoningEffortId)
+    }
+
+    @Test
+    fun unavailableHiddenOrUnusableLatestModelCannotBeOfferedOrOptimisticallySelected() {
+        val client = snapshot(AccountPhase.SIGNED_IN, ClientSessionPhase.READY)
+        for (id in listOf("gpt-6-luna", "gpt-6.1-sol")) {
+            val usable = model(id, ReasoningEffort.HIGH, setOf(ReasoningEffort.HIGH))
+            for (unavailable in listOf(emptyList(), listOf(usable.copy(hidden = true)),
+                    listOf(usable.copy(defaultEffort = ReasoningEffort.MINIMAL, supportedEfforts = setOf(ReasoningEffort.MINIMAL))))) {
+                val projected = HansClientUiProjector.project(client.copy(models = distinctEffortModels() + unavailable),
+                    HansLocalUiState(pendingModelId = id), HansSettings(), localizationText).settings
+                assertFalse(projected.models.any { it.id == id })
+                assertFalse(projected.selectedModelId == id)
+            }
+        }
+    }
+
+    @Test
+    fun pendingLatestModelPreservesConfirmedLegacySelectionAndOffersOnlyActualEfforts() {
+        val legacy = DispatchSelection("gpt-5.6-luna", ReasoningEffort.MEDIUM)
+        val current = model("gpt-6-luna", ReasoningEffort.HIGH, setOf(ReasoningEffort.HIGH, ReasoningEffort.MAX))
+        val client = snapshot(AccountPhase.SIGNED_IN, ClientSessionPhase.READY).copy(
+            models = distinctEffortModels() + current, confirmedSelection = legacy,
+            pendingSettingsSelection = DispatchSelection("gpt-6-luna", ReasoningEffort.MAX))
+        val projected = HansClientUiProjector.project(client, HansLocalUiState(),
+            HansSettings(model = legacy.model, reasoningEffort = legacy.effort.wireValue), localizationText).settings
+        assertEquals(legacy.model, projected.selectedModelId)
+        assertEquals(legacy.effort.wireValue, projected.selectedReasoningEffortId)
+        assertEquals(listOf("high", "max"), projected.reasoningEfforts.map { it.id })
+        assertTrue(projected.runtimeNotice.contains("Luna"))
     }
 
     @Test
@@ -479,8 +658,7 @@ class HansClientUiProjectorTest {
         val pending = HansClientUiProjector.project(
             client,
             HansLocalUiState(pendingModelId = "gpt-6-astra", pendingEffortId = "ultra"),
-            HansSettings(),
-        ).settings
+            HansSettings(), text = localizationText).settings
         assertEquals("gpt-5.6-luna", pending.selectedModelId)
         assertEquals("medium", pending.selectedReasoningEffortId)
         assertEquals(listOf("high", "ultra"), pending.reasoningEfforts.map { it.id })
@@ -490,8 +668,7 @@ class HansClientUiProjectorTest {
         val confirmed = HansClientUiProjector.project(
             client.copy(confirmedSelection = DispatchSelection("gpt-6-astra", ReasoningEffort.ULTRA)),
             HansLocalUiState(),
-            HansSettings(model = "gpt-6-astra", reasoningEffort = "ultra"),
-        ).settings
+            HansSettings(model = "gpt-6-astra", reasoningEffort = "ultra"), text = localizationText).settings
         assertEquals("gpt-6-astra", confirmed.selectedModelId)
         assertEquals("ultra", confirmed.selectedReasoningEffortId)
     }
@@ -504,17 +681,16 @@ class HansClientUiProjectorTest {
             confirmedSelection = DispatchSelection("gpt-5.6-luna", ReasoningEffort.MEDIUM),
             pendingSettingsSelection = next,
         )
-        val waiting = HansClientUiProjector.project(base, HansLocalUiState(), HansSettings()).settings
+        val waiting = HansClientUiProjector.project(base, HansLocalUiState(), HansSettings(), text = localizationText).settings
         assertEquals("gpt-5.6-luna", waiting.selectedModelId)
         assertEquals("medium", waiting.selectedReasoningEffortId)
         assertEquals(listOf("max", "ultra"), waiting.reasoningEfforts.map { it.id })
-        assertEquals("Sol · Ultra wird bestätigt …", waiting.runtimeNotice)
+        assertEquals("Sol 5.6 · Ultra wird bestätigt …", waiting.runtimeNotice)
         assertFalse(waiting.runtimeNotice.contains("nächsten Nachricht"))
 
         val confirmed = HansClientUiProjector.project(
             base.copy(pendingSettingsSelection = null, confirmedSelection = next),
-            HansLocalUiState(), HansSettings(),
-        ).settings
+            HansLocalUiState(), HansSettings(), text = localizationText).settings
         assertEquals("gpt-5.6-sol", confirmed.selectedModelId)
         assertEquals("ultra", confirmed.selectedReasoningEffortId)
         assertEquals("", confirmed.runtimeNotice)
@@ -526,7 +702,7 @@ class HansClientUiProjectorTest {
             models = distinctEffortModels(),
             pendingSettingsSelection = DispatchSelection("gpt-5.6-sol", ReasoningEffort.ULTRA),
         )
-        val ui = HansClientUiProjector.project(base, HansLocalUiState(text = "Nachtrag"), HansSettings())
+        val ui = HansClientUiProjector.project(base, HansLocalUiState(text = "Nachtrag"), HansSettings(), text = localizationText)
         assertTrue(ui.chat.composer.enabled)
         assertEquals("Nachtrag", ui.chat.composer.text)
         assertFalse(ui.chat.connectionFailureMessage.contains("nicht bestätigt"))
@@ -539,7 +715,7 @@ class HansClientUiProjectorTest {
             confirmedSelection = DispatchSelection("gpt-5.6-luna", ReasoningEffort.MEDIUM),
             problem = CodexClientProblem(ClientProblemCode.SELECTION_UPDATE, retryable = true),
         )
-        val ui = HansClientUiProjector.project(base, HansLocalUiState(), HansSettings()).settings
+        val ui = HansClientUiProjector.project(base, HansLocalUiState(), HansSettings(), text = localizationText).settings
         assertEquals("gpt-5.6-luna", ui.selectedModelId)
         assertEquals("medium", ui.selectedReasoningEffortId)
         assertTrue(ui.runtimeNotice.contains("nicht bestätigt"))
@@ -556,8 +732,7 @@ class HansClientUiProjectorTest {
         val ui = HansClientUiProjector.project(
             client,
             HansLocalUiState(pendingModelId = "gpt-5.6-sol", pendingEffortId = "ultra"),
-            HansSettings(),
-        )
+            HansSettings(), text = localizationText)
 
         assertEquals("gpt-5.6-luna", ui.settings.selectedModelId)
         assertEquals("medium", ui.settings.selectedReasoningEffortId)
@@ -577,8 +752,7 @@ class HansClientUiProjectorTest {
         val ui = HansClientUiProjector.project(
             client,
             HansLocalUiState(pendingModelId = "gpt-5.6-terra", pendingEffortId = "medium"),
-            HansSettings(),
-        )
+            HansSettings(), text = localizationText)
 
         assertEquals(listOf("high", "max"), ui.settings.reasoningEfforts.map { it.id })
         assertTrue(ui.settings.runtimeNotice.contains("Terra"))
@@ -594,7 +768,7 @@ class HansClientUiProjectorTest {
             pendingSelection = DispatchSelection("gpt-5.6-sol", ReasoningEffort.ULTRA),
         )
 
-        val ui = HansClientUiProjector.project(client, HansLocalUiState(), HansSettings())
+        val ui = HansClientUiProjector.project(client, HansLocalUiState(), HansSettings(), text = localizationText)
 
         assertEquals(listOf("max", "ultra"), ui.settings.reasoningEfforts.map { it.id })
         assertEquals("gpt-5.6-luna", ui.settings.selectedModelId)
@@ -630,8 +804,7 @@ class HansClientUiProjectorTest {
         val locallyStaged = HansClientUiProjector.project(
             base,
             HansLocalUiState(pendingFastModeEnabled = true),
-            HansSettings(),
-        ).settings
+            HansSettings(), text = localizationText).settings
         assertTrue(locallyStaged.fastModeAvailable)
         assertFalse(locallyStaged.fastModeEnabled)
         assertTrue(locallyStaged.runtimeNotice.contains("Fast"))
@@ -642,15 +815,13 @@ class HansClientUiProjectorTest {
                 pendingSelection = fast,
             ),
             HansLocalUiState(),
-            HansSettings(),
-        ).settings
+            HansSettings(), text = localizationText).settings
         assertFalse(dispatched.fastModeEnabled)
 
         val confirmed = HansClientUiProjector.project(
             base.copy(confirmedSelection = fast),
             HansLocalUiState(),
-            HansSettings(serviceTier = HansSettings.FAST_SERVICE_TIER),
-        ).settings
+            HansSettings(serviceTier = HansSettings.FAST_SERVICE_TIER), text = localizationText).settings
         assertTrue(confirmed.fastModeEnabled)
     }
 
@@ -666,7 +837,7 @@ class HansClientUiProjectorTest {
             models = listOf(unusableLuna) + distinctEffortModels().drop(1),
         )
 
-        val ui = HansClientUiProjector.project(client, HansLocalUiState(), HansSettings())
+        val ui = HansClientUiProjector.project(client, HansLocalUiState(), HansSettings(), text = localizationText)
 
         assertEquals(
             listOf("gpt-5.6-terra", "gpt-5.6-sol"),
@@ -684,8 +855,7 @@ class HansClientUiProjectorTest {
             HansLocalUiState(
                 speechCredentialStatus = SpeechCredentialUiStatus.TEMPORARILY_UNAVAILABLE,
             ),
-            HansSettings(),
-        )
+            HansSettings(), text = localizationText)
 
         assertEquals(
             SpeechCredentialUiStatus.TEMPORARILY_UNAVAILABLE,
@@ -698,23 +868,20 @@ class HansClientUiProjectorTest {
         val listening = HansClientUiProjector.project(
             snapshot(AccountPhase.SIGNED_IN, ClientSessionPhase.READY),
             HansLocalUiState(dictationStatus = DictationUiStatus.LISTENING),
-            HansSettings(),
-        )
+            HansSettings(), text = localizationText)
         assertEquals(DictationUiStatus.LISTENING, listening.chat.dictationStatus)
         assertFalse(listening.chat.composer.enabled)
 
         val finalizing = HansClientUiProjector.project(
             snapshot(AccountPhase.SIGNED_IN, ClientSessionPhase.READY),
             HansLocalUiState(dictationStatus = DictationUiStatus.FINALIZING),
-            HansSettings(),
-        )
+            HansSettings(), text = localizationText)
         assertTrue(finalizing.chat.composer.enabled)
 
         val sent = HansClientUiProjector.project(
             snapshot(AccountPhase.SIGNED_IN, ClientSessionPhase.READY),
             HansLocalUiState(dictationStatus = null),
-            HansSettings(),
-        )
+            HansSettings(), text = localizationText)
         assertEquals(null, sent.chat.dictationStatus)
         assertTrue(sent.chat.composer.enabled)
     }
@@ -728,8 +895,7 @@ class HansClientUiProjectorTest {
                 actionKeyCapturing = true,
                 actionKeyNotice = "Warte auf eine Taste …",
             ),
-            HansSettings(),
-        )
+            HansSettings(), text = localizationText)
 
         assertTrue(ui.settings.actionKey.configured)
         assertTrue(ui.settings.actionKey.capturing)
@@ -737,19 +903,55 @@ class HansClientUiProjectorTest {
     }
 
     @Test
-    fun persistedInputControlsProjectToSettingsAndForegroundChat() {
+    fun retiredInputPreferencesArePreservedButDoNotReactivateHoldGestures() {
+        val stored = HansSettings(
+            dictationKeyTrigger = ActionKeyTrigger.HOLD_TO_TALK,
+            cameraHoldToTalkEnabled = true,
+        )
         val ui = HansClientUiProjector.project(
             snapshot(AccountPhase.SIGNED_IN, ClientSessionPhase.READY),
             HansLocalUiState(),
-            HansSettings(
-                dictationKeyTrigger = ActionKeyTrigger.HOLD_TO_TALK,
-                cameraHoldToTalkEnabled = true,
-            ),
-        )
+            stored, text = localizationText)
 
-        assertEquals(ActionKeyTrigger.HOLD_TO_TALK, ui.settings.actionKey.dictationTrigger)
-        assertTrue(ui.settings.cameraHoldToTalkEnabled)
-        assertTrue(ui.chat.cameraHoldToTalkEnabled)
+        assertEquals(ActionKeyTrigger.PRESS, ui.settings.actionKey.dictationTrigger)
+        assertFalse(ui.settings.cameraHoldToTalkEnabled)
+        assertFalse(ui.chat.cameraHoldToTalkEnabled)
+        assertEquals(ActionKeyTrigger.HOLD_TO_TALK, stored.dictationKeyTrigger)
+        assertTrue(stored.cameraHoldToTalkEnabled)
+    }
+
+    @Test
+    fun assignedPhysicalKeyHidesScreenMicrophoneEvenWhenTemporarilyGated() {
+        for (client in listOf(null, snapshot(AccountPhase.SIGNED_IN, ClientSessionPhase.BUSY))) {
+            for (status in listOf(null, DictationUiStatus.PREPARING, DictationUiStatus.LISTENING,
+                    DictationUiStatus.FINALIZING)) {
+                for (assigned in listOf(false, true)) {
+                    val ui = HansClientUiProjector.project(client, HansLocalUiState(
+                        actionKeyAssigned = assigned,
+                        actionKeyConfigured = false,
+                        dictationStatus = status,
+                        dictationInputMuted = true,
+                    ), HansSettings(), text = localizationText)
+                    assertEquals(assigned, ui.chat.actionKeyConfigured)
+                    assertEquals(assigned, ui.settings.actionKey.dictationMappingStored)
+                    assertFalse(ui.settings.actionKey.configured)
+                    assertEquals(status, ui.chat.dictationStatus)
+                    assertTrue(ui.chat.dictationInputMuted)
+                    assertEquals(status != null, ui.settings.voiceSessionActive)
+                }
+            }
+        }
+    }
+
+    @Test
+    fun phoneSessionReservesPreviewAudioEvenBeforeVoiceSelectionConfirmation() {
+        for (status in LiveVoiceUiStatus.entries) {
+            val ui = HansClientUiProjector.project(null, HansLocalUiState(
+                liveVoiceStatus = status, liveVoiceVoiceSelection = null,
+            ), HansSettings(), text = localizationText)
+            assertEquals(status.isActive, ui.settings.voiceSessionActive)
+            assertNull(ui.settings.activeLiveVoiceId)
+        }
     }
 
     @Test
@@ -766,8 +968,7 @@ class HansClientUiProjectorTest {
                 actionKeyConfigured = false,
                 mp01VendorActionConflict = conflict,
             ),
-            HansSettings(),
-        )
+            HansSettings(), text = localizationText)
 
         assertEquals(conflict, ui.settings.actionKey.mp01VendorConflict)
         assertTrue(ui.settings.actionKey.mp01VendorConflict.replacementRequired)
@@ -801,8 +1002,7 @@ class HansClientUiProjectorTest {
                 capabilityAccess = access,
                 persistentAndroidConsents = durable,
             ),
-            HansSettings(),
-        )
+            HansSettings(), text = localizationText)
 
         assertEquals(access, ui.settings.capabilityAccess)
         assertEquals(durable, ui.settings.persistentAndroidConsents)
@@ -822,8 +1022,7 @@ class HansClientUiProjectorTest {
                 timeline = listOf(item("a1", ClientTimelineRole.HANS, "Hallo", 1)),
             ),
             HansLocalUiState(notificationMessages = listOf(notification)),
-            HansSettings(),
-        )
+            HansSettings(), text = localizationText)
 
         assertEquals(listOf("Hallo", "Dein Termin beginnt gleich."), ui.chat.messages.map { it.text })
         assertEquals(ChatMessageAuthor.SYSTEM, ui.chat.messages.last().author)
@@ -847,8 +1046,7 @@ class HansClientUiProjectorTest {
                 ),
             ),
             HansLocalUiState(notificationMessages = listOf(notification)),
-            HansSettings(),
-        )
+            HansSettings(), text = localizationText)
 
         assertEquals(
             listOf("Vorher", "Aeltere Benachrichtigung", "Neue Frage", "Neue Antwort"),
@@ -875,8 +1073,7 @@ class HansClientUiProjectorTest {
                 timeline = rawTimeline,
             ),
             HansLocalUiState(notificationMessages = listOf(notification)),
-            HansSettings(),
-        )
+            HansSettings(), text = localizationText)
 
         assertEquals("a1", notification.localTimelineAnchorId)
         assertEquals(listOf("Sichtbar", "Danach eingetroffen"), ui.chat.messages.map { it.text })
@@ -890,8 +1087,7 @@ class HansClientUiProjectorTest {
                 text = "Noch nicht bestätigt",
                 pendingComposerMessageId = "composer-pending",
             ),
-            HansSettings(),
-        )
+            HansSettings(), text = localizationText)
 
         assertFalse(ui.chat.composer.enabled)
         assertEquals("Noch nicht bestätigt", ui.chat.composer.text)
@@ -921,8 +1117,7 @@ class HansClientUiProjectorTest {
         val ui = HansClientUiProjector.project(
             snapshot(AccountPhase.SIGNED_IN, ClientSessionPhase.READY).copy(plugins = plugins),
             HansLocalUiState(selectedPluginList = PluginListKind.AVAILABLE),
-            HansSettings(),
-        ).plugins
+            HansSettings(), text = localizationText).plugins
 
         assertEquals(listOf(installed.handle.value), ui.installed.map { it.id })
         assertEquals(listOf(available.handle.value), ui.available.map { it.id })
@@ -939,9 +1134,9 @@ class HansClientUiProjectorTest {
                 pluginId = "tasks-plugin",
                 serverId = "tasks",
                 kind = PluginConnectionActionKind.CONNECT_REMOTE_MCP,
-                title = "Verbindung erforderlich",
-                message = "Verbinde den Dienst, bevor du dieses Plugin installierst.",
-                actionLabel = "Verbinden",
+                titleResource = ai.hans.standard.R.string.presentation_mcp_connection_required,
+                messageResource = ai.hans.standard.R.string.presentation_mcp_connect_missing,
+                actionLabelResource = ai.hans.standard.R.string.presentation_mcp_connect_action,
             ),
         )
 
@@ -949,8 +1144,7 @@ class HansClientUiProjectorTest {
             HansClientUiProjector.project(
                 snapshot(AccountPhase.SIGNED_IN, ClientSessionPhase.READY).copy(plugins = plugins),
                 HansLocalUiState(),
-                HansSettings(),
-            ).plugins.connectionAction,
+                HansSettings(), text = localizationText).plugins.connectionAction,
         )
 
         assertEquals("tasks-plugin", action.pluginId)
@@ -997,16 +1191,14 @@ class HansClientUiProjectorTest {
         val notLocallySelected = HansClientUiProjector.project(
             client,
             HansLocalUiState(),
-            HansSettings(),
-        ).plugins
+            HansSettings(), text = localizationText).plugins
         assertNull(notLocallySelected.selectedPluginId)
         assertNull(notLocallySelected.selectedPlugin)
 
         val otherLocallySelected = HansClientUiProjector.project(
             client,
             HansLocalUiState(selectedPluginHandle = installedB.handle),
-            HansSettings(),
-        ).plugins
+            HansSettings(), text = localizationText).plugins
         assertEquals(installedB.handle.value, otherLocallySelected.selectedPluginId)
         assertNull(otherLocallySelected.selectedPlugin)
         assertTrue(otherLocallySelected.selectedPluginLoading)
@@ -1027,8 +1219,7 @@ class HansClientUiProjectorTest {
                 ),
             ),
             HansLocalUiState(selectedPluginHandle = installedB.handle),
-            HansSettings(),
-        ).plugins
+            HansSettings(), text = localizationText).plugins
         assertNull(staleResponseAfterConfirmedOtherRead.selectedPlugin)
         assertFalse(staleResponseAfterConfirmedOtherRead.selectedPluginLoading)
         assertFalse(staleResponseAfterConfirmedOtherRead.selectedPluginErrorMessage.isBlank())
@@ -1036,8 +1227,7 @@ class HansClientUiProjectorTest {
         val selected = HansClientUiProjector.project(
             client,
             HansLocalUiState(selectedPluginHandle = installedA.handle),
-            HansSettings(),
-        ).plugins.selectedPlugin!!
+            HansSettings(), text = localizationText).plugins.selectedPlugin!!
         assertEquals(installedA.handle.value, selected.id)
         assertEquals("https://example.com/plugin", selected.shareUrl)
         assertEquals("https://example.com/connect", selected.apps.first().connectionUrl)
@@ -1124,8 +1314,7 @@ class HansClientUiProjectorTest {
         val ui = HansClientUiProjector.project(
             snapshot(AccountPhase.SIGNED_IN, ClientSessionPhase.READY).copy(plugins = plugins),
             HansLocalUiState(selectedPluginHandle = installed.handle),
-            HansSettings(),
-        ).plugins
+            HansSettings(), text = localizationText).plugins
 
         assertTrue(ui.selectedPlugin!!.uninstallConfirmationPending)
         assertTrue(ui.marketplaceRefreshing)
@@ -1142,8 +1331,7 @@ class HansClientUiProjectorTest {
                 ),
             ),
             HansLocalUiState(selectedPluginHandle = installed.handle),
-            HansSettings(),
-        ).plugins
+            HansSettings(), text = localizationText).plugins
         assertNull(removed.selectedPluginId)
         assertNull(removed.selectedPlugin)
 
@@ -1157,8 +1345,7 @@ class HansClientUiProjectorTest {
                 ),
             ),
             HansLocalUiState(selectedPluginHandle = installed.handle),
-            HansSettings(),
-        ).plugins.selectedPlugin!!
+            HansSettings(), text = localizationText).plugins.selectedPlugin!!
         assertFalse(stillInstalled.uninstallConfirmationPending)
         assertEquals(
             "Die Deinstallation wurde vom Plugin-Katalog nicht bestätigt.",
@@ -1194,8 +1381,7 @@ class HansClientUiProjectorTest {
         val waitingUi = HansClientUiProjector.project(
             waiting,
             HansLocalUiState(),
-            HansSettings(),
-        ).plugins
+            HansSettings(), text = localizationText).plugins
         assertTrue(waitingUi.marketplaceRefreshing)
         assertEquals("", waitingUi.marketplaceMessage)
 
@@ -1214,8 +1400,7 @@ class HansClientUiProjectorTest {
                 failedProof,
             ))),
             HansLocalUiState(),
-            HansSettings(),
-        ).plugins
+            HansSettings(), text = localizationText).plugins
         assertFalse(failedUi.marketplaceRefreshing)
         assertEquals(
             "Der Plugin-Katalog konnte nach der Marketplace-Aktualisierung nicht geladen werden.",
@@ -1243,8 +1428,7 @@ class HansClientUiProjectorTest {
     ): PluginDetailUiModel = HansClientUiProjector.project(
         snapshot(AccountPhase.SIGNED_IN, ClientSessionPhase.READY).copy(plugins = plugins),
         HansLocalUiState(selectedPluginHandle = card.handle),
-        HansSettings(),
-    ).plugins.selectedPlugin!!
+        HansSettings(), text = localizationText).plugins.selectedPlugin!!
 
     private fun pluginDetail(
         handle: PluginHandle,

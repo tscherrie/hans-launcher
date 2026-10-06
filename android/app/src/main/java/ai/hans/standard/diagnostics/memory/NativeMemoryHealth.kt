@@ -63,14 +63,32 @@ internal object NativeMemoryHealthContract {
     const val VERSION_0_154 = "0.154.0"
     const val COMMIT_0_154 = "6b9826e3aa83b1a5947db50f4332cb9c65f1b340"
     const val ARTIFACT_SHA256_0_154 = "0c2495cedd0e01fd6ba1e9d949b637f55ac283e6019b998024c010788da8c508"
+    // 0.155 adds exactly migration 2; its additive table does not alter either aggregate.
+    // Retained source bytes: runtime/evidence/0.155.0/source/000{1,2}_*.sql.
+    const val VERSION_0_155 = "0.155.0"
+    const val COMMIT_0_155 = "f0a1b8f0849d90960bc406b848f32e5a129b0457"
+    const val ARTIFACT_SHA256_0_155 = "a18a82fbfcecec13f320545f4b8e0c542247e16918fdbc61f3f8f7e4d121306d"
+    // Source-pinned 0.160.1 retains exactly the same two migrations; no version-range trust.
+    const val VERSION_0_160_1 = "0.160.1"
+    const val COMMIT_0_160_1 = "d27764b82f7118f674371e6d6e76271d9d606edb"
+    const val ARTIFACT_SHA256_0_160_1 = "a949b9fd5a00d4c0be2243d04073d666293c3633355b51e687365839fa528170"
     const val FILE_NAME = "memories_1.sqlite"
     const val MIGRATION_SHA384 = "a1af50da50775a70f98da680006b7df4501956753ae98511ab727aa295915d9ae6f4190b4eaa5abc4fd7891642f7d21d"
+    const val CONSOLIDATION_MIGRATION_SHA384 = "18f0a8dd7fe9a847b30d719029066d7a78e0bc64310dc66e4f7708bad6f1a0a594c0dbd14fec1ccb410cd7ae75dd7b10"
     const val MAX_FILE_BYTES = 128L * 1024 * 1024
     const val MAX_ROWS = 100_000L
     fun supports(request: NativeMemoryHealthRequest): Boolean = when (request.runtimeVersion) {
         VERSION -> request.runtimeArtifactSha256 == ARTIFACT_SHA256
         VERSION_0_154 -> request.runtimeArtifactSha256 == ARTIFACT_SHA256_0_154
+        VERSION_0_155 -> request.runtimeArtifactSha256 == ARTIFACT_SHA256_0_155
+        VERSION_0_160_1 -> request.runtimeArtifactSha256 == ARTIFACT_SHA256_0_160_1
         else -> false
+    }
+    fun migrationChecksums(request: NativeMemoryHealthRequest): List<String> {
+        require(supports(request))
+        return if (request.runtimeVersion in setOf(VERSION_0_155, VERSION_0_160_1)) {
+            listOf(MIGRATION_SHA384, CONSOLIDATION_MIGRATION_SHA384)
+        } else listOf(MIGRATION_SHA384)
     }
     fun kind(value: String): NativeMemoryJobKind = when (value) {
         "memory_stage1" -> NativeMemoryJobKind.EXTRACTION

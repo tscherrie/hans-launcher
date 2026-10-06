@@ -1,5 +1,10 @@
 package ai.hans.standard.ui
 
+import ai.hans.standard.R
+import ai.hans.standard.localization.HansTextResolver
+import androidx.annotation.StringRes
+import java.text.NumberFormat
+import java.util.Locale
 import ai.hans.standard.phone.display.DisplayMotionMode
 import ai.hans.standard.phone.consent.PersistentAndroidConsentDescriptor
 import ai.hans.standard.phone.consent.HansPhoneActionPolicy
@@ -44,12 +49,14 @@ data class AuthGateUiState(
     val userCode: String = "",
     val verificationUri: String = "",
     val errorMessage: String = "",
-    val errorTitle: String = "Anmeldung nicht abgeschlossen",
+    val errorTitle: String = "",
     /** True only while the current runtime snapshot still confirms an authenticated account. */
     val sessionRecovery: Boolean = false,
     /** Optional runtime-owned information such as a copy confirmation or expiry guidance. */
     val supportingMessage: String = "",
     val internetNotice: String = "",
+    /** Explicit recovery option; never substitutes for Retry or authentication. */
+    val canStartNewConversation: Boolean = false,
 ) {
     val hasCompleteDeviceCode: Boolean
         get() = userCode.isNotBlank() && verificationUri.isNotBlank()
@@ -61,6 +68,7 @@ data class AuthGateUiCallbacks(
     val onCopyUserCode: (String) -> Unit,
     val onCancel: () -> Unit,
     val onRetry: () -> Unit,
+    val onStartNewConversation: () -> Unit = {},
 )
 
 enum class RuntimeUiStatus {
@@ -92,6 +100,8 @@ data class ChatMessageUiModel(
     val localArrivalOrder: Long = 0,
     /** Markdown/link suffixes may still be arriving until the server completes this message. */
     val complete: Boolean = true,
+    /** Exact typed native Voice source; never inferred from text or timeline placement. */
+    val liveVoiceTranscript: ai.hans.standard.voice.realtime.LiveVoiceTranscriptRevision? = null,
 )
 
 data class ComposerAttachmentUiModel(
@@ -108,18 +118,34 @@ data class ComposerUiState(
         get() = enabled && (text.isNotBlank() || attachments.isNotEmpty())
 }
 
+data class WorkInterruptUiState(
+    val visible: Boolean = false,
+    val enabled: Boolean = false,
+    val pending: Boolean = false,
+    val revision: Long = 0,
+)
+
 data class ChatUiState(
     val messages: List<ChatMessageUiModel> = emptyList(),
     val composer: ComposerUiState = ComposerUiState(),
     val runtimeStatus: RuntimeUiStatus = RuntimeUiStatus.CONNECTING,
     val isWorking: Boolean = false,
+    val workInterrupt: WorkInterruptUiState = WorkInterruptUiState(),
     val internetNotice: String = "",
     val connectionFailureMessage: String = "",
+    /** A failed voice request remains actionable independently of Codex/network notices. */
+    val speechFailure: SpeechFailureUiState? = null,
     val pendingDictations: List<ai.hans.standard.voice.PendingDictation> = emptyList(),
     /** A static event-driven recording indication; null deliberately means idle. */
     val dictationStatus: DictationUiStatus? = null,
+    /** Confirmed microphone mute, independent of the separate telephone UI. */
+    val dictationInputMuted: Boolean = false,
+    /** A stored physical voice key replaces the screen microphone, even if temporarily gated. */
+    val actionKeyConfigured: Boolean = false,
     /** Incomplete local-only text; displayed as a card, never added to the persisted timeline or composer. */
     val dictationPreview: String = "",
+    /** Current short-Live session has not produced its first own transcript yet. UI-only. */
+    val dictationAwaitingFirstTranscript: Boolean = false,
     /** Runtime-owned status; only an active Live session may animate its tiny header dot. */
     val liveVoiceStatus: LiveVoiceUiStatus? = null,
     /** Confirmed WebRTC capture state. It is never changed optimistically by the call UI. */
@@ -128,7 +154,7 @@ data class ChatUiState(
     val liveVoiceVoiceSelection: LiveVoiceVoiceSelection? = null,
     /** Output routing is reported by Android, never inferred from a successful request. */
     val speechAudioRoute: SpeechAudioRouteState = SpeechAudioRouteState(),
-    /** Optional foreground-only gesture; false preserves the camera-only affordance. */
+    /** Legacy snapshot field only; the camera control no longer starts voice input. */
     val cameraHoldToTalkEnabled: Boolean = false,
     /**
      * Increment for every timeline event, including streamed updates to the current message.
@@ -137,25 +163,25 @@ data class ChatUiState(
     val timelineRevision: Long = 0,
 )
 
-enum class LiveVoiceUiStatus(val label: String) {
-    CONNECTING("Live verbindet"),
-    LISTENING("Live hört zu"),
-    USER_SPEAKING("Du sprichst live"),
-    HANS_SPEAKING("Hans spricht live"),
-    WAITING_FOR_TASK("Hans kümmert sich darum"),
-    RECONNECTING("Live verbindet neu"),
-    FAILED("Live Voice ist unterbrochen");
+enum class LiveVoiceUiStatus(@StringRes val labelResource: Int) {
+    CONNECTING(R.string.presentation_live_connecting),
+    LISTENING(R.string.presentation_live_listening),
+    USER_SPEAKING(R.string.presentation_live_user_speaking),
+    HANS_SPEAKING(R.string.presentation_live_hans_speaking),
+    WAITING_FOR_TASK(R.string.presentation_live_waiting_for_task),
+    RECONNECTING(R.string.presentation_live_reconnecting),
+    FAILED(R.string.presentation_live_failed);
 
     val isActive: Boolean
         get() = this != FAILED
 }
 
-enum class DictationUiStatus(val label: String) {
-    PREPARING("Mikrofon wird vorbereitet"),
-    LISTENING("Hört zu"),
-    FINALIZING("Transkribiert"),
-    WAITING_TO_SEND("Sprachtext noch nicht gesendet"),
-    FAILED("Sprachnachricht konnte nicht aufgenommen werden"),
+enum class DictationUiStatus(@StringRes val labelResource: Int) {
+    PREPARING(R.string.presentation_dictation_preparing),
+    LISTENING(R.string.presentation_dictation_listening),
+    FINALIZING(R.string.presentation_dictation_finalizing),
+    WAITING_TO_SEND(R.string.presentation_dictation_waiting_to_send),
+    FAILED(R.string.presentation_dictation_failed),
 }
 
 /** Presentation only: reuse the regular user card without creating or sending a message. */
@@ -174,6 +200,21 @@ internal fun ChatUiState.dictationPreviewMessage(): ChatMessageUiModel? =
         null
     }
 
+/** No synthetic message is persisted or dispatched; old chat history does not own this flag. */
+internal fun ChatUiState.showDictationTranscriptPlaceholder(): Boolean =
+    dictationAwaitingFirstTranscript && dictationPreview.isBlank() && liveVoiceStatus == null &&
+        dictationStatus in setOf(
+            DictationUiStatus.PREPARING,
+            DictationUiStatus.LISTENING,
+            DictationUiStatus.FINALIZING,
+        )
+
+/** A newly accepted dictation replaces a dead call's error surface, never an active call. */
+internal fun LiveVoiceUiStatus?.afterDictationPublication(status: DictationUiStatus?): LiveVoiceUiStatus? =
+    if (this == LiveVoiceUiStatus.FAILED && status in setOf(
+            DictationUiStatus.PREPARING, DictationUiStatus.LISTENING, DictationUiStatus.FINALIZING,
+        )) null else this
+
 /** A synchronous view of the owning draft and its existing in-flight dispatch gate. */
 data class ComposerDraftSnapshot(
     val text: String,
@@ -190,11 +231,15 @@ data class ChatUiCallbacks(
     val onOpenAutomations: () -> Unit = {},
     val onOpenSettings: () -> Unit,
     val onToggleLiveVoice: () -> Unit,
+    /** A chat-local dictation toggle, independent of the header's telephone control. */
+    val onToggleDictation: () -> Unit = {},
     val onCameraGestureDown: (Long) -> SoftwareHoldGestureId? = { null },
     val onCameraGestureLongPress: (SoftwareHoldGestureId, Long) -> Unit = { _, _ -> },
     val onCameraGestureUp: (SoftwareHoldGestureId, Long) -> Unit = { _, _ -> },
     val onCameraGestureCancel: (SoftwareHoldGestureId, Long) -> Unit = { _, _ -> },
     val onOpenInternetSettings: () -> Unit = {},
+    val onOpenSpeechFailureHelp: (ai.hans.standard.voice.feedback.OpenAiSpeechRemediation) -> Unit = {},
+    val onDismissSpeechFailure: (Long) -> Unit = {},
     val onRetryPendingDictation: (String) -> Unit = {},
     val onDiscardPendingDictation: (String) -> Unit = {},
     /**
@@ -214,6 +259,8 @@ data class ChatUiCallbacks(
     val onReadAssistantMessageAloud: (String) -> Unit = {},
     /** Opens the bounded, explicitly refreshed local work inventory. */
     val onOpenWorkbench: () -> Unit = {},
+    /** Requests the actual Codex turn interrupt. True means requested, never confirmed stopped. */
+    val onInterruptWork: () -> Boolean = { false },
 )
 
 data class AppUiModel(
@@ -433,7 +480,7 @@ data class WorkbenchArtifactUiModel(
 data class WorkbenchPythonUiState(
     /** False means that merely opening the Workbench did not start or bind the worker. */
     val initialized: Boolean = false,
-    val phaseLabel: String = "Noch nicht gestartet",
+    val phaseLabel: String = "",
     val ready: Boolean = false,
     /** The isolated worker is intentionally absent and will be started by the next task. */
     val startsOnDemand: Boolean = false,
@@ -457,10 +504,10 @@ data class WorkbenchUiCallbacks(
     val onRefresh: () -> Unit = {},
 )
 
-enum class AutomationMissedRunUiMode(val label: String) {
-    SKIP("Ausgelassene Termine überspringen"),
-    RUN_LATEST("Jüngsten verpassten Termin nachholen"),
-    CATCH_UP("Verpasste Termine begrenzt nachholen"),
+enum class AutomationMissedRunUiMode(@StringRes val labelResource: Int) {
+    SKIP(R.string.presentation_missed_skip),
+    RUN_LATEST(R.string.presentation_missed_latest),
+    CATCH_UP(R.string.presentation_missed_catch_up),
 }
 
 data class AutomationRunHistoryUiModel(
@@ -518,24 +565,27 @@ data class ModelUiOption(
 ) {
     companion object {
         val HANS_MODELS: List<ModelUiOption> = listOf(
-            ModelUiOption(id = "gpt-5.6-luna", label = "Luna"),
-            ModelUiOption(id = "gpt-5.6-terra", label = "Terra"),
-            ModelUiOption(id = "gpt-5.6-sol", label = "Sol"),
-            ModelUiOption(id = "gpt-6-astra", label = "Astra"),
+            ModelUiOption(id = "gpt-6-luna", label = "Luna 6"),
+            ModelUiOption(id = "gpt-5.6-terra", label = "Terra 5.6"),
+            ModelUiOption(id = "gpt-6.1-sol", label = "Sol 6.1"),
+            ModelUiOption(id = "gpt-6-astra", label = "Astra 6"),
+            ModelUiOption(id = "gpt-5.6-luna", label = "Luna 5.6"),
+            ModelUiOption(id = "gpt-5.6-sol", label = "Sol 5.6"),
+            ModelUiOption(id = "gpt-6-sol", label = "Sol 6"),
         )
     }
 }
 
 enum class ReasoningEffortUiOption(
     val id: String,
-    val label: String,
+    @StringRes val labelResource: Int,
 ) {
-    LOW("low", "Klein"),
-    MEDIUM("medium", "Mittel"),
-    HIGH("high", "Hoch"),
-    XHIGH("xhigh", "Sehr hoch"),
-    MAX("max", "Max"),
-    ULTRA("ultra", "Ultra"),
+    LOW("low", R.string.presentation_effort_low),
+    MEDIUM("medium", R.string.presentation_effort_medium),
+    HIGH("high", R.string.presentation_effort_high),
+    XHIGH("xhigh", R.string.presentation_effort_xhigh),
+    MAX("max", R.string.presentation_effort_max),
+    ULTRA("ultra", R.string.presentation_effort_ultra),
 }
 
 data class VoiceUiOption(
@@ -543,9 +593,9 @@ data class VoiceUiOption(
     val label: String,
 )
 
-enum class ReadAloudUiMode(val label: String) {
-    FINAL_ONLY("Nur finale Antworten"),
-    ALL_MESSAGES("Alle Hans-Nachrichten"),
+enum class ReadAloudUiMode(@StringRes val labelResource: Int) {
+    FINAL_ONLY(R.string.presentation_read_aloud_final),
+    ALL_MESSAGES(R.string.presentation_read_aloud_all),
 }
 
 enum class SpeechCredentialUiStatus {
@@ -609,11 +659,11 @@ data class RemoteWorkerConfigurationUiDraft(
     val adapters: List<RemoteWorkerAdapterUiDraft> = listOf(RemoteWorkerAdapterUiDraft()),
     val requestedEnabled: Boolean = false,
 ) {
-    val validationMessage: String?
-        get() = validateRemoteWorkerConfigurationDraft(this)
+    fun validationMessage(text: HansTextResolver): String? =
+        validateRemoteWorkerConfigurationDraft(this, text)
 
     val canSave: Boolean
-        get() = validationMessage == null
+        get() = remoteWorkerValidationResource(this) == null
 
     override fun toString(): String =
         "RemoteWorkerConfigurationUiDraft(workerId=$workerId, " +
@@ -654,10 +704,20 @@ data class RemoteWorkerSettingsUiState(
 
 internal fun validateRemoteWorkerConfigurationDraft(
     draft: RemoteWorkerConfigurationUiDraft,
-): String? {
+    text: HansTextResolver,
+): String? = remoteWorkerValidationResource(draft)?.let { resourceId ->
+    if (resourceId == R.string.presentation_worker_adapter_limit) {
+        text.text(resourceId, REMOTE_WORKER_UI_MAX_ADAPTERS)
+    } else {
+        text.text(resourceId)
+    }
+}
+
+@StringRes
+private fun remoteWorkerValidationResource(draft: RemoteWorkerConfigurationUiDraft): Int? {
     val workerId = draft.workerId.trim()
     if (!REMOTE_WORKER_UI_ID.matches(workerId) || ".." in workerId) {
-        return "Die Worker-ID ist ungültig."
+        return R.string.presentation_worker_id_invalid
     }
     val origin = runCatching { URI(draft.httpsOrigin.trim()) }.getOrNull()
     if (
@@ -669,13 +729,13 @@ internal fun validateRemoteWorkerConfigurationDraft(
         origin.fragment != null ||
         !(origin.path.isNullOrEmpty() || origin.path == "/")
     ) {
-        return "Trage eine vollständige HTTPS-Adresse ohne Pfad ein."
+        return R.string.presentation_worker_origin_invalid
     }
     if (!REMOTE_WORKER_UI_SHA_256.matches(draft.serverSpkiSha256.trim())) {
-        return "Der SPKI-Pin muss aus genau 64 Hex-Zeichen bestehen."
+        return R.string.presentation_worker_pin_invalid
     }
     if (draft.adapters.size > REMOTE_WORKER_UI_MAX_ADAPTERS) {
-        return "Es können höchstens $REMOTE_WORKER_UI_MAX_ADAPTERS Adapter freigegeben werden."
+        return R.string.presentation_worker_adapter_limit
     }
     val nonEmptyAdapters = draft.adapters.filterNot {
         it.id.isBlank() && it.version.isBlank()
@@ -688,13 +748,13 @@ internal fun validateRemoteWorkerConfigurationDraft(
                 !REMOTE_WORKER_UI_ADAPTER_VERSION.matches(version)
         }
     ) {
-        return "Jeder Adapter braucht eine gültige ID und eine genaue Version."
+        return R.string.presentation_worker_adapter_invalid
     }
     if (nonEmptyAdapters.map { it.id.trim() }.distinct().size != nonEmptyAdapters.size) {
-        return "Jede Adapter-ID darf nur einmal vorkommen."
+        return R.string.presentation_worker_adapter_duplicate
     }
     if (draft.requestedEnabled && nonEmptyAdapters.isEmpty()) {
-        return "Zum Aktivieren muss mindestens ein Adapter freigegeben sein."
+        return R.string.presentation_worker_adapter_required
     }
     return null
 }
@@ -751,6 +811,8 @@ data class SettingsUiState(
     val selectedLiveVoiceId: String? = null,
     /** Server-confirmed voice of the current call only, never inferred from a preference. */
     val activeLiveVoiceId: String? = null,
+    /** Any task or phone voice session owns audio, even before its voice is confirmed. */
+    val voiceSessionActive: Boolean = false,
     val speechRate: Float = 1.25f,
     val readAloudMode: ReadAloudUiMode = ReadAloudUiMode.ALL_MESSAGES,
     val speechCredentialStatus: SpeechCredentialUiStatus = SpeechCredentialUiStatus.MISSING,
@@ -765,6 +827,7 @@ data class SettingsUiState(
     val privateSpace: PrivateSpaceUiState = PrivateSpaceUiState(),
     val runtimeNotice: String = "",
     val notificationFactArchive: NotificationFactArchiveStatus = NotificationFactArchiveStatus(),
+    val whatsAppAgentChannel: WhatsAppAgentChannelUiState = WhatsAppAgentChannelUiState(),
     val confirmedSttGlossary: ConfirmedSttGlossaryUiState = ConfirmedSttGlossaryUiState(),
     val sttLatency: SttLatencyUiState = SttLatencyUiState(),
     val remoteWorker: RemoteWorkerSettingsUiState = RemoteWorkerSettingsUiState(),
@@ -774,9 +837,10 @@ data class SettingsUiState(
         ai.hans.standard.remotecontrol.RemoteControlSnapshot(),
     val remoteControlThreadId: String? = null,
     val remoteControlThreadName: String? = null,
+    val remoteControlProjectPath: String? = null,
+    val remotePhoneToolsAvailable: Boolean = false,
 ) {
-    val speechRateLabel: String
-        get() = formatSpeechRate(speechRate)
+    fun speechRateLabel(text: HansTextResolver): String = formatSpeechRate(speechRate, text.locale)
 }
 
 /** Confirmed app-private spellings only; the editor draft never enters effective UI state. */
@@ -797,6 +861,8 @@ data class ConfirmedSttGlossaryUiState(
 
 data class ActionKeyUiState(
     val configured: Boolean = false,
+    /** Stored assignment; may be temporarily unavailable without losing edit/remove controls. */
+    val assigned: Boolean = false,
     val modelToggleConfigured: Boolean = false,
     val capturing: Boolean = false,
     val capturingModelToggle: Boolean = false,
@@ -807,7 +873,7 @@ data class ActionKeyUiState(
 ) {
     /** The mapping can be stored while deliberately withheld from dispatch. */
     val dictationMappingStored: Boolean
-        get() = configured ||
+        get() = assigned || configured ||
             Mp01VendorShortcutUiKind.DICTATION in mp01VendorConflict.shortcutKinds
 
     val modelToggleMappingStored: Boolean
@@ -888,6 +954,8 @@ data class SettingsUiCallbacks(
     val onExportBackup: () -> Unit = {},
     val onImportBackup: () -> Unit = {},
     val onRefreshNotificationFactArchive: () -> Unit = {},
+    val onConfigureWhatsAppAgentChannel: () -> Unit = {},
+    val onDisableWhatsAppAgentChannel: () -> Unit = {},
     val onConfirmedSttGlossarySaved: (String) -> Unit = {},
     val onSttLatencyChanged: (ai.hans.standard.voice.stt.SttTranscriptionDelay) -> Unit = {},
     /** Local-only refresh. It must never probe, publish or contact the configured worker. */
@@ -934,7 +1002,9 @@ data class HansUiCallbacks(
 
 internal val SpeechRateOptions: List<Float> = listOf(0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f)
 
-internal fun formatSpeechRate(rate: Float): String = when {
-    rate % 1f == 0f -> "${rate.toInt()},0×"
-    else -> "${"%.2f".format(java.util.Locale.GERMANY, rate).trimEnd('0')}×"
-}
+internal fun formatSpeechRate(rate: Float, locale: Locale): String =
+    NumberFormat.getNumberInstance(locale).apply {
+        minimumFractionDigits = 1
+        maximumFractionDigits = 2
+        isGroupingUsed = false
+    }.format(rate.toDouble()) + "×"

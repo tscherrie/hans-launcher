@@ -3,17 +3,21 @@ package ai.hans.standard.ui
 import ai.hans.standard.settings.HansSettings
 import ai.hans.standard.voice.realtime.LiveVoiceVoiceResolution
 import ai.hans.standard.voice.realtime.LiveVoiceVoiceSelection
-import ai.hans.standard.voice.realtime.OpenAiLiveProtocol
+import ai.hans.standard.voice.realtime.CodexLiveVoiceVoiceResolver
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.assertIsNotSelected
 import androidx.compose.ui.test.assertIsSelected
+import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.assertTextEquals
+import androidx.compose.ui.test.click
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performTouchInput
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -25,7 +29,7 @@ class LiveVoiceSettingsUiTest {
     val compose = createComposeRule()
 
     @Test
-    fun all22LiveVoicesAreIndependentlySelectableWithoutTtsSavesOrPreviews() {
+    fun all9CodexLiveVoicesAreIndependentlySelectableWithoutTtsSavesOrPreviews() {
         val state = mutableStateOf(project())
         val liveSaves = mutableListOf<String>()
         val ttsSaves = mutableListOf<String>()
@@ -43,22 +47,26 @@ class LiveVoiceSettingsUiTest {
             ),
         )
 
-        compose.onNodeWithText("Vorlesestimme").assertExists()
-        compose.onNodeWithText("Live-Stimme für neue Gespräche").assertExists()
-        assertEquals(22, OpenAiLiveProtocol.supportedVoices.size)
-        OpenAiLiveProtocol.supportedVoices.forEach { voice ->
+        compose.onNodeWithText("Textantworten vorlesen").assertExists()
+        compose.onNodeWithTag("open_voice_chooser").performScrollTo()
+            .assertTextEquals("Hans’ Stimme: Cove")
+        compose.onNodeWithTag("live_voice_cove").assertDoesNotExist()
+        compose.onNodeWithTag("preview_voice").assertDoesNotExist()
+        compose.onNodeWithTag("open_voice_chooser").performClick()
+        assertEquals(9, CodexLiveVoiceVoiceResolver.supportedVoices.size)
+        CodexLiveVoiceVoiceResolver.supportedVoices.forEach { voice ->
             compose.onNodeWithTag("live_voice_$voice")
                 .performScrollTo()
-                .assertTextEquals(voice)
                 .performClick()
                 .assertIsSelected()
-            compose.onNodeWithTag("voice_fable").assertIsSelected()
+            compose.onNodeWithTag("voice_fable").assertDoesNotExist()
         }
         compose.onNodeWithTag("live_voice_fable").assertDoesNotExist()
-        compose.onNodeWithTag("preview_live_voice").assertDoesNotExist()
-        compose.onNodeWithTag("live_voice_selection_summary").assertDoesNotExist()
+        compose.onNodeWithTag("close_voice_chooser").performClick()
+        compose.onNodeWithTag("live_voice_cove").assertDoesNotExist()
+        compose.onNodeWithTag("open_voice_chooser").assertTextContains("Hans’ Stimme:", substring = true)
         compose.runOnIdle {
-            assertEquals(OpenAiLiveProtocol.supportedVoices.toList(), liveSaves)
+            assertEquals(CodexLiveVoiceVoiceResolver.supportedVoices.toList(), liveSaves)
             assertTrue(ttsSaves.isEmpty())
             assertEquals(0, previews)
         }
@@ -70,7 +78,7 @@ class LiveVoiceSettingsUiTest {
             project(
                 local = HansLocalUiState(
                     liveVoiceStatus = LiveVoiceUiStatus.LISTENING,
-                    liveVoiceVoiceSelection = confirmedRipple(),
+                    liveVoiceVoiceSelection = confirmedCove(),
                 ),
             ),
         )
@@ -79,85 +87,102 @@ class LiveVoiceSettingsUiTest {
 
         compose.onNodeWithTag("live_voice_selection_summary")
             .performScrollTo()
-            .assertTextEquals("Dieses Gespräch: ripple")
-        compose.onNodeWithTag("live_voice_willow").performScrollTo().performClick()
-        compose.onNodeWithTag("live_voice_willow").assertIsNotSelected()
-        compose.onNodeWithTag("live_voice_ripple").assertIsSelected()
-        compose.onNodeWithTag("live_voice_selection_summary")
-            .assertTextEquals("Dieses Gespräch: ripple")
+            .assertTextEquals("Aktuelle Sprachsitzung: Cove")
+        compose.onNodeWithTag("open_voice_chooser").performScrollTo().performClick()
+        compose.onNodeWithTag("preview_voice").assertIsNotEnabled()
+        compose.onNodeWithTag("live_voice_ember").performScrollTo().performClick()
+        compose.onNodeWithTag("live_voice_ember").assertIsNotSelected()
+        compose.onNodeWithTag("live_voice_cove").assertIsSelected()
         compose.runOnIdle {
-            assertEquals(listOf("willow"), requests)
+            assertEquals(listOf("ember"), requests)
             // A click alone is not persistence proof and cannot update the effective call voice.
-            assertEquals("ripple", state.value.selectedLiveVoiceId)
-            state.value = state.value.copy(selectedLiveVoiceId = "willow")
+            assertEquals("cove", state.value.selectedLiveVoiceId)
+            state.value = state.value.copy(selectedLiveVoiceId = "ember")
         }
 
-        compose.onNodeWithTag("live_voice_willow").assertIsSelected()
-        compose.onNodeWithTag("live_voice_ripple").assertIsNotSelected()
+        compose.onNodeWithTag("live_voice_ember").assertIsSelected()
+        compose.onNodeWithTag("live_voice_cove").assertIsNotSelected()
+        compose.onNodeWithTag("close_voice_chooser").performClick()
+        compose.onNodeWithTag("open_voice_chooser").assertTextEquals("Hans’ Stimme: Ember")
         compose.onNodeWithTag("live_voice_selection_summary")
             .performScrollTo()
-            .assertTextEquals("Dieses Gespräch: ripple / Nächstes Gespräch: willow")
-        compose.onNodeWithTag("voice_fable").assertIsSelected()
-        compose.runOnIdle { state.value = state.value.copy(activeLiveVoiceId = "quartz") }
+            .assertTextEquals("Aktuelle Sprachsitzung: Cove")
+        compose.onNodeWithTag("voice_fable").assertDoesNotExist()
+        compose.runOnIdle { state.value = state.value.copy(activeLiveVoiceId = "maple") }
         compose.onNodeWithTag("live_voice_selection_summary")
-            .assertTextEquals("Dieses Gespräch: quartz / Nächstes Gespräch: willow")
+            .assertTextEquals("Aktuelle Sprachsitzung: Maple")
     }
 
     @Test
     fun currentCallTextRequiresAnActiveConfirmedSnapshotAndDisappearsWhenTheCallEnds() {
         val local = mutableStateOf(HansLocalUiState(liveVoiceStatus = LiveVoiceUiStatus.LISTENING))
         showSpeechSettings(
-            state = { project(HansSettings(liveVoice = "willow"), local.value) },
+            state = { project(HansSettings(codexLiveVoice = "ember"), local.value) },
         )
 
         compose.onNodeWithTag("live_voice_selection_summary").assertDoesNotExist()
-        compose.onNodeWithTag("live_voice_willow").performScrollTo().assertIsSelected()
+        compose.onNodeWithTag("open_voice_chooser").performScrollTo().assertTextEquals("Hans’ Stimme: Ember")
         compose.runOnIdle {
-            local.value = local.value.copy(liveVoiceVoiceSelection = confirmedRipple())
+            local.value = local.value.copy(liveVoiceVoiceSelection = confirmedCove())
         }
         compose.onNodeWithTag("live_voice_selection_summary")
-            .assertTextEquals("Dieses Gespräch: ripple / Nächstes Gespräch: willow")
+            .assertTextEquals("Aktuelle Sprachsitzung: Cove")
 
         listOf(null, LiveVoiceUiStatus.FAILED).forEach { status ->
             compose.runOnIdle { local.value = local.value.copy(liveVoiceStatus = status) }
             compose.onNodeWithTag("live_voice_selection_summary").assertDoesNotExist()
-            compose.onNodeWithTag("live_voice_willow").assertIsSelected()
+            compose.onNodeWithTag("open_voice_chooser").assertTextEquals("Hans’ Stimme: Ember")
         }
     }
 
     @Test
-    fun readAloudChoicesAndPreviewRemainTtsOnlyWithAnIndependentLivePreference() {
-        val state = mutableStateOf(project(HansSettings(liveVoice = "willow")))
+    fun anActiveTaskVoiceWithoutAConfirmedVoiceIdCannotStartAPreview() {
+        var previews = 0
+        showSpeechSettings(
+            state = { project().copy(voiceSessionActive = true, activeLiveVoiceId = null) },
+            callbacks = callbacks(onPreview = { previews++ }),
+        )
+        compose.onNodeWithTag("open_voice_chooser").performScrollTo().performClick()
+        compose.onNodeWithTag("preview_voice").assertIsNotEnabled().performTouchInput { click() }
+        compose.runOnIdle { assertEquals(0, previews) }
+    }
+
+    @Test
+    fun readAloudUsesSelectedLiveVoiceWithoutApiVoiceOrUnsupportedRateControls() {
+        val state = mutableStateOf(project(HansSettings(codexLiveVoice = "ember")))
         val liveSaves = mutableListOf<String>()
         val ttsSaves = mutableListOf<String>()
         val previewedVoices = mutableListOf<String?>()
         showSpeechSettings(
             state = { state.value },
             callbacks = callbacks(
-                onLiveSelected = liveSaves::add,
+                onLiveSelected = { voice ->
+                    liveSaves += voice
+                    state.value = state.value.copy(selectedLiveVoiceId = voice)
+                },
                 onTtsSelected = { voice ->
                     ttsSaves += voice
                     state.value = state.value.copy(selectedVoiceId = voice)
                 },
-                onPreview = { previewedVoices += state.value.selectedVoiceId },
+                onPreview = { previewedVoices += state.value.selectedLiveVoiceId },
             ),
         )
 
-        compose.onNodeWithTag("preview_voice").performScrollTo().performClick()
+        compose.onNodeWithTag("read_aloud_live_voice_help")
+            .performScrollTo().assertTextEquals("Liest fertige Textantworten mit derselben Stimme vor. Antworten während eines Telefonats bleiben davon unberührt.")
+        compose.onNodeWithTag("open_voice_chooser").performScrollTo().performClick()
+        compose.onNodeWithTag("preview_voice").performClick()
         HansSettings.SUPPORTED_VOICES.forEach { voice ->
-            compose.onNodeWithTag("voice_$voice")
-                .performScrollTo()
-                .performClick()
-                .assertIsSelected()
-            compose.onNodeWithTag("live_voice_willow").assertIsSelected()
+            compose.onNodeWithTag("voice_$voice").assertDoesNotExist()
         }
-        compose.onNodeWithTag("voice_nova").performScrollTo().performClick()
-        compose.onNodeWithTag("preview_voice").performScrollTo().performClick()
+        SpeechRateOptions.forEach { rate -> compose.onNodeWithTag("speech_rate_$rate").assertDoesNotExist() }
+        compose.onNodeWithTag("live_voice_maple").performScrollTo().performClick().assertIsSelected()
+        compose.onNodeWithTag("preview_voice").performClick()
         compose.runOnIdle {
-            assertEquals(HansSettings.SUPPORTED_VOICES.toList() + "nova", ttsSaves)
-            assertEquals(listOf("fable", "nova"), previewedVoices)
-            assertTrue(liveSaves.isEmpty())
-            assertEquals("willow", state.value.selectedLiveVoiceId)
+            assertTrue(ttsSaves.isEmpty())
+            assertEquals(listOf("ember", "maple"), previewedVoices)
+            assertEquals(listOf("maple"), liveSaves)
+            assertEquals("maple", state.value.selectedLiveVoiceId)
         }
     }
 
@@ -165,7 +190,7 @@ class LiveVoiceSettingsUiTest {
         state: () -> SettingsUiState,
         callbacks: SettingsUiCallbacks = callbacks(),
     ) {
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme { SettingsScreen(state(), callbacks) }
         }
         compose.onNodeWithTag("settings_group_speech").performScrollTo().performClick()
@@ -174,12 +199,12 @@ class LiveVoiceSettingsUiTest {
     private fun project(
         settings: HansSettings = HansSettings(),
         local: HansLocalUiState = HansLocalUiState(),
-    ): SettingsUiState = HansClientUiProjector.project(null, local, settings).settings
+    ): SettingsUiState = HansClientUiProjector.project(null, local, settings, ai.hans.standard.localization.AndroidHansTextResolver(germanUiTestContext())).settings
 
-    private fun confirmedRipple() = LiveVoiceVoiceSelection(
+    private fun confirmedCove() = LiveVoiceVoiceSelection(
         requestedTtsVoice = null,
-        requestedLiveVoice = "ripple",
-        effectiveRealtimeVoice = "ripple",
+        requestedLiveVoice = "cove",
+        effectiveRealtimeVoice = "cove",
         resolution = LiveVoiceVoiceResolution.EXACT,
     )
 

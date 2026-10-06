@@ -2,8 +2,14 @@ package ai.hans.standard.ui
 
 import ai.hans.standard.phone.display.DisplayMotionMode
 import android.view.KeyEvent
+import android.content.res.Configuration
+import android.os.LocaleList
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.remember
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.test.assertIsNotSelected
 import androidx.compose.ui.test.assertIsSelected
@@ -67,13 +73,15 @@ class SettingsGroupNavigationTest {
         compose.onNodeWithText("Einstellungen").assertDoesNotExist()
         compose.onNodeWithTag("settings_content").assertDoesNotExist()
         compose.onNodeWithTag("settings_back_to_groups").assertDoesNotExist()
+        compose.onNodeWithTag("settings_group_remote_control").assertDoesNotExist()
+        compose.onNodeWithTag("settings_group_advanced_work").assertDoesNotExist()
         groups.forEach { (_, _, control) ->
             compose.onNodeWithTag(control).assertDoesNotExist()
         }
         compose.onNodeWithText(
             "Die Markierung ändert sich erst, wenn Codex die Auswahl bestätigt hat.",
         ).assertDoesNotExist()
-        compose.onNodeWithText(NotificationFactArchiveStatus.DISCLOSURE).assertDoesNotExist()
+        compose.onNodeWithText(NotificationFactArchiveStatus.disclosure(ai.hans.standard.localization.AndroidHansTextResolver(germanUiTestContext()))).assertDoesNotExist()
         compose.onNodeWithTag("notification_link_metadata_disclosure").assertDoesNotExist()
     }
 
@@ -92,7 +100,7 @@ class SettingsGroupNavigationTest {
             listOf("open_apps", "open_plugins", "open_automations", "start_setup").forEach { tag ->
                 compose.onNodeWithTag(tag).assertDoesNotExist()
             }
-            if (id == "advanced_work") compose.onNodeWithTag("open_workbench").assertExists()
+            if (id == "maintenance") compose.onNodeWithTag("open_workbench").assertExists()
             else compose.onNodeWithTag("open_workbench").assertDoesNotExist()
 
             compose.onNodeWithTag("settings_back_to_groups").performClick()
@@ -123,10 +131,114 @@ class SettingsGroupNavigationTest {
         showSidebar(callbacks = settingsCallbacks().copy(onOpenWorkbench = { opens++ }))
 
         compose.onNodeWithTag("open_workbench").assertDoesNotExist()
-        openGroup("advanced_work")
+        openGroup("maintenance")
         compose.onNodeWithTag("open_workbench").performScrollTo().performClick()
 
         compose.runOnIdle { assertEquals(1, opens) }
+    }
+
+    @Test
+    fun movedControlsHaveOnePrimaryCategoryAndKeyfreeSpeechHasNoApiControls() {
+        showSidebar()
+        openGroup("runtime")
+        compose.onNodeWithTag("codex_update").assertDoesNotExist()
+        compose.onNodeWithTag("settings_back_to_groups").performClick()
+        openGroup("speech")
+        compose.onNodeWithTag("confirmed_stt_glossary_status").assertDoesNotExist()
+        compose.onNodeWithTag("open_voice_chooser").assertExists()
+        compose.onNodeWithTag("speech_credential_status").assertDoesNotExist()
+        compose.onNodeWithTag("open_openai_billing_page").assertDoesNotExist()
+        compose.onNodeWithTag("advanced_read_aloud_toggle").assertDoesNotExist()
+        compose.onNodeWithTag("read_aloud_live_voice_help").assertExists()
+        compose.onNodeWithTag("settings_back_to_groups").performClick()
+        openGroup("personal")
+        compose.onNodeWithTag("native_memory_health_open").assertExists()
+        compose.onNodeWithTag("confirmed_stt_glossary_status").assertDoesNotExist()
+        compose.onNodeWithTag("notification_fact_archive_status").assertDoesNotExist()
+        compose.onNodeWithTag("whatsapp_agent_channel").assertDoesNotExist()
+        compose.onNodeWithTag("settings_back_to_groups").performClick()
+        openGroup("permissions")
+        compose.onNodeWithTag("whatsapp_agent_channel").assertExists()
+        compose.onNodeWithTag("notification_fact_archive_status").assertExists()
+        compose.onNodeWithTag("notification_fact_archive_details").assertDoesNotExist()
+        compose.onNodeWithTag("notification_fact_archive_details_toggle").performScrollTo().performClick()
+        compose.onNodeWithTag("notification_fact_archive_details").assertExists()
+        compose.onNodeWithTag("settings_back_to_groups").performClick()
+        openGroup("maintenance")
+        listOf("codex_update", "hans_app_version", "export_hans_backup", "remote_worker_state",
+            "open_workbench", "open_source_licenses").forEach { compose.onNodeWithTag(it).assertExists() }
+        compose.onNodeWithTag("speech_credential_status").assertDoesNotExist()
+        compose.onNodeWithTag("native_memory_health_open").assertDoesNotExist()
+        compose.onNodeWithTag("remote_worker_id").assertDoesNotExist()
+    }
+
+    @Test
+    fun quickSettingsTileIsAnInputSetupActionNotAnAndroidPermissionOrInventedToggle() {
+        var requests = 0
+        showSidebar(settings = { SettingsUiState(capabilityAccess = listOf(
+            CapabilityAccessUiModel(CapabilityAccessUiId.QUICK_SETTINGS_TILE, "Diktat-Kachel hinzufügen", "Android-Schnelleinstellungen", true),
+        )) }, callbacks = settingsCallbacks().copy(onCapabilityAccessRequested = {
+            assertEquals(CapabilityAccessUiId.QUICK_SETTINGS_TILE, it)
+            requests++
+        }))
+        openGroup("permissions")
+        compose.onNodeWithTag("grant_quick_settings_tile").assertDoesNotExist()
+        compose.onNodeWithTag("settings_back_to_groups").performClick()
+        openGroup("input")
+        compose.onNodeWithTag("grant_quick_settings_tile").performScrollTo()
+            .assertTextEquals("Diktat-Kachel hinzufügen").performClick()
+        compose.runOnIdle { assertEquals(1, requests) }
+    }
+
+    @Test
+    fun legacyAdvancedDestinationRendersSystemButDoesNotActivateTheOutgoingWorker() {
+        var opens = 0
+        var activations = 0
+        compose.setGermanContent {
+            MaterialTheme {
+                SettingsContent(SettingsUiState(), settingsCallbacks().copy(
+                    onRemoteWorkerSettingsOpened = { opens++ },
+                    onActivateRemoteWorker = { activations++ },
+                ), SettingsGroup.ADVANCED_WORK)
+            }
+        }
+        compose.onNodeWithTag("codex_update").assertExists()
+        compose.onNodeWithTag("remote_worker_state").assertExists()
+        compose.onNodeWithTag("remote_worker_id").assertDoesNotExist()
+        compose.onNodeWithTag("remote_control_settings").assertDoesNotExist()
+        compose.runOnIdle { assertEquals(1, opens); assertEquals(0, activations) }
+    }
+
+    @Test
+    fun sixCategoriesRenderEnglishFallbackAndGermanWithEinkPreference() {
+        val language = mutableStateOf("en-US")
+        compose.setContent {
+            val base = LocalContext.current
+            val configuration = LocalConfiguration.current
+            val context = remember(base, configuration, language.value) {
+                base.createConfigurationContext(Configuration(configuration).apply {
+                    setLocales(LocaleList.forLanguageTags(language.value))
+                })
+            }
+            CompositionLocalProvider(LocalContext provides context,
+                LocalConfiguration provides context.resources.configuration) {
+                MaterialTheme {
+                    SettingsScreen(SettingsUiState(displayMotionMode = DisplayMotionMode.E_INK), settingsCallbacks())
+                }
+            }
+        }
+        listOf("en-US", "fr-FR", "de-DE").forEach { locale ->
+            compose.runOnIdle { language.value = locale }
+            val titles = if (locale == "de-DE") groups.map { it.second } else listOf(
+                "Model & responses", "Voice & dictation", "Keys & display", "Hans & memory",
+                "Permissions & privacy", "System & advanced",
+            )
+            groups.zip(titles).forEach { (group, title) ->
+                compose.onNodeWithTag("settings_group_${group.first}").performScrollTo().assertTextEquals(title)
+            }
+            compose.onNodeWithTag("settings_group_advanced_work").assertDoesNotExist()
+            compose.onNodeWithTag("settings_group_remote_control").assertDoesNotExist()
+        }
     }
 
     @Test
@@ -171,12 +283,19 @@ class SettingsGroupNavigationTest {
     }
 
     @Test
-    fun closingAGroupByButtonOrScrimResetsReopeningAndPreservesTheDraft() {
+    fun detailCloseAndOverviewScrimResetReopeningAndPreserveTheDraft() {
         showSidebar()
 
         listOf("close_chat_navigation", "chat_navigation_scrim").forEach { closeTag ->
             openGroup("input")
             compose.onNodeWithTag("display_motion_effective").assertExists()
+            compose.onNodeWithTag("chat_navigation_scrim").assertDoesNotExist()
+            if (closeTag == "chat_navigation_scrim") {
+                // Detail pages deliberately fill the width: only the compact overview has a scrim.
+                compose.onNodeWithTag("settings_back_to_groups").performClick()
+                compose.onNodeWithTag("settings_group_overview").assertExists()
+                compose.onNodeWithTag("settings_content").assertDoesNotExist()
+            }
             compose.onNodeWithTag(closeTag).performClick()
             compose.onNodeWithTag("chat_navigation_panel").assertDoesNotExist()
             compose.onNodeWithTag("composer").assertTextContains(DRAFT)
@@ -220,7 +339,7 @@ class SettingsGroupNavigationTest {
 
         pressAndroidBack()
         compose.onNodeWithTag("third_party_notices").assertDoesNotExist()
-        compose.onNodeWithTag("settings_group_title").assertTextEquals("Zugänge & Sicherung")
+        compose.onNodeWithTag("settings_group_title").assertTextEquals("System & Erweitert")
         compose.onNodeWithTag("settings_content").assertExists()
         compose.onNodeWithTag("settings_group_overview").assertDoesNotExist()
         compose.onNodeWithTag("open_source_licenses").assertExists()
@@ -309,7 +428,7 @@ class SettingsGroupNavigationTest {
     @Test
     fun legacySettingsUsesTheSameGroupsAndOnlyExitsFromTheOverview() {
         var exits = 0
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 SettingsScreen(SettingsUiState(), settingsCallbacks().copy(onBack = { exits++ }))
             }
@@ -317,7 +436,7 @@ class SettingsGroupNavigationTest {
         compose.onNodeWithTag("settings_group_overview").assertExists()
         compose.onNodeWithTag("settings_content").assertDoesNotExist()
         openGroup("input")
-        compose.onNodeWithText("Tasten & Bedienung").assertExists()
+        compose.onNodeWithText("Tasten & Anzeige").assertExists()
         compose.onNodeWithTag("display_motion_effective").assertExists()
         compose.onNodeWithTag("model_gpt-5.6-luna").assertDoesNotExist()
 
@@ -338,7 +457,7 @@ class SettingsGroupNavigationTest {
         onClosed: () -> Unit = {},
         onOpenWorkbench: () -> Unit = {},
     ) {
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 ChatScreen(
                     state = ChatUiState(composer = ComposerUiState(text = DRAFT)),
@@ -405,14 +524,12 @@ class SettingsGroupNavigationTest {
     private companion object {
         const val DRAFT = "Unveränderter Entwurf"
         val groups = listOf(
-            Triple("permissions", "Berechtigungen", "persistent_android_consent_notice"),
             Triple("runtime", "Modell & Antworten", "model_gpt-5.6-luna"),
-            Triple("speech", "Stimme & Vorlesen", "read_aloud_all_messages"),
-            Triple("input", "Tasten & Bedienung", "display_motion_effective"),
-            Triple("personal", "Einrichtung & Gedächtnis", "notification_fact_archive_status"),
-            Triple("remote_control", "Fernzugriff durch ChatGPT Desktop", "remote_control_status"),
-            Triple("advanced_work", "Erweiterte Arbeit", "remote_worker_state"),
-            Triple("maintenance", "Zugänge & Sicherung", "speech_credential_status"),
+            Triple("speech", "Sprache & Diktat", "read_aloud_all_messages"),
+            Triple("input", "Tasten & Anzeige", "display_motion_effective"),
+            Triple("personal", "Hans & Gedächtnis", "native_memory_health_open"),
+            Triple("permissions", "Berechtigungen & Datenschutz", "persistent_android_consent_notice"),
+            Triple("maintenance", "System & Erweitert", "codex_update"),
         )
     }
 }

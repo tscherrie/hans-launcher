@@ -1,5 +1,8 @@
 package ai.hans.standard.ui
 
+import ai.hans.standard.localization.TestResourceTextResolver
+import java.util.Locale
+
 import ai.hans.standard.automations.AutomationConfirmationPolicy
 import ai.hans.standard.automations.AutomationDefinition
 import ai.hans.standard.automations.AutomationId
@@ -25,6 +28,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AutomationsUiProjectionTest {
+    private val localizationText by lazy { TestResourceTextResolver(Locale.GERMAN) }
+
     @Test
     fun projectsPersistedUnattendedPolicyAndCatchUpStateWithoutInventingRuntimeState() {
         val id = AutomationId("morning_briefing")
@@ -58,7 +63,7 @@ class AutomationsUiProjectionTest {
             ),
         )
 
-        val state = projectAutomations(snapshot, ZoneId.of("Europe/Sofia"))
+        val state = projectAutomations(snapshot, ZoneId.of("Europe/Sofia"), text = localizationText)
 
         val item = state.items.single()
         assertEquals("morning_briefing", item.id)
@@ -85,8 +90,7 @@ class AutomationsUiProjectionTest {
 
         val item = projectAutomations(
             AutomationStorageSnapshot(definitions = listOf(definition)),
-            ZoneId.of("UTC"),
-        ).items.single()
+            ZoneId.of("UTC"), text = localizationText).items.single()
 
         assertFalse(item.enabled)
         assertFalse(item.unattended)
@@ -117,8 +121,7 @@ class AutomationsUiProjectionTest {
                     ),
                 ),
             ),
-            ZoneId.of("UTC"),
-        ).items.single()
+            ZoneId.of("UTC"), text = localizationText).items.single()
 
         assertEquals("Keine Internetverbindung", item.lastFailureLabel)
         assertEquals(1, item.pendingCount)
@@ -159,8 +162,7 @@ class AutomationsUiProjectionTest {
                         ),
                     ),
                 ),
-                ZoneId.of("UTC"),
-            ).items.single()
+                ZoneId.of("UTC"), text = localizationText).items.single()
 
             assertEquals(expectedLabel, item.lastFailureLabel)
             assertEquals(expectedLabel, item.history.single().failureLabel)
@@ -197,8 +199,7 @@ class AutomationsUiProjectionTest {
                     ),
                 ),
             ),
-            ZoneId.of("UTC"),
-        ).items.single()
+            ZoneId.of("UTC"), text = localizationText).items.single()
 
         assertTrue(item.lastRunLabel.startsWith("Erfolgreich"))
         assertNull(item.lastFailureLabel)
@@ -234,8 +235,7 @@ class AutomationsUiProjectionTest {
                     ),
                 ),
             ),
-            ZoneId.of("UTC"),
-        ).items.single()
+            ZoneId.of("UTC"), text = localizationText).items.single()
 
         assertTrue(item.lastRunLabel.startsWith("Fehlgeschlagen"))
         assertEquals("Ausführung nicht abgeschlossen", item.lastFailureLabel)
@@ -278,8 +278,7 @@ class AutomationsUiProjectionTest {
                     ),
                 ),
             ),
-            ZoneId.of("UTC"),
-        ).items.single()
+            ZoneId.of("UTC"), text = localizationText).items.single()
 
         assertEquals(2, item.history.size)
         assertTrue(item.history[0].headline.startsWith("Erfolgreich · 30.08.2026, 07:05"))
@@ -312,8 +311,7 @@ class AutomationsUiProjectionTest {
                 ),
                 receipts = receipts,
             ),
-            ZoneId.of("UTC"),
-        ).items.single()
+            ZoneId.of("UTC"), text = localizationText).items.single()
 
         assertEquals(20, item.history.size)
         assertTrue(item.historyTruncated)

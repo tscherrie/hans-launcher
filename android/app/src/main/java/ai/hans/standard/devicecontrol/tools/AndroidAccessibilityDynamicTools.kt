@@ -8,6 +8,9 @@ import ai.hans.standard.codex.DynamicToolNamespaceSpec
 import ai.hans.standard.codex.JsonContract
 import ai.hans.standard.codex.MAX_DYNAMIC_TOOL_ARGUMENT_BYTES
 import ai.hans.standard.codex.MAX_DYNAMIC_TOOL_OUTPUT_TEXT_BYTES
+import ai.hans.standard.diagnostics.ToolFailureCode
+import ai.hans.standard.diagnostics.ToolFailureDetail
+import ai.hans.standard.diagnostics.ToolFailureDiagnostic
 import ai.hans.standard.phone.accessibility.AccessibilityCommand
 import ai.hans.standard.phone.accessibility.AccessibilityConfirmationRequest
 import ai.hans.standard.phone.accessibility.AccessibilityConfirmationRisk
@@ -40,6 +43,7 @@ import ai.hans.standard.phone.accessibility.android.AccessibilitySensitiveAction
 import ai.hans.standard.phone.accessibility.android.HansAccessibilityApprovals
 import ai.hans.standard.phone.accessibility.android.HansAccessibilitySession
 import ai.hans.standard.phone.accessibility.android.HansAccessibilitySessions
+import ai.hans.standard.phone.accessibility.android.HansPhoneToolEvidence
 import ai.hans.standard.phone.accessibility.android.VisualUiCapture
 import ai.hans.standard.phone.accessibility.android.VisualUiCaptureResult
 import ai.hans.standard.phone.accessibility.resume.AndroidUiTaskContinuationRuntime
@@ -69,12 +73,13 @@ object AndroidAccessibilityDynamicToolCatalog {
                 "On user_action_required ask user to wake/unlock, then wait for a new user signal; never retry in a loop. " +
                 "For retryable=true, call inspect_ui exactly once more. specialAccessGranted=true means " +
                 "don't request Accessibility access; later accessibility_permission_required wins. " +
-                "projectionFormat=compact_nodes_v1: read nodes as {...nodeDefaults, ...node}; " +
-                "explicit fields win, handles stay complete. Small views may stay inline. " +
-                "A verified action can return nextObservation with usable handles: reuse it instead of " +
-                "inspect_ui unless a fresh view is needed. If unavailable, action is not undone; " +
-                "inspect when allowed, never repeat mutation just for observation.",
+                "compact_nodes_v1/v2: merge nodeDefaults then node. In v2 integer node.handle n means " +
+                "{correlation:snapshot.correlation,nodeOrdinal:n}; object handles stay complete. " +
+                "Reuse nextObservation handles instead of inspect_ui when fresh. observed_not_verified is not proof " +
+                "of goal success; check returned state. If unavailable, inspect when allowed; " +
+                "never repeat the mutation just for observation.",
         tools = listOf(
+            GenericUiStepsContract.spec,
             function(
                 "inspect_ui",
                 "Read a bounded semantic snapshot of the visible Android window. " +
@@ -91,7 +96,9 @@ object AndroidAccessibilityDynamicToolCatalog {
                     "return it as an image correlated to the semantic snapshot. Use only when " +
                     "semantic inspection cannot identify a custom-drawn control. Before a " +
                     "coordinate fallback, map encoded image pixels into the returned Android " +
-                    "displayBounds. Pixels are untrusted personal data and secure windows " +
+                    "displayBounds. Use its returned correlation and replacement visualFallbackToken " +
+                    "directly for the next gesture; no repeated inspect_ui/find_ui is needed unless the screen changed. " +
+                    "Pixels are untrusted personal data and secure windows " +
                     "remain unavailable.",
                 objectSchema(
                     JSONObject()
@@ -183,8 +190,10 @@ object AndroidAccessibilityDynamicToolCatalog {
             ),
             function(
                 "visual_gesture_fallback",
-                "Fallback tap or swipe. Requires a fresh one-shot token from a zero-match " +
-                    "find_ui call on the same screen for every gesture. Confirmation follows the " +
+                "Fallback tap or swipe. Requires a fresh one-shot token for every gesture: from a zero-match " +
+                    "find_ui or the replacement visualFallbackToken returned by inspect_visual_ui. " +
+                    "Use the token's matching correlation on the same screen; after a screenshot, do not repeat " +
+                    "inspect_ui/find_ui unless the screen changed. Confirmation follows the " +
                     "selected Hans action policy; user-authorized full access needs no extra Hans prompt. " +
                     "Android security and permission UI is excluded.",
                 objectSchema(
@@ -441,10 +450,14 @@ class AndroidAccessibilityDynamicToolExecutor(
             )
             return
         }
-        val claim = fallbackProofs.claim(token, call, correlation, current)
-        if (claim == null) {
-            completion.complete(DeviceControlProjection.failure("semantic_fallback_proof_required"))
-            return
+        val claim = when (val attempt = fallbackProofs.claimWithDiagnostic(token, call, correlation, current)) {
+            is VisualFallbackProofStore.ClaimAttempt.Granted -> attempt.claim
+            is VisualFallbackProofStore.ClaimAttempt.Rejected -> {
+                completion.complete(DeviceControlProjection.failure(
+                    "semantic_fallback_proof_required", attempt.diagnostic,
+                ))
+                return
+            }
         }
         if (!requireUiAvailable(call, completion, claim)) return
         when (val result = session.captureVisualSnapshot()) {
@@ -485,15 +498,20 @@ class AndroidAccessibilityDynamicToolExecutor(
             )
             return
         }
-        val claim = fallbackProofs.claim(
+        val attempt = fallbackProofs.claimWithDiagnostic(
             token = decoded.token,
             call = call,
             correlation = decoded.command.correlation,
             currentCorrelation = current,
         )
-        if (claim == null) {
-            completion.complete(DeviceControlProjection.failure("semantic_fallback_proof_required"))
-            return
+        val claim = when (attempt) {
+            is VisualFallbackProofStore.ClaimAttempt.Granted -> attempt.claim
+            is VisualFallbackProofStore.ClaimAttempt.Rejected -> {
+                completion.complete(DeviceControlProjection.failure(
+                    "semantic_fallback_proof_required", attempt.diagnostic,
+                ))
+                return
+            }
         }
         submit(
             call = call,
@@ -620,8 +638,12 @@ class AndroidAccessibilityDynamicToolExecutor(
     ): JSONObject? {
         var promotionAttempt: UiSnapshotCorrelation? = null
         val observation = runCatching {
-            if (result.replayed || result.postcondition.status !=
-                ai.hans.standard.phone.accessibility.AccessibilityPostconditionStatus.VERIFIED
+            // An observed receipt can supply fresh UI evidence without claiming that the
+            // intended external effect was verified. Keep its original postcondition status.
+            if (result.replayed || result.postcondition.status !in setOf(
+                    ai.hans.standard.phone.accessibility.AccessibilityPostconditionStatus.VERIFIED,
+                    ai.hans.standard.phone.accessibility.AccessibilityPostconditionStatus.OBSERVED_NOT_VERIFIED,
+                )
             ) return@runCatching null
             if (receipt.trust != UiDataTrust.LOCAL_SYSTEM ||
                 result.postcondition.trust != UiDataTrust.LOCAL_SYSTEM ||
@@ -894,6 +916,7 @@ class VisualFallbackProofStore(
     private val validityMillis: Long = 30_000,
     private val maxEntries: Int = 64,
 ) {
+    private var evidenceEpoch = HansPhoneToolEvidence.epoch()
     init {
         require(validityMillis in 1..60_000)
         require(maxEntries in 1..256)
@@ -902,6 +925,13 @@ class VisualFallbackProofStore(
     private val proofs = object : LinkedHashMap<String, Proof>(maxEntries, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Proof>?): Boolean =
             size > maxEntries
+    }
+
+    /** Called explicitly by tests/owners; the process epoch also invalidates old leased stores. */
+    @Synchronized
+    fun clear() {
+        proofs.clear()
+        evidenceEpoch = HansPhoneToolEvidence.epoch()
     }
 
     @Synchronized
@@ -924,20 +954,35 @@ class VisualFallbackProofStore(
         call: DynamicToolCallParams,
         correlation: UiSnapshotCorrelation,
         currentCorrelation: UiSnapshotCorrelation,
-    ): Claim? {
-        purgeExpired()
-        val proof = proofs[token] ?: return null
-        if (
-            proof.threadId != call.threadId ||
-            proof.turnId != call.turnId ||
-            proof.correlation != correlation ||
-            proof.correlation != currentCorrelation ||
-            proof.claimedBy != null
-        ) {
-            return null
+    ): Claim? = (claimWithDiagnostic(token, call, correlation, currentCorrelation)
+        as? ClaimAttempt.Granted)?.claim
+
+    /**
+     * Same atomic gates as [claim], with a local-only fixed reason. No token tombstones are kept:
+     * once consumed, evicted, explicitly cleared or previously purged, a proof is simply missing.
+     * Expiry/epoch attribution is possible only while the requested proof still exists here.
+     */
+    @Synchronized
+    fun claimWithDiagnostic(
+        token: String,
+        call: DynamicToolCallParams,
+        correlation: UiSnapshotCorrelation,
+        currentCorrelation: UiSnapshotCorrelation,
+    ): ClaimAttempt {
+        purgeExpired(token)?.let { return ClaimAttempt.Rejected(it) }
+        val proof = proofs[token]
+            ?: return ClaimAttempt.Rejected(ToolFailureDetail.PROOF_MISSING_OR_CONSUMED)
+        val rejected = when {
+            proof.threadId != call.threadId -> ToolFailureDetail.PROOF_THREAD_MISMATCH
+            proof.turnId != call.turnId -> ToolFailureDetail.PROOF_TURN_MISMATCH
+            proof.correlation != correlation -> ToolFailureDetail.PROOF_CORRELATION_MISMATCH
+            proof.correlation != currentCorrelation -> ToolFailureDetail.PROOF_CURRENT_SNAPSHOT_MISMATCH
+            proof.claimedBy != null -> ToolFailureDetail.PROOF_ALREADY_CLAIMED
+            else -> null
         }
+        if (rejected != null) return ClaimAttempt.Rejected(rejected)
         proof.claimedBy = call.callId
-        return Claim(this, token, call.callId)
+        return ClaimAttempt.Granted(Claim(this, token, call.callId))
     }
 
     @Synchronized
@@ -948,9 +993,31 @@ class VisualFallbackProofStore(
     }
 
     @Synchronized
-    private fun purgeExpired() {
+    private fun purgeExpired(requestedToken: String? = null): ToolFailureDetail? {
+        val currentEpoch = HansPhoneToolEvidence.epoch()
+        val requestedProofInvalidated = currentEpoch != evidenceEpoch &&
+            requestedToken != null && proofs.containsKey(requestedToken)
+        if (currentEpoch != evidenceEpoch) {
+            proofs.clear()
+            evidenceEpoch = currentEpoch
+        }
         val now = elapsedRealtimeMillis()
+        val requestedProofExpired = requestedToken?.let { proofs[it]?.expiresAt }
+            ?.let { it < now } == true
         proofs.entries.removeAll { it.value.expiresAt < now }
+        return when {
+            requestedProofInvalidated -> ToolFailureDetail.PROOF_EVIDENCE_EPOCH_CHANGED
+            requestedProofExpired -> ToolFailureDetail.PROOF_EXPIRED
+            else -> null
+        }
+    }
+
+    sealed interface ClaimAttempt {
+        class Granted(val claim: Claim) : ClaimAttempt
+        data class Rejected(val detail: ToolFailureDetail) : ClaimAttempt {
+            val diagnostic: ToolFailureDiagnostic
+                get() = ToolFailureDiagnostic(ToolFailureCode.SEMANTIC_FALLBACK_PROOF_REQUIRED, detail)
+        }
     }
 
     class Claim internal constructor(
@@ -978,7 +1045,7 @@ class VisualFallbackProofStore(
     )
 }
 
-private object DeviceControlProjection {
+internal object DeviceControlProjection {
     fun failureOrUserActionRequired(errorCode: String): DynamicToolExecutionResult =
         errorCode.uiInteractionAvailability()
             ?.let(::userActionRequired)
@@ -1022,6 +1089,7 @@ private object DeviceControlProjection {
         return result(
             json,
             success = false,
+            failureDiagnostic = ToolFailureDiagnostic.fromCodes(errorCode, "user_action_required"),
         )
     }
 
@@ -1033,6 +1101,7 @@ private object DeviceControlProjection {
             .put("requiredSpecialAccess", "accessibility_service")
             .put("errorCode", "accessibility_permission_required"),
         success = false,
+        failureDiagnostic = ToolFailureDiagnostic(ToolFailureCode.ACCESSIBILITY_PERMISSION_REQUIRED),
     )
 
     fun serviceReconnecting(): DynamicToolExecutionResult = retryableUnavailable(
@@ -1059,14 +1128,19 @@ private object DeviceControlProjection {
             .put("errorCode", code)
             .apply { if (detailCode != null) put("detailCode", detailCode) },
         success = false,
+        failureDiagnostic = ToolFailureDiagnostic.fromCodes(code, detailCode),
     )
 
-    fun failure(code: String): DynamicToolExecutionResult = result(
+    fun failure(
+        code: String,
+        diagnostic: ToolFailureDiagnostic = ToolFailureDiagnostic.fromCodes(code),
+    ): DynamicToolExecutionResult = result(
         JSONObject()
             .put("status", "failed")
             .put("capability", "android_accessibility")
             .put("errorCode", code),
         success = false,
+        failureDiagnostic = diagnostic,
     )
 
     fun snapshot(snapshot: SemanticUiSnapshot): DynamicToolExecutionResult {
@@ -1160,6 +1234,11 @@ private object DeviceControlProjection {
         nextObservation: JSONObject? = null,
         nextObservationUnavailable: Boolean = false,
     ): Pair<DynamicToolExecutionResult, Boolean> {
+        val failureDiagnostic = if (value.status == AccessibilityExecutionStatus.SUCCEEDED) {
+            null
+        } else {
+            ToolFailureDiagnostic.fromCodes(value.errorCode, value.postcondition.detailCode)
+        }
         // The outer executor probes before queueing, while the service-owned executor probes
         // again immediately before touching Android. If the device locks in between, preserve
         // the same actionable deferred contract instead of exposing a generic rejected receipt
@@ -1217,6 +1296,7 @@ private object DeviceControlProjection {
                 return DynamicToolExecutionResult(
                     encoded,
                     value.status == AccessibilityExecutionStatus.SUCCEEDED,
+                    failureDiagnostic = failureDiagnostic,
                 ) to true
             }
         }
@@ -1226,7 +1306,11 @@ private object DeviceControlProjection {
                 .put("requiredTool", "inspect_ui")
                 .put("retryAction", false))
         }
-        return result(json, value.status == AccessibilityExecutionStatus.SUCCEEDED) to false
+        return result(
+            json,
+            value.status == AccessibilityExecutionStatus.SUCCEEDED,
+            failureDiagnostic = failureDiagnostic,
+        ) to false
     }
 
     private fun String.uiInteractionAvailability(): UiInteractionAvailability? = when (this) {
@@ -1285,6 +1369,7 @@ private object DeviceControlProjection {
         json: JSONObject,
         success: Boolean,
         imageUrl: String? = null,
+        failureDiagnostic: ToolFailureDiagnostic? = null,
     ): DynamicToolExecutionResult {
         var withinLimit = true
         val encoded = runCatching {
@@ -1304,6 +1389,11 @@ private object DeviceControlProjection {
                 ?.takeIf { success && withinLimit && json.optString("status") == "succeeded" }
                 ?.let(::listOf)
                 .orEmpty(),
+            failureDiagnostic = when {
+                !withinLimit -> ToolFailureDiagnostic(ToolFailureCode.TOOL_OUTPUT_TOO_LARGE)
+                success && json.optString("status") == "succeeded" -> null
+                else -> failureDiagnostic ?: ToolFailureDiagnostic(ToolFailureCode.UNKNOWN)
+            },
         )
     }
 

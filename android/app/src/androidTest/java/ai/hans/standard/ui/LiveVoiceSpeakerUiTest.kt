@@ -27,7 +27,7 @@ class LiveVoiceSpeakerUiTest {
             effective = SpeechAudioRoute.SPEAKER))
         val phase = mutableStateOf(LiveVoiceUiStatus.LISTENING)
         val requests = mutableListOf<SpeechAudioRoute>()
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 ChatScreen(ChatUiState(liveVoiceStatus = phase.value, speechAudioRoute = route.value),
                     callbacks(requests::add))
@@ -58,7 +58,7 @@ class LiveVoiceSpeakerUiTest {
     @Test fun noEarpieceOrNoActiveRouteDisablesTheSwitchWithoutHidingIt() {
         val route = mutableStateOf(SpeechAudioRouteState(active = true,
             available = setOf(SpeechAudioRoute.SPEAKER), effective = SpeechAudioRoute.SPEAKER))
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 LiveVoiceCallScreen(LiveVoiceUiStatus.LISTENING, false, {}, {}, audioRoute = route.value)
             }
@@ -71,7 +71,7 @@ class LiveVoiceSpeakerUiTest {
     @Test fun externalRouteIsDescribedTruthfullyAndConnectingControlStaysDisabled() {
         val phase = mutableStateOf(LiveVoiceUiStatus.CONNECTING)
         val requests = mutableListOf<SpeechAudioRoute>()
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 LiveVoiceCallScreen(phase.value, false, {}, {},
                     audioRoute = SpeechAudioRouteState(active = true,

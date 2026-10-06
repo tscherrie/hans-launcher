@@ -33,7 +33,7 @@ class HansDictationForegroundLifecycleTest {
         val factory = service.substringAfter("override fun createServiceCore(")
             .substringBefore("override fun onRecordingStartCommand(")
         val listener = service.substringAfter("override fun onRecordingStateChanged(")
-            .substringBefore("private fun requestRecording()")
+            .substringBefore("private fun requestRecording(startId: Int)")
         val release = service.substringAfter("override fun releaseRecordingResources()")
             .substringBefore("companion object")
 
@@ -54,7 +54,7 @@ class HansDictationForegroundLifecycleTest {
         val onStart = base.substringAfter("final override fun onStartCommand(")
             .substringBefore("protected open fun requiresForegroundAcknowledgement")
         val lazyInitializer = base.substringAfter("private fun requireServiceCore()")
-        val prerequisites = service.substringAfter("private fun requestRecording()")
+        val prerequisites = service.substringAfter("private fun requestRecording(startId: Int)")
             .substringBefore("override fun onStartRejected")
 
         assertFalse(onCreate.contains("createServiceCore(recordingForegroundHost)"))
@@ -62,10 +62,13 @@ class HansDictationForegroundLifecycleTest {
             0 until onStart.indexOf("onRecordingStartCommand(intent, flags, startId)"))
         assertTrue(lazyInitializer.contains("createServiceCore(recordingForegroundHost)"))
         assertTrue(service.contains("requiresForegroundStart(intent?.action)"))
-        assertTrue(prerequisites.contains("SpeechCredentialStatus.MISSING"))
-        assertTrue(prerequisites.contains("SpeechCredentialStatus.TEMPORARILY_UNAVAILABLE"))
+        assertTrue(prerequisites.contains("hasCodexSpeechAccess()"))
+        assertTrue(prerequisites.contains("batchGateway?.isAvailable() ?: AndroidCodexBatchTranscriptionGateway(this)"))
+        assertTrue(prerequisites.contains("val lease = newAdmissionLease()"))
+        assertTrue(prerequisites.contains("phoneOwnsCapture()"))
+        assertFalse(prerequisites.contains("speechCredentialStatus()"))
         assertTrue(prerequisites.contains("!internet.permitsExplicitRequest"))
-        assertTrue(prerequisites.windowed("stopSelf()".length).count { it == "stopSelf()" } >= 3)
+        assertTrue(prerequisites.windowed("stopSelf(startId)".length).count { it == "stopSelf(startId)" } >= 2)
     }
 
     @Test

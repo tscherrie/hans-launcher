@@ -1,5 +1,8 @@
 package ai.hans.standard.ui
 
+import ai.hans.standard.localization.TestResourceTextResolver
+import java.util.Locale
+
 import ai.hans.standard.codex.AccountPhase
 import ai.hans.standard.codex.AccountUiSnapshot
 import ai.hans.standard.codex.DeliveryUiSnapshot
@@ -25,6 +28,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class DictationPreviewProjectionTest {
+    private val localizationText by lazy { TestResourceTextResolver(Locale.GERMAN) }
+
     @Test
     fun finalizedDictationWhileBusyKeepsOneOrdinaryUserMessageWithoutManualDraftActions() {
         val pending = PendingDictation(
@@ -47,7 +52,7 @@ class DictationPreviewProjectionTest {
             ),
         )
         val local = HansLocalUiState(pendingDictations = listOf(pending))
-        val state = HansClientUiProjector.project(client, local, HansSettings())
+        val state = HansClientUiProjector.project(client, local, HansSettings(), text = localizationText)
         assertTrue(state.chat.isWorking)
         assertTrue(state.chat.pendingDictations.isEmpty())
         assertEquals(1, state.chat.messages.count { it.text == pending.transcript })
@@ -59,8 +64,7 @@ class DictationPreviewProjectionTest {
             local.copy(pendingDictations = listOf(pending.copy(
                 delivery = PendingDictationDelivery.OUTCOME_UNKNOWN,
             ))),
-            HansSettings(),
-        )
+            HansSettings(), text = localizationText)
         assertEquals(1, recovery.chat.pendingDictations.size)
         assertFalse(recovery.chat.pendingDictations.single().canRetry)
     }
@@ -101,7 +105,7 @@ class DictationPreviewProjectionTest {
             dictationStatus = DictationUiStatus.LISTENING,
             dictationPreview = "Ein vorläufiger Sprachtext",
         )
-        val state = HansClientUiProjector.project(null, local, HansSettings())
+        val state = HansClientUiProjector.project(null, local, HansSettings(), text = localizationText)
 
         assertEquals(local.dictationPreview, state.chat.dictationPreview)
         assertEquals(local.text, state.chat.composer.text)
@@ -118,12 +122,11 @@ class DictationPreviewProjectionTest {
             dictationStatus = DictationUiStatus.LISTENING,
             dictationPreview = "Noch nicht bestätigt",
         )
-        val initial = HansClientUiProjector.project(client, local, HansSettings())
+        val initial = HansClientUiProjector.project(client, local, HansSettings(), text = localizationText)
         val changed = HansClientUiProjector.project(
             client,
             local.copy(dictationPreview = "Noch nicht bestätigter Folgetext", revision = 1),
-            HansSettings(),
-        )
+            HansSettings(), text = localizationText)
 
         assertEquals("Noch nicht bestätigter Folgetext", changed.chat.dictationPreview)
         assertEquals(initial.chat.messages, changed.chat.messages)
@@ -143,12 +146,11 @@ class DictationPreviewProjectionTest {
             dictationStatus = DictationUiStatus.FINALIZING,
             dictationPreview = "Nur vorläufig",
         )
-        val initial = HansClientUiProjector.project(client, local, HansSettings())
+        val initial = HansClientUiProjector.project(client, local, HansSettings(), text = localizationText)
         val completed = HansClientUiProjector.project(
             client,
             local.copy(dictationStatus = DictationUiStatus.WAITING_TO_SEND, dictationPreview = ""),
-            HansSettings(),
-        )
+            HansSettings(), text = localizationText)
 
         assertEquals("", completed.chat.dictationPreview)
         assertEquals(initial.chat.messages, completed.chat.messages)
@@ -165,8 +167,7 @@ class DictationPreviewProjectionTest {
                     dictationStatus = DictationUiStatus.LISTENING,
                     sttLatency = SttLatencyUiState(preferred = preferred),
                 ),
-                HansSettings(),
-            )
+                HansSettings(), text = localizationText)
 
             assertEquals(preferred, state.settings.sttLatency.preferred)
             assertNull(state.settings.sttLatency.confirmedActive)
@@ -184,8 +185,7 @@ class DictationPreviewProjectionTest {
             val state = HansClientUiProjector.project(
                 client,
                 HansLocalUiState(dictationStatus = DictationUiStatus.LISTENING, sttLatency = delay),
-                HansSettings(),
-            )
+                HansSettings(), text = localizationText)
 
             assertEquals(delay, state.settings.sttLatency)
         }

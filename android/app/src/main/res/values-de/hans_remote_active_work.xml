@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="remote_active_work_title">Desktop-Fernzugriff</string>
+    <string name="remote_active_work_description">Hans hält den angeforderten Desktop-Fernzugriff bereit. Freigabe hier beenden.</string>
+    <string name="remote_active_work_stop">Fernzugriff beenden</string>
+</resources>

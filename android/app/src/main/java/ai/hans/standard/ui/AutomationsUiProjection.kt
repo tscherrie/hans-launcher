@@ -1,5 +1,8 @@
 package ai.hans.standard.ui
 
+import ai.hans.standard.R
+import ai.hans.standard.localization.HansTextResolver
+import java.time.format.FormatStyle
 import ai.hans.standard.automations.AutomationConfirmationPolicy
 import ai.hans.standard.automations.AutomationRun
 import ai.hans.standard.automations.AutomationRunReceipt
@@ -13,13 +16,14 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
-private val AUTOMATION_DATE_TIME: DateTimeFormatter =
-    DateTimeFormatter.ofPattern("dd.MM.yyyy, HH:mm", Locale.GERMANY)
+private fun automationDateTime(text: HansTextResolver): DateTimeFormatter =
+    DateTimeFormatter.ofLocalizedDateTime(FormatStyle.MEDIUM, FormatStyle.SHORT).withLocale(text.locale)
 
 /** Pure, bounded projection. Private instructions are shown only in the user's own launcher UI. */
 internal fun projectAutomations(
     snapshot: AutomationStorageSnapshot,
     systemZone: ZoneId,
+    text: HansTextResolver,
 ): AutomationsUiState {
     val inboxByAutomation = snapshot.inbox.groupBy { it.key.automationId }
     val runsByAutomation = snapshot.runs.groupBy { it.key.automationId }
@@ -36,6 +40,7 @@ internal fun projectAutomations(
                 runs = runs,
                 receipts = receipts,
                 systemZone = systemZone,
+                text = text,
             )
             val pendingRuns = runs.filter { it.state in PENDING_AUTOMATION_STATES }
             val nextAt = buildList {
@@ -47,18 +52,18 @@ internal fun projectAutomations(
             val detailedRunIsLatest = lastRun != null &&
                 (lastReceipt == null || lastRun.updatedAt >= lastReceipt.completedAt)
             val lastRunLabel = when {
-                lastRun == null && lastReceipt == null -> "Noch kein Lauf"
+                lastRun == null && lastReceipt == null -> text.text(R.string.presentation_automation_no_runs)
                 detailedRunIsLatest -> checkNotNull(lastRun).let {
-                    "${it.state.uiLabel()} · ${formatAutomationInstant(it.updatedAt, systemZone)}"
+                    "${it.state.uiLabel(text)} · ${formatAutomationInstant(it.updatedAt, systemZone, text)}"
                 }
                 else -> checkNotNull(lastReceipt).let {
-                    "${it.terminalState.uiLabel()} · ${formatAutomationInstant(it.completedAt, systemZone)}"
+                    "${it.terminalState.uiLabel(text)} · ${formatAutomationInstant(it.completedAt, systemZone, text)}"
                 }
             }
             val lastFailureLabel = when {
-                detailedRunIsLatest -> checkNotNull(lastRun).lastFailureCode?.automationFailureLabel()
+                detailedRunIsLatest -> checkNotNull(lastRun).lastFailureCode?.automationFailureLabel(text)
                 lastReceipt?.terminalState == AutomationRunState.FAILED_TERMINAL ->
-                    "Ausführung nicht abgeschlossen"
+                    text.text(R.string.presentation_automation_incomplete)
                 else -> null
             }
             val scheduleZone = definition.schedule.timeZone.resolve(systemZone)
@@ -70,13 +75,13 @@ internal fun projectAutomations(
                     .trim()
                     .take(220),
                 scheduleLabel = buildString {
-                    append(humanRrule(definition.schedule.rrule))
-                    append(" · ab ")
-                    append(definition.schedule.dtStartLocal.format(AUTOMATION_DATE_TIME))
+                    append(humanRrule(definition.schedule.rrule, text))
+                    append(text.text(R.string.presentation_automation_from))
+                    append(definition.schedule.dtStartLocal.format(automationDateTime(text)))
                     append(" · ")
                     append(
                         when (definition.schedule.timeZone) {
-                            AutomationTimeZone.FollowSystem -> "Telefon-Zeitzone"
+                            AutomationTimeZone.FollowSystem -> text.text(R.string.presentation_automation_system_zone)
                             is AutomationTimeZone.Fixed -> scheduleZone.id
                         },
                     )
@@ -92,16 +97,16 @@ internal fun projectAutomations(
                 },
                 timingLabel = when (definition.timingPolicy) {
                     AutomationTimingPolicy.RELIABLE_INEXACT ->
-                        "Zuverlässig, Android darf den Zeitpunkt leicht bündeln"
+                        text.text(R.string.presentation_automation_inexact)
                     AutomationTimingPolicy.USER_VISIBLE_EXACT ->
-                        "Exakter Zeitpunkt, sofern Android die Sonderfreigabe erteilt hat"
+                        text.text(R.string.presentation_automation_exact)
                 },
                 nextRunLabel = nextAt?.let {
-                    "Vorgemerkt für ${formatAutomationInstant(it, systemZone)}"
+                    text.text(R.string.presentation_automation_reserved, formatAutomationInstant(it, systemZone, text))
                 } ?: if (definition.enabled) {
-                    "Nächster Termin wird vom Android-Planer berechnet"
+                    text.text(R.string.presentation_automation_calculating)
                 } else {
-                    "Deaktiviert"
+                    text.text(R.string.presentation_automation_disabled)
                 },
                 lastRunLabel = lastRunLabel,
                 lastFailureLabel = lastFailureLabel,
@@ -130,6 +135,7 @@ private fun buildAutomationHistory(
     runs: List<AutomationRun>,
     receipts: List<AutomationRunReceipt>,
     systemZone: ZoneId,
+    text: HansTextResolver,
 ): AutomationHistoryProjection {
     val detailedRunKeys = runs.asSequence().map(AutomationRun::key).toHashSet()
     val events = buildList {
@@ -139,7 +145,7 @@ private fun buildAutomationHistory(
                     eventAt = run.updatedAt,
                     scheduledAt = run.key.scheduledAt,
                     state = run.state,
-                    failureLabel = run.lastFailureCode?.automationFailureLabel(),
+                    failureLabel = run.lastFailureCode?.automationFailureLabel(text),
                     isDetailedRun = true,
                 ),
             )
@@ -155,7 +161,7 @@ private fun buildAutomationHistory(
                         failureLabel = if (
                             receipt.terminalState == AutomationRunState.FAILED_TERMINAL
                         ) {
-                            "Ausführung nicht abgeschlossen"
+                            text.text(R.string.presentation_automation_incomplete)
                         } else {
                             null
                         },
@@ -173,9 +179,9 @@ private fun buildAutomationHistory(
     return AutomationHistoryProjection(
         entries = events.take(MAX_AUTOMATION_HISTORY).map { event ->
             AutomationRunHistoryUiModel(
-                headline = "${event.state.uiLabel()} · " +
-                    formatAutomationInstant(event.eventAt, systemZone),
-                scheduledLabel = "Termin ${formatAutomationInstant(event.scheduledAt, systemZone)}",
+                headline = "${event.state.uiLabel(text)} · " +
+                    formatAutomationInstant(event.eventAt, systemZone, text),
+                scheduledLabel = text.text(R.string.presentation_automation_scheduled, formatAutomationInstant(event.scheduledAt, systemZone, text)),
                 failureLabel = event.failureLabel,
             )
         },
@@ -183,34 +189,34 @@ private fun buildAutomationHistory(
     )
 }
 
-private fun String.automationFailureLabel(): String = when (this) {
-    "network_offline" -> "Keine Internetverbindung"
-    "device_unlock_required" -> "Wartet auf das Entsperren des Telefons"
-    "exact_alarm_access_required" -> "Freigabe für exakte Alarme erforderlich"
-    "authorization_probe_failed" -> "Berechtigungsprüfung fehlgeschlagen; wird erneut versucht"
-    "job_execution_stopped" -> "Ausführung unterbrochen; wird erneut versucht"
-    "codex_login_required" -> "Codex-Anmeldung erforderlich"
-    "confirmation_required", "user_confirmation_required" -> "Bestätigung erforderlich"
-    "permission_required" -> "Android-Berechtigung erforderlich"
-    "capability_unavailable" -> "Benötigte Fähigkeit nicht verfügbar"
+private fun String.automationFailureLabel(text: HansTextResolver): String = when (this) {
+    "network_offline" -> text.text(R.string.presentation_automation_network_offline)
+    "device_unlock_required" -> text.text(R.string.presentation_automation_unlock_required)
+    "exact_alarm_access_required" -> text.text(R.string.presentation_automation_exact_access)
+    "authorization_probe_failed" -> text.text(R.string.presentation_automation_probe_retry)
+    "job_execution_stopped" -> text.text(R.string.presentation_automation_stopped_retry)
+    "codex_login_required" -> text.text(R.string.presentation_automation_login)
+    "confirmation_required", "user_confirmation_required" -> text.text(R.string.presentation_automation_confirmation)
+    "permission_required" -> text.text(R.string.presentation_automation_permission)
+    "capability_unavailable" -> text.text(R.string.presentation_automation_capability)
     "codex_runtime_starting", "codex_thread_busy", "codex_independent_busy" ->
-        "Codex war noch beschäftigt"
-    else -> "Ausführung nicht abgeschlossen"
+        text.text(R.string.presentation_automation_busy)
+    else -> text.text(R.string.presentation_automation_incomplete)
 }
 
-private fun formatAutomationInstant(value: Instant, zone: ZoneId): String =
-    AUTOMATION_DATE_TIME.format(value.atZone(zone))
+private fun formatAutomationInstant(value: Instant, zone: ZoneId, text: HansTextResolver): String =
+    automationDateTime(text).format(value.atZone(zone))
 
-private fun AutomationRunState.uiLabel(): String = when (this) {
-    AutomationRunState.PENDING -> "Ausstehend"
-    AutomationRunState.LEASED -> "Läuft"
-    AutomationRunState.RETRY_WAIT -> "Wird erneut versucht"
-    AutomationRunState.SUCCEEDED -> "Erfolgreich"
-    AutomationRunState.FAILED_TERMINAL -> "Fehlgeschlagen"
-    AutomationRunState.SKIPPED -> "Übersprungen"
+private fun AutomationRunState.uiLabel(text: HansTextResolver): String = when (this) {
+    AutomationRunState.PENDING -> text.text(R.string.presentation_automation_state_pending)
+    AutomationRunState.LEASED -> text.text(R.string.presentation_automation_state_leased)
+    AutomationRunState.RETRY_WAIT -> text.text(R.string.presentation_automation_state_retry_wait)
+    AutomationRunState.SUCCEEDED -> text.text(R.string.presentation_automation_state_succeeded)
+    AutomationRunState.FAILED_TERMINAL -> text.text(R.string.presentation_automation_state_failed)
+    AutomationRunState.SKIPPED -> text.text(R.string.presentation_automation_state_skipped)
 }
 
-private fun humanRrule(rrule: String): String {
+private fun humanRrule(rrule: String, text: HansTextResolver): String {
     val values = rrule.split(';').mapNotNull { field ->
         val separator = field.indexOf('=')
         if (separator <= 0) null else field.substring(0, separator).uppercase(Locale.ROOT) to
@@ -218,16 +224,16 @@ private fun humanRrule(rrule: String): String {
     }.toMap()
     val interval = values["INTERVAL"]?.toIntOrNull()?.coerceAtLeast(1) ?: 1
     val base = when (values["FREQ"]?.uppercase(Locale.ROOT)) {
-        "MINUTELY" -> if (interval == 1) "Jede Minute" else "Alle $interval Minuten"
-        "HOURLY" -> if (interval == 1) "Stündlich" else "Alle $interval Stunden"
-        "DAILY" -> if (interval == 1) "Täglich" else "Alle $interval Tage"
-        "WEEKLY" -> if (interval == 1) "Wöchentlich" else "Alle $interval Wochen"
-        "MONTHLY" -> if (interval == 1) "Monatlich" else "Alle $interval Monate"
-        "YEARLY" -> if (interval == 1) "Jährlich" else "Alle $interval Jahre"
-        else -> "Wiederkehrend"
+        "MINUTELY" -> if (interval == 1) text.text(R.string.presentation_automation_minutely) else text.text(R.string.presentation_automation_minutes, interval)
+        "HOURLY" -> if (interval == 1) text.text(R.string.presentation_automation_hourly) else text.text(R.string.presentation_automation_hours, interval)
+        "DAILY" -> if (interval == 1) text.text(R.string.presentation_automation_daily) else text.text(R.string.presentation_automation_days, interval)
+        "WEEKLY" -> if (interval == 1) text.text(R.string.presentation_automation_weekly) else text.text(R.string.presentation_automation_weeks, interval)
+        "MONTHLY" -> if (interval == 1) text.text(R.string.presentation_automation_monthly) else text.text(R.string.presentation_automation_months, interval)
+        "YEARLY" -> if (interval == 1) text.text(R.string.presentation_automation_yearly) else text.text(R.string.presentation_automation_years, interval)
+        else -> text.text(R.string.presentation_automation_recurring)
     }
-    val limit = values["COUNT"]?.let { " · $it Läufe" }
-        ?: values["UNTIL"]?.let { " · bis $it" }
+    val limit = values["COUNT"]?.let { text.text(R.string.presentation_automation_run_limit, it) }
+        ?: values["UNTIL"]?.let { text.text(R.string.presentation_automation_until, it) }
         ?: ""
     return base + limit
 }

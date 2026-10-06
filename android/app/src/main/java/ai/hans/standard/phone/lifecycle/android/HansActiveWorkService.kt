@@ -271,6 +271,18 @@ class HansActiveWorkService : Service() {
     private var lastAppliedRevision: Long = 0L
     private var foregroundPublished = false
 
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        // Update labels on the same existing channel; never start or extend a task.
+        runCatching {
+            ensureNotificationChannel()
+            if (foregroundPublished && activeReasons.isNotEmpty()) {
+                getSystemService(NotificationManager::class.java)
+                    .notify(NOTIFICATION_ID, buildNotification(activeReasons))
+            }
+        }
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {

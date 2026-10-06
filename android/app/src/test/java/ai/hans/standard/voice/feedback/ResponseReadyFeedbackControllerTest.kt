@@ -1,5 +1,7 @@
 package ai.hans.standard.voice.feedback
 
+import ai.hans.standard.localization.TestResourceTextResolver
+
 import ai.hans.standard.codex.AgentMessagePhase
 import ai.hans.standard.codex.AppServerMethod
 import ai.hans.standard.codex.CorrelatedResponse
@@ -291,7 +293,7 @@ class ResponseReadyFeedbackControllerTest {
         val controller = ResponseReadyFeedbackController(
             ResponseReadyHaptics { pulses.incrementAndGet() },
             maxTrackedResponses = 2,
-        )
+        text = TestResourceTextResolver(java.util.Locale.GERMAN))
         controller.acceptCodex(snapshot())
         for (index in 1..8) {
             controller.acceptCodex(snapshot("turn-$index", hans("item-$index", "turn-$index", "Antwort", index.toLong())))
@@ -317,7 +319,7 @@ class ResponseReadyFeedbackControllerTest {
         start.countDown()
         assertTrue(done.await(3, TimeUnit.SECONDS))
         assertEquals(1, fixture.pulses.get())
-        val failing = ResponseReadyFeedbackController(ResponseReadyHaptics { error("service unavailable") })
+        val failing = ResponseReadyFeedbackController(ResponseReadyHaptics { error("service unavailable") }, text = TestResourceTextResolver(java.util.Locale.GERMAN))
         failing.acceptCodex(snapshot())
         failing.acceptCodex(answer) // optional feedback cannot fail the caller
     }
@@ -329,7 +331,7 @@ class ResponseReadyFeedbackControllerTest {
         controller = ResponseReadyFeedbackController(ResponseReadyHaptics {
             controller.cancelPending()
             pulses += 1
-        })
+        }, text = TestResourceTextResolver(java.util.Locale.GERMAN))
         controller.acceptCodex(snapshot())
         controller.acceptCodex(snapshot("one", hans("one", "one", "Antwort", 1)))
         assertEquals(1, pulses)
@@ -340,7 +342,7 @@ class ResponseReadyFeedbackControllerTest {
         val controller = ResponseReadyFeedbackController(
             haptics = ResponseReadyHaptics { pulses.incrementAndGet() },
             executor = executor,
-        )
+        text = TestResourceTextResolver(java.util.Locale.GERMAN))
     }
 
     private class QueuedExecutor : Executor {

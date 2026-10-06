@@ -29,6 +29,7 @@ class AndroidSpeechAudioRouteController(context: Context) : SpeechAudioRouteCont
     private val routeThread = HandlerThread("hans-speech-routing").apply { start() }
     private val handler = Handler(routeThread.looper)
     private var communicationPreferenceOwner: AndroidEndpoint? = null
+    private var outputOnlyPreferenceOwner: Any? = null
 
     private fun <T> serial(block: () -> T): T {
         if (Looper.myLooper() == handler.looper) return block()
@@ -61,6 +62,202 @@ class AndroidSpeechAudioRouteController(context: Context) : SpeechAudioRouteCont
                 throw error
             }
         }, cancelWait = { endpoint.cancelWait() })
+    }
+
+    /** Capture before stopping an older output endpoint; this is a one-output lease, not a setting. */
+    fun captureOutputOnlyPreference(): SpeechAudioRoute? {
+        val state = snapshot()
+        return serial { OutputOnlyAudioRoutePolicy.capturePreference(state,
+            manager?.getDevices(AudioManager.GET_DEVICES_OUTPUTS)?.any { it.type in EXTERNAL_TYPES } == true) }
+    }
+
+    /** Android's idle communication default (often the earpiece) is not a read-aloud preference. */
+    internal fun selectOutputOnlyRoute(requested: SpeechAudioRoute?): OutputOnlyAudioRouteTarget {
+        val audio = manager ?: throw LiveVoiceAudioRouteException("realtime_audio_manager_unavailable")
+        val preference = requested ?: captureOutputOnlyPreference()
+        return serial {
+            val available = audio.availableCommunicationDevices
+            val effective = audio.communicationDevice
+            val externalPresent = audio.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+                .any { it.type in EXTERNAL_TYPES }
+            val desired = OutputOnlyAudioRoutePolicy.select(
+                requested = preference,
+                externalPresent = externalPresent,
+                available = available.map(::routeOf).toSet(),
+            ) ?: throw LiveVoiceAudioRouteException("speech_output_route_unavailable")
+            val candidates = available.filter { routeOf(it) == desired }
+            val device = candidates.firstOrNull { it.id == effective?.id }
+                ?: candidates.singleOrNull()
+                ?: throw LiveVoiceAudioRouteException("speech_output_route_unconfirmed")
+            OutputOnlyAudioRouteTarget(device.id, device.type, desired)
+        }
+    }
+
+    /** Verified finite read-aloud; only explicit, muted-and-confirmed built-in route switches. */
+    internal fun attachRequiredOutputOnlyCommunication(
+        target: OutputOnlyAudioRouteTarget,
+        beforeRouteChange: () -> Boolean,
+        onConfirmedRoute: (SpeechAudioRoute) -> Boolean,
+        onRouteLost: () -> Unit,
+    ): AutoCloseable {
+        check(Looper.myLooper() != handler.looper && Looper.myLooper() != Looper.getMainLooper()) {
+            "output_only_route_wait_requires_worker"
+        }
+        val audio = manager ?: throw LiveVoiceAudioRouteException("realtime_audio_manager_unavailable")
+        val owner = Any()
+        val acknowledged = CountDownLatch(1)
+        var closed = false
+        var armed = false
+        var requested = false
+        var failed = false
+        var routeTimeout: Runnable? = null
+        var notifyChanged: () -> Unit = {}
+        val route = OutputOnlyAudioRouteSwitch(target)
+        fun externalPresent() = audio.getDevices(AudioManager.GET_DEVICES_OUTPUTS).any { it.type in EXTERNAL_TYPES }
+        fun actualTarget() = audio.communicationDevice?.let {
+            OutputOnlyAudioRouteTarget(it.id, it.type, routeOf(it))
+        }
+        fun routeIsEffective(): Boolean = OutputOnlyAudioRoutePolicy.matches(
+            route.target, actualTarget(), audio.mode == AudioManager.MODE_IN_COMMUNICATION, externalPresent(),
+        )
+        fun failRoute() {
+            if (closed || failed) return
+            failed = true
+            armed = false
+            routeTimeout?.let(handler::removeCallbacks)
+            routeTimeout = null
+            // Mute before asking the owner to tear down. Never restore the previous route.
+            runCatching { onConfirmedRoute(SpeechAudioRoute.UNKNOWN) }
+            acknowledged.countDown()
+            onRouteLost()
+        }
+        fun changed() {
+            if (closed || failed) return
+            val result = try {
+                route.observe(actualTarget(), audio.mode == AudioManager.MODE_IN_COMMUNICATION, externalPresent())
+            } catch (_: RuntimeException) {
+                failRoute()
+                notifyChanged()
+                return
+            }
+            when (result) {
+                OutputOnlyAudioRouteSwitch.Result.CONFIRMED -> {
+                    if (!runCatching { onConfirmedRoute(route.target.route) }.getOrDefault(false)) failRoute()
+                    else {
+                        routeTimeout?.let(handler::removeCallbacks)
+                        routeTimeout = null
+                        acknowledged.countDown()
+                    }
+                }
+                OutputOnlyAudioRouteSwitch.Result.LOST -> failRoute()
+                OutputOnlyAudioRouteSwitch.Result.PENDING -> Unit
+            }
+            notifyChanged()
+        }
+        fun verify() {
+            check(!closed && !failed && routeIsEffective() && onConfirmedRoute(route.target.route)) {
+                "speech_output_route_unconfirmed"
+            }
+        }
+        val endpoint = object : SpeechAudioRouteEndpoint {
+            override val retainsPlaybackPreference: Boolean get() = true
+            override fun available(): Set<SpeechAudioRoute> = serial {
+                if (closed || failed) emptySet()
+                else if (!armed && !requested) setOf(route.target.route)
+                else if (!armed || route.pending || externalPresent()) emptySet()
+                else audio.availableCommunicationDevices.map(::routeOf).filter {
+                    it == SpeechAudioRoute.SPEAKER || it == SpeechAudioRoute.EARPIECE
+                }.toSet()
+            }
+            override fun effective(): SpeechAudioRoute = serial {
+                if (!closed && !failed && !route.pending && routeIsEffective()) route.target.route else SpeechAudioRoute.UNKNOWN
+            }
+            override fun externalDevicePresent(): Boolean = serial {
+                audio.getDevices(AudioManager.GET_DEVICES_OUTPUTS).any { it.type in EXTERNAL_TYPES }
+            }
+            override fun callActive(): Boolean = serial { audio.mode != AudioManager.MODE_IN_COMMUNICATION }
+            override fun request(requestedRoute: SpeechAudioRoute): Boolean = serial {
+                if (requestedRoute !in available() || callActive()) return@serial false
+                // attach() may restore a lease preference before initial Android routing. Only
+                // the already-selected target is accepted here; startup still proves it below.
+                if (!armed && !requested) return@serial requestedRoute == route.target.route
+                val device = audio.availableCommunicationDevices.singleOrNull { routeOf(it) == requestedRoute }
+                    ?: return@serial false
+                if (!runCatching { beforeRouteChange() }.getOrDefault(false)) { failRoute(); return@serial false }
+                val next = OutputOnlyAudioRouteTarget(device.id, device.type, requestedRoute)
+                if (!route.request(next) || !runCatching { audio.setCommunicationDevice(device) }.getOrDefault(false)) {
+                    failRoute()
+                    return@serial false
+                }
+                requested = true
+                outputOnlyPreferenceOwner = owner
+                changed()
+                if (!failed && route.pending) {
+                    // One bounded ACK deadline per explicit request; never idle polling.
+                    routeTimeout = Runnable {
+                        routeTimeout = null
+                        changed()
+                        if (!closed && route.pending) failRoute()
+                        notifyChanged()
+                    }.also { handler.postDelayed(it, ROUTE_ACK_TIMEOUT_MS) }
+                }
+                !failed
+            }
+            override fun observeChanged(callback: () -> Unit): AutoCloseable = serial {
+                notifyChanged = callback
+                val devices = object : AudioDeviceCallback() {
+                    override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) = changed()
+                    override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>) = changed()
+                }
+                val communication = AudioManager.OnCommunicationDeviceChangedListener { changed() }
+                val mode = AudioManager.OnModeChangedListener { changed() }
+                fun remove() {
+                    var failed = false
+                    runCatching { audio.unregisterAudioDeviceCallback(devices) }.onFailure { failed = true }
+                    runCatching { audio.removeOnCommunicationDeviceChangedListener(communication) }.onFailure { failed = true }
+                    runCatching { audio.removeOnModeChangedListener(mode) }.onFailure { failed = true }
+                    check(!failed) { "speech_output_route_cleanup_unconfirmed" }
+                }
+                try {
+                    audio.registerAudioDeviceCallback(devices, handler)
+                    audio.addOnCommunicationDeviceChangedListener(Executor { handler.post(it) }, communication)
+                    audio.addOnModeChangedListener(Executor { handler.post(it) }, mode)
+                } catch (failure: RuntimeException) { remove(); throw failure }
+                AutoCloseable { serial { remove() } }
+            }
+            override fun close() { serial {
+                closed = true
+                armed = false
+                routeTimeout?.let(handler::removeCallbacks)
+                routeTimeout = null
+                notifyChanged = {}
+                acknowledged.countDown()
+                if (requested && outputOnlyPreferenceOwner === owner) {
+                    outputOnlyPreferenceOwner = null
+                    audio.clearCommunicationDevice()
+                }
+            } }
+        }
+        val registration = attach(endpoint)
+        try {
+            serial {
+                check(!closed && beforeRouteChange()) { "speech_output_route_unconfirmed" }
+                val device = audio.availableCommunicationDevices.firstOrNull {
+                    it.id == target.deviceId && it.type == target.deviceType
+                } ?: throw LiveVoiceAudioRouteException("speech_output_route_unavailable")
+                check(audio.setCommunicationDevice(device)) { "speech_output_route_rejected" }
+                requested = true
+                outputOnlyPreferenceOwner = owner
+                changed()
+            }
+            check(acknowledged.await(ROUTE_ACK_TIMEOUT_MS, TimeUnit.MILLISECONDS)) { "speech_output_route_timeout" }
+            serial { verify(); armed = true; notifyChanged() }
+            return registration
+        } catch (failure: Exception) {
+            runCatching { registration.close() }
+            if (failure is InterruptedException) Thread.currentThread().interrupt()
+            throw LiveVoiceAudioRouteException("speech_output_route_unconfirmed")
+        }
     }
 
     /**
@@ -384,6 +581,61 @@ class AndroidSpeechAudioRouteController(context: Context) : SpeechAudioRouteCont
             else -> SpeechAudioRoute.UNKNOWN
         }
     }
+}
+
+internal data class OutputOnlyAudioRouteTarget(val deviceId: Int, val deviceType: Int, val route: SpeechAudioRoute)
+
+/** Exact device receipts, not merely route class or setCommunicationDevice acceptance. */
+internal class OutputOnlyAudioRouteSwitch(initial: OutputOnlyAudioRouteTarget) {
+    enum class Result { PENDING, CONFIRMED, LOST }
+    var target = initial
+        private set
+    var pending = true
+        private set
+    private var previous: OutputOnlyAudioRouteTarget? = null
+    private var lost = false
+
+    fun request(next: OutputOnlyAudioRouteTarget): Boolean {
+        if (lost || pending || next.route !in setOf(SpeechAudioRoute.SPEAKER, SpeechAudioRoute.EARPIECE)) return false
+        previous = target
+        target = next
+        pending = true
+        return true
+    }
+
+    fun observe(actual: OutputOnlyAudioRouteTarget?, communicationMode: Boolean, externalPresent: Boolean): Result {
+        if (lost) return Result.LOST
+        if (OutputOnlyAudioRoutePolicy.matches(target, actual, communicationMode, externalPresent)) {
+            pending = false
+            previous = null
+            return Result.CONFIRMED
+        }
+        if (pending && communicationMode && (target.route == SpeechAudioRoute.EXTERNAL || !externalPresent) &&
+            (previous == null || actual == previous)) return Result.PENDING
+        lost = true
+        return Result.LOST
+    }
+}
+
+internal object OutputOnlyAudioRoutePolicy {
+    fun capturePreference(state: SpeechAudioRouteState, externalPresent: Boolean): SpeechAudioRoute? =
+        state.requested ?: state.effective.takeIf { state.active && it != SpeechAudioRoute.UNKNOWN }
+            ?: SpeechAudioRoute.EXTERNAL.takeIf { externalPresent }
+
+    fun select(requested: SpeechAudioRoute?, externalPresent: Boolean,
+        available: Set<SpeechAudioRoute>): SpeechAudioRoute? {
+        val desired = if (externalPresent) {
+            // A private earpiece preference must not be silently replaced either.
+            if (requested == SpeechAudioRoute.EARPIECE) return null
+            SpeechAudioRoute.EXTERNAL
+        } else requested ?: SpeechAudioRoute.SPEAKER
+        return desired.takeIf { it != SpeechAudioRoute.UNKNOWN && it in available }
+    }
+
+    fun matches(target: OutputOnlyAudioRouteTarget, actual: OutputOnlyAudioRouteTarget?,
+        communicationMode: Boolean, externalPresent: Boolean): Boolean =
+        communicationMode && actual == target &&
+            (target.route == SpeechAudioRoute.EXTERNAL || !externalPresent)
 }
 
 /** Verifies private-route enforcement before any speech PCM is handed to Android. */

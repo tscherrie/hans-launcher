@@ -59,6 +59,41 @@ Read and accept Android SDK licenses yourself. No Hans account or speech API
 credential belongs in Gradle properties, source files, environment examples,
 or the build output.
 
+## Prepare the sealed dictation helper
+
+The subscription-authenticated dictation helper is separate from the current
+App Server. Its source and input locks are in `runtime/transcription/`. It
+remains pinned to helper 0.1.0 / Codex login 0.155.0; it is not silently replaced
+when the App Server changes. Gradle requires its verified native artifact.
+
+For this Developer Preview, the exact helper is also a release asset. Download
+it only to the development host, verify it, then let the staging script check
+its source binding and ELF layout again:
+
+```sh
+mkdir -p runtime/transcription/build/artifacts/0.1.0
+curl --fail --location --proto '=https' --tlsv1.2 \
+  https://github.com/tscherrie/hans-launcher/releases/download/preview-2026-10-06/libcodex_transcribe.so \
+  --output runtime/transcription/build/artifacts/0.1.0/libcodex_transcribe.so
+python3 - <<'PY'
+from pathlib import Path
+import hashlib
+p = Path('runtime/transcription/build/artifacts/0.1.0/libcodex_transcribe.so')
+assert p.stat().st_size == 17298240, 'Helper length mismatch'
+assert hashlib.sha256(p.read_bytes()).hexdigest() == 'e586e8d0e5eadc8d68db1ecf53b15dda93fc5aca0c6a41ce9b1b87df86bc06d4', 'Helper digest mismatch'
+PY
+runtime/scripts/package-transcription-helper.sh --stage
+```
+
+Alternatively, `runtime/scripts/package-transcription-helper.sh --build`
+compiles the checked-in Rust helper against verified upstream source. This
+requires Rust 1.96.0, the `aarch64-unknown-linux-musl` target, a suitable static
+ARM64 musl linker and the helper's native OpenSSL build prerequisites. An
+independent toolchain may produce different bytes; the artifact lock deliberately
+rejects such bytes rather than claiming reproducibility. No account credentials
+or owner auth files are build inputs. Android executes only the APK-packaged
+read-only native library, never a downloaded writable executable.
+
 ## Build and run host tests
 
 Run from the repository root:
@@ -103,7 +138,7 @@ suite here. Do not describe a successful app build as a pass of that larger gate
 The runtime packaging tasks download the following public artifacts and verify
 their pinned lengths and SHA-256 values before use:
 
-- Codex App Server and Code Mode host **0.154.0**, official ARM64 musl release
+- Codex App Server and Code Mode host **0.160.1**, official ARM64 musl release
   assets pinned in [`runtime/runtime.lock.json`](../runtime/runtime.lock.json).
 - CPython **3.14.7** Android artifact and its pinned Sigstore bundle from
   python.org, described in
@@ -115,8 +150,9 @@ their pinned lengths and SHA-256 values before use:
   lockfiles and `gradle/verification-metadata.xml`.
 
 No private artifact server, account token, maintainer build directory, or
-publisher keystore is required. The Codex and Python download URLs were checked
-for anonymous availability on 2026-09-13; upstream availability can change.
+publisher keystore is required. The new Codex download URLs were checked for
+anonymous availability on 2026-10-06; Python URLs were checked on 2026-09-13.
+Upstream availability can change.
 The application uses upstream compiled runtimes: a local Hans build is not a
 from-source rebuild of Codex, CPython, or WebRTC.
 
@@ -143,10 +179,11 @@ adb -s "$HANS_DEVICE_SERIAL" shell am start -n ai.hans.standard/.LauncherActivit
 ```
 
 Complete first-use setup, model-account login, and permission choices on the
-phone. Online features depend on the account's effective runtime capabilities;
-voice features may additionally require a separately provisioned speech
-credential or service entitlement. No model or voice is guaranteed merely by
-building the app.
+phone. Online features depend on the account's effective runtime capabilities.
+Live Voice and completed-recording dictation use the existing ChatGPT sign-in,
+without a separate paid API fallback. Dictation uses an undocumented ChatGPT
+backend compatibility route and does not stream preliminary text. No model or
+voice entitlement is guaranteed merely by building the app.
 
 An existing app can only be updated with an APK signed by the same developer
 key and compatible version. Keep your local debug key if you need update/data
@@ -156,67 +193,18 @@ APK: `INSTALL_FAILED_UPDATE_INCOMPATIBLE` is an expected safety boundary.
 workaround.** Use another development device or plan an explicit backup and
 migration. A self-built debug install is not an official publisher update.
 
-## Try incoming desktop remote access (experimental)
+## Voice controls and desktop access
 
-This is the incoming direction: **Desktop Codex / ChatGPT Work → your own
-Android phone and its existing Hans conversation**. It is intended to extend a
-compatible desktop session with the Android app-control tools that you have
-allowed on the phone. It is not the outgoing **"Erweiterte Arbeit"** feature.
+Tap the action key (or the microphone when no physical key is configured) to
+start dictation, then tap again to finish and submit the recording. Text appears
+after transcription completes. Tap the Hans header for the separate Live Voice
+telephone mode. Microphone permission and effective ChatGPT-account support are
+required; completing setup does not prove an actual audio round trip.
 
-The following phone labels and protocol calls are verified against the source,
-not a completed live desktop pairing. At this revision there is **no confirmed
-paired desktop-to-phone end-to-end execution**. The account, desktop version,
-service policy, and embedded runtime must actually support remote access; a
-successful build or a displayed menu does not prove that availability.
-
-1. Sign in to Hans, create or open its existing conversation, and open
-   **"Fernzugriff durch ChatGPT Desktop"** in the phone's menu. Check the
-   capability/status message; use **"Status aktualisieren"** when needed.
-   If access is unavailable or policy-blocked, do not bypass that result.
-2. Read the consent text, choose **"Fernzugriff freigeben"**, and confirm
-   **"Jetzt freigeben"** on the phone. Wait for runtime-confirmed connection
-   state; merely pressing the button is not success.
-3. Choose **"Kopplungscode erstellen"**. Give the temporary code only to your
-   own compatible desktop pairing flow. The code is not stored by Hans and
-   disappears when it expires. Do not paste it into issues, logs, shared chats,
-   or documentation.
-4. Complete the pairing through the controls actually available in your
-   Desktop Codex / ChatGPT Work version. No particular Mac button or menu path
-   is prescribed here because that desktop flow has not been verified. If it
-   is not offered, stop at this manual desktop step rather than treating the
-   devices as paired.
-5. On the phone, use **"Kopplung prüfen"** and
-   **"Gekoppelte Geräte aktualisieren"** to check the runtime-confirmed result.
-   Continue the conversation identified under **"Vorhandenes Hans-Gespräch"**
-   from the desktop. New tasks created on the desktop do not receive the phone
-   tools in this version. Verify one harmless, explicitly authorized Android
-   action and its postcondition before claiming end-to-end control works.
-6. End access with **"Fernzugriff ausschalten"**. To remove a desktop's
-   enrollment, choose **"Kopplung widerrufen"** for that device and wait for
-   the runtime-confirmed revocation result. An unconfirmed or timed-out RPC is
-   not proof of successful remote revocation.
-
-The implementation uses the pinned App Server 0.154.0 `remoteControl` protocol:
-status reads/notifications, ephemeral enable/disable, manual-code pairing,
-pairing-status checks, and client listing/revocation. It capability-probes the
-running server instead of assuming that these calls are usable for every
-account. Pairing material and local access consent are transient; consent is
-not restored after Hans/the runtime restarts or exits. A retained client
-enrollment is not permission to resume phone-tool access without fresh local
-consent.
-
-This permission is sensitive: the authorized desktop can reach private
-Hans/Codex files within Hans's Android application UID as well as the granted
-Android tools. It is not limited to public Downloads. Android permissions and
-action confirmations still apply, and it does not grant other apps' private
-data, root access, or the ability to unlock the device. The source build keeps
-this feature opt-in; it does not silently enable access or pair a desktop.
-
-Reachability depends on network, Android lifecycle/foreground-service limits,
-and the effective account/runtime state. There is no guaranteed always-on or
-24/7 connection. Unit tests and API-level lifecycle tests are useful evidence,
-but do not replace the still-required real desktop pairing and Android-action
-acceptance test.
+Incoming desktop remote access is currently **disabled and hidden** by product
+decision. Historical pairing code remains in the source, but it is not an
+enabled feature of this preview. Do not use old pairing instructions or bypass
+the disabled state. This is distinct from outgoing advanced-work features.
 
 ## Reproducibility and release status
 
@@ -233,14 +221,18 @@ automatically the first or third. Do not claim clean-export or byte-for-byte
 reproducibility until that exact source revision has the corresponding evidence.
 Local signing keys and native build-path/toolchain differences can affect bytes.
 
-Public APK distribution remains separate. The current third-party foundation
-targets an older Codex 0.151.0 release; it does not clear the current 0.154.0
-transitive/native notice obligations. Its public checker fails closed on runtime
-drift. A stable release additionally requires current third-party review,
+Public APK distribution remains separate. The full current-runtime
+transitive/native licensing inventory and independent byte-identical reproduction
+are still open for Codex 0.160.1. The established notice checker does not clear
+the new runtime by silently changing its older reviewed pin. This artifact is
+published only as an explicitly owner-approved **Developer Preview**, not Stable.
+Supplemental original-source notices describe added dependencies and remaining
+provenance gaps; they do not claim complete native closure. A stable release
+additionally requires current third-party review,
 independent reproducible builds, a sealed signed manifest and immutable
 artifacts, and the clean-device installation/update acceptance described in
 [the public promotion gate](PUBLIC-RELEASE-GATE.md).
 
-Remote/cross-device functionality is experimental until its pairing,
-authorization, failure handling, and complete end-to-end execution are
-demonstrated. A passing unit test or a visible UI control is not that proof.
+Historical remote/cross-device tests are not evidence that the currently
+disabled incoming feature is available. A passing unit test is not a substitute
+for live device, account, audio or third-party app acceptance.

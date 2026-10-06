@@ -1,5 +1,6 @@
 package ai.hans.standard.codex
 
+import ai.hans.standard.diagnostics.ToolFailureDiagnostic
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.Executor
 import java.util.concurrent.ExecutorService
@@ -128,6 +129,8 @@ data class DynamicToolExecutionResult(
      * collection shape follows the pinned App Server protocol and keeps the contract reusable.
      */
     val imageUrls: List<String> = emptyList(),
+    /** Fixed, content-free local diagnostics; never included in the App Server wire result. */
+    val failureDiagnostic: ToolFailureDiagnostic? = null,
 ) {
     init {
         JsonContract.parseObject(contentText, MAX_DYNAMIC_TOOL_OUTPUT_TEXT_BYTES)
@@ -166,6 +169,14 @@ enum class DynamicToolCancellationDisposition {
 interface DynamicToolExecutionHandle {
     /** Non-blocking and idempotent; repeated calls return the same safety disposition. */
     fun cancel(): DynamicToolCancellationDisposition
+
+    /**
+     * Optional physical completion receipt for this outer execution, including after cancellation.
+     * Returns false when unavailable. The listener must not run until this handle's own operation
+     * and completion callback have finished; an inner operation's completion is insufficient.
+     * Registration is non-blocking and may invoke the listener synchronously if already finished.
+     */
+    fun onQuiescent(listener: () -> Unit): Boolean = false
 }
 
 /**
@@ -180,8 +191,26 @@ internal class DynamicToolExecutionGate(
     private val locallyCancelled = AtomicBoolean(false)
     private val externalEffectStarted = AtomicBoolean(false)
     private val completionAccepted = AtomicBoolean(false)
+    private val completionFinished = AtomicBoolean(false)
     private val future = AtomicReference<Future<*>?>(null)
     private val completionTask = AtomicReference<FutureTask<Unit>?>(null)
+    private val scheduledWork = mutableSetOf<Any>()
+    private var runningWork = 0
+    private val quiescenceLock = Any()
+    private var quiescent = false
+    private val quiescenceListeners = mutableListOf<() -> Unit>()
+
+    override fun onQuiescent(listener: () -> Unit): Boolean {
+        val callNow = synchronized(quiescenceLock) {
+            if (quiescent) true else {
+                if (quiescenceListeners.size >= 8) return false
+                quiescenceListeners += listener
+                false
+            }
+        }
+        if (callNow) runCatching(listener)
+        return true
+    }
 
     override fun isCancellationRequested(): Boolean =
         locallyCancelled.get() || runCatching(parentCancellation::isCancellationRequested)
@@ -190,16 +219,19 @@ internal class DynamicToolExecutionGate(
     override fun cancel(): DynamicToolCancellationDisposition {
         val disposition = synchronized(transitionLock) {
             locallyCancelled.set(true)
+            // A queued Runnable must no longer start, even if its Future is not published yet.
+            scheduledWork.clear()
             disposition()
         }
         runCatching { future.get()?.cancel(false) }
         runCatching { completionTask.get()?.cancel(false) }
+        publishQuiescenceIfProven()
         return disposition
     }
 
     /** Must immediately precede every confirmation, broker, or platform boundary. */
     fun markExternalEffectStarted(): Boolean = synchronized(transitionLock) {
-        if (isCancellationRequested()) {
+        if (completionAccepted.get() || isCancellationRequested()) {
             false
         } else {
             externalEffectStarted.set(true)
@@ -209,9 +241,24 @@ internal class DynamicToolExecutionGate(
 
     /** Schedule without interrupting a task which may already be inside a platform API. */
     fun schedule(executor: Executor, task: () -> Unit): Boolean {
-        if (isCancellationRequested()) return true
+        val ticket = synchronized(transitionLock) {
+            if (completionAccepted.get() || isCancellationRequested()) null else Any().also(scheduledWork::add)
+        }
+        if (ticket == null) {
+            publishQuiescenceIfProven()
+            return true
+        }
         val guarded = Runnable {
-            if (!isCancellationRequested()) task()
+            val run = synchronized(transitionLock) {
+                if (!scheduledWork.remove(ticket) || completionAccepted.get() || isCancellationRequested()) false
+                else { runningWork++; true }
+            }
+            try {
+                if (run) task()
+            } finally {
+                if (run) synchronized(transitionLock) { runningWork-- }
+                publishQuiescenceIfProven()
+            }
         }
         return try {
             if (executor is ExecutorService) {
@@ -223,22 +270,49 @@ internal class DynamicToolExecutionGate(
             }
             true
         } catch (_: Exception) {
+            synchronized(transitionLock) { scheduledWork.remove(ticket) }
             false
         }
     }
 
     fun complete(result: DynamicToolExecutionResult) {
-        if (isCancellationRequested()) return
         if (!completionAccepted.compareAndSet(false, true)) return
-        val callback = FutureTask<Unit> {
-            if (!isCancellationRequested()) runCatching { completion(result) }
+        try {
+            if (isCancellationRequested()) return
+            val callback = FutureTask<Unit> {
+                if (!isCancellationRequested()) runCatching { completion(result) }
+            }
+            completionTask.set(callback)
+            // Covers cancellation after completion was claimed but before the callback task was
+            // published. FutureTask linearizes cancel(false) against callback entry without
+            // invoking user code while transitionLock is held.
+            if (isCancellationRequested()) callback.cancel(false)
+            callback.run()
+        } finally {
+            // Physical completion is distinct from delivering a result to a cancelled turn.
+            // Only this gate's winning outer completion can release a cross-turn execution fence.
+            completionFinished.set(true)
+            publishQuiescenceIfProven()
         }
-        completionTask.set(callback)
-        // Covers cancellation after completion was claimed but before the callback task was
-        // published. FutureTask then linearizes cancel(false) against callback entry without
-        // invoking user code while transitionLock is held.
-        if (isCancellationRequested()) callback.cancel(false)
-        callback.run()
+    }
+
+    private fun publishQuiescenceIfProven() {
+        val proven = synchronized(transitionLock) {
+            val complete = runningWork == 0 && scheduledWork.isEmpty() &&
+                (completionFinished.get() || (!completionAccepted.get() &&
+                    isCancellationRequested() && !externalEffectStarted.get()))
+            // Parent signals are not promised monotonic. A physical cancellation receipt must
+            // permanently close admission before releasing this transition lock.
+            if (complete && !completionFinished.get()) locallyCancelled.set(true)
+            complete
+        }
+        if (!proven) return
+        val listeners = synchronized(quiescenceLock) {
+            if (quiescent) return
+            quiescent = true
+            quiescenceListeners.toList().also { quiescenceListeners.clear() }
+        }
+        listeners.forEach { runCatching(it) }
     }
 
     fun disposition(): DynamicToolCancellationDisposition =

@@ -1,5 +1,11 @@
 package ai.hans.standard.ui
 
+import ai.hans.standard.R
+import ai.hans.standard.localization.HansTextResolver
+import ai.hans.standard.localization.AndroidHansTextResolver
+import ai.hans.standard.localization.rememberHansTextResolver
+import androidx.compose.ui.res.stringResource
+
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.Context
@@ -32,6 +38,7 @@ internal class AndroidSpeechCredentialDialog(
 
     fun show(onComplete: (SpeechCredentialDialogOutcome) -> Unit): Boolean {
         if (visibleDialog != null || activity.isFinishing || activity.isDestroyed) return false
+        val uiText = AndroidHansTextResolver(activity)
 
         val editor = SpeechCredentialEntryContract.createEditor(activity)
         val content = LinearLayout(activity).apply {
@@ -42,9 +49,9 @@ internal class AndroidSpeechCredentialDialog(
             addView(
                 TextView(activity).apply {
                     text =
-                        "Füge deinen OpenAI API-Schlüssel hier lokal ein. Hans speichert ihn " +
-                            "verschlüsselt mit dem Android Keystore und zeigt ihn danach nicht " +
-                            "mehr an. Sende ihn niemals im Chat."
+                        uiText.text(R.string.ui_paste_your_openai_api_key_here_on_this_device_ha_c81f9e) +
+                            uiText.text(R.string.ui_encrypted_using_android_keystore_and_will_not_di_c73d31) +
+                            uiText.text(R.string.ui_again_never_send_it_in_chat_df661a)
                 },
                 LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT,
@@ -66,10 +73,10 @@ internal class AndroidSpeechCredentialDialog(
         activity.window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
 
         val dialog = AlertDialog.Builder(activity)
-            .setTitle("OpenAI-Sprachzugang")
+            .setTitle(uiText.text(R.string.ui_openai_voice_access_88d085))
             .setView(content)
-            .setPositiveButton("Sicher speichern", null)
-            .setNegativeButton("Abbrechen", null)
+            .setPositiveButton(uiText.text(R.string.ui_save_securely_40c6b8), null)
+            .setNegativeButton(uiText.text(R.string.ui_cancel_f7ff11), null)
             .create()
         visibleDialog = dialog
         dialog.setCanceledOnTouchOutside(false)
@@ -92,7 +99,7 @@ internal class AndroidSpeechCredentialDialog(
                     dialog.dismiss()
                 } else {
                     editor.error =
-                        "Der Schlüssel konnte nicht gespeichert werden. Prüfe ihn und versuche es erneut."
+                        uiText.text(R.string.ui_the_key_could_not_be_saved_check_it_and_try_agai_587c3b)
                 }
             }
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(submit)
@@ -131,8 +138,9 @@ internal object SpeechCredentialEntryContract {
     private const val MAX_CREDENTIAL_CHARACTERS = 1_024
 
     fun createEditor(context: Context): EditText = EditText(context).apply {
-        hint = "OpenAI API-Schlüssel einfügen"
-        contentDescription = "OpenAI API-Schlüssel"
+        val uiText = AndroidHansTextResolver(context)
+        hint = uiText.text(R.string.ui_paste_openai_api_key_387cef)
+        contentDescription = uiText.text(R.string.ui_openai_api_key_f2c981)
         inputType = InputType.TYPE_CLASS_TEXT or
             InputType.TYPE_TEXT_VARIATION_PASSWORD or
             InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS

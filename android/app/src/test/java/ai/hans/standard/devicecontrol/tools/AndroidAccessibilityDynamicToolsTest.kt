@@ -2,6 +2,9 @@ package ai.hans.standard.devicecontrol.tools
 
 import ai.hans.standard.codex.DynamicToolCallParams
 import ai.hans.standard.codex.DynamicToolExecutionResult
+import ai.hans.standard.diagnostics.ToolFailureCode
+import ai.hans.standard.diagnostics.ToolFailureDetail
+import ai.hans.standard.diagnostics.ToolFailureDiagnostic
 import ai.hans.standard.phone.accessibility.AccessibilityCommand
 import ai.hans.standard.phone.accessibility.AccessibilityConfirmationRequest
 import ai.hans.standard.phone.accessibility.AccessibilityConfirmationRisk
@@ -28,6 +31,7 @@ import ai.hans.standard.phone.accessibility.UiBounds
 import ai.hans.standard.phone.accessibility.UiDataTrust
 import ai.hans.standard.phone.accessibility.UiInteractionAvailability
 import ai.hans.standard.phone.accessibility.UiInteractionAvailabilityProbe
+import ai.hans.standard.phone.accessibility.UiPostconditionExpectation
 import ai.hans.standard.phone.accessibility.UiSnapshotCorrelation
 import ai.hans.standard.phone.accessibility.android.AccessibilityCommandCallback
 import ai.hans.standard.phone.accessibility.android.AccessibilitySnapshotFailure
@@ -46,6 +50,114 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AndroidAccessibilityDynamicToolsTest {
+    @Test
+    fun commandFailuresKeepActualKnownCodeAndDetailWithoutRetainingUnknownText() {
+        listOf(
+            Triple("adapter_stale_target", "request_rejected", ToolFailureDiagnostic(
+                ToolFailureCode.ADAPTER_STALE_TARGET, ToolFailureDetail.REQUEST_REJECTED,
+            )),
+            Triple("postcondition_snapshot_unavailable", "adapter_operation_failed", ToolFailureDiagnostic(
+                ToolFailureCode.POSTCONDITION_SNAPSHOT_UNAVAILABLE, ToolFailureDetail.ADAPTER_OPERATION_FAILED,
+            )),
+            Triple("private_account_name", "private_contact_detail", ToolFailureDiagnostic(
+                ToolFailureCode.UNKNOWN, ToolFailureDetail.UNKNOWN,
+            )),
+        ).forEach { (code, detail, expected) ->
+            val session = FakeSession(snapshot()) { command, _ ->
+                succeeded(command).let {
+                    it.copy(
+                        status = AccessibilityExecutionStatus.FAILED,
+                        errorCode = code,
+                        postcondition = it.postcondition.copy(
+                            status = AccessibilityPostconditionStatus.FAILED,
+                            detailCode = detail,
+                        ),
+                    )
+                }
+            }
+            val result = executor(session).run(followUpActionCall("command-diagnostic"))
+            assertFalse(result.success)
+            assertEquals(expected, result.failureDiagnostic)
+            val wire = JSONObject(result.contentText)
+            assertEquals(code, wire.getString("errorCode"))
+            assertEquals(detail, wire.getJSONObject("postcondition").getString("detailCode"))
+            assertFalse(wire.has("failureDiagnostic"))
+            assertFalse(wire.has("nextObservation"))
+            assertEquals(1, session.commands.size)
+        }
+    }
+
+    @Test
+    fun directFailureMappingPreservesOldWireAndDropsUnknownCodesFromMetadataOnly() {
+        listOf("executor_rejected", "private_account_name").forEach { code ->
+            val result = executor(FakeSession(snapshot())).failureResult(call("inspect_ui", "failure"), code)
+            val expected = JSONObject().put("status", "failed")
+                .put("capability", "android_accessibility").put("errorCode", code).toString()
+            assertEquals(expected, result.contentText)
+            assertFalse(result.success)
+            assertEquals(ToolFailureCode.fromCode(code), result.failureDiagnostic?.code)
+            assertEquals(null, result.failureDiagnostic?.detail)
+        }
+    }
+
+    @Test
+    fun screenshotCaptureFailureIsRecordedAndStillReleasesProofForRetry() {
+        val proofs = VisualFallbackProofStore({ 1L }, { "fallback:capture-failure" })
+        val token = proofs.issue(call("find_ui", "issue"), CORRELATION)
+        val session = FakeSession(snapshot(), visualCapture = VisualUiCaptureResult.Failure("visual_capture_rate_limited"))
+        val result = executor(session, fallbackProofs = proofs).run(call(
+            "inspect_visual_ui", "capture",
+            JSONObject().put("correlation", correlationValue()).put("fallbackToken", token).toString(),
+        ))
+        assertFalse(result.success)
+        assertEquals(ToolFailureDiagnostic(ToolFailureCode.VISUAL_CAPTURE_RATE_LIMITED), result.failureDiagnostic)
+        assertEquals("visual_capture_rate_limited", JSONObject(result.contentText).getString("errorCode"))
+        assertEquals(1, session.captureCalls)
+        assertTrue(proofs.claim(token, call("inspect_visual_ui", "retry"), CORRELATION, CORRELATION) != null)
+    }
+
+    @Test
+    fun visualExpiryIsLocalMetadataOnlyAndDoesNotCaptureOrDispatch() {
+        listOf("inspect_visual_ui", "visual_gesture_fallback").forEach { tool ->
+            var now = 1L
+            val proofs = VisualFallbackProofStore({ now }, { "fallback:expired-proof" })
+            val token = proofs.issue(call("find_ui", "issue"), CORRELATION)
+            now += 30_001
+            val args = if (tool == "inspect_visual_ui") {
+                JSONObject().put("correlation", correlationValue()).put("fallbackToken", token).toString()
+            } else gestureArgs(token)
+            val session = FakeSession(snapshot())
+            val result = executor(session, fallbackProofs = proofs).run(call(tool, "expired", args))
+            assertFalse(result.success)
+            assertEquals(ToolFailureDiagnostic(
+                ToolFailureCode.SEMANTIC_FALLBACK_PROOF_REQUIRED, ToolFailureDetail.PROOF_EXPIRED,
+            ), result.failureDiagnostic)
+            assertEquals(JSONObject().put("status", "failed").put("capability", "android_accessibility")
+                .put("errorCode", "semantic_fallback_proof_required").toString(), result.contentText)
+            assertEquals(0, session.captureCalls)
+            assertTrue(session.commands.isEmpty())
+        }
+    }
+
+    @Test
+    fun currentSnapshotMismatchDoesNotConsumeProofOrRunGesture() {
+        val proofCorrelation = CORRELATION.copy(snapshotId = AccessibilitySnapshotId(2))
+        val proofs = VisualFallbackProofStore({ 1L }, { "fallback:changed-snapshot" })
+        val token = proofs.issue(call("find_ui", "issue"), proofCorrelation)
+        val session = FakeSession(snapshot())
+        val result = executor(session, fallbackProofs = proofs).run(call(
+            "visual_gesture_fallback", "changed",
+            JSONObject(gestureArgs(token)).put("correlation", correlationValue().put("snapshotId", 2)).toString(),
+        ))
+        assertFalse(result.success)
+        assertEquals(ToolFailureDiagnostic(
+            ToolFailureCode.SEMANTIC_FALLBACK_PROOF_REQUIRED, ToolFailureDetail.PROOF_CURRENT_SNAPSHOT_MISMATCH,
+        ), result.failureDiagnostic)
+        assertTrue(session.commands.isEmpty())
+        assertEquals(0, session.captureCalls)
+        assertTrue(proofs.claim(token, call("visual_gesture_fallback", "matching"), proofCorrelation, proofCorrelation) != null)
+    }
+
     @Test
     fun verifiedActionReturnsAndPinsOnlyItsExactReceiptWithoutInspectingAgain() {
         val after = CORRELATION.copy(snapshotId = AccessibilitySnapshotId(2))
@@ -74,11 +186,40 @@ class AndroidAccessibilityDynamicToolsTest {
     }
 
     @Test
-    fun replayedUnverifiedUntrustedAndUncorrelatedReceiptsNeverAcquireFollowUpHandles() {
+    fun acceptedClickReturnsFreshHandlesWithoutUpgradingItsUnverifiedPostcondition() {
+        val after = CORRELATION.copy(snapshotId = AccessibilitySnapshotId(2))
+        val session = FakeSession(
+            snapshot = snapshot(), receiptSnapshot = { snapshot(correlation = after) },
+            retainReceipt = { true },
+        ) { command, _ -> observedReceipt(command, after) }
+
+        val result = executor(session).run(call(
+            "click_ui", "accepted-click",
+            JSONObject().put("handle", handleJson(snapshot().nodes.single().handle)).toString(),
+        ))
+
+        assertTrue(result.success)
+        val receipt = JSONObject(result.contentText)
+        assertEquals("observed_not_verified", receipt.getJSONObject("postcondition").getString("status"))
+        assertEquals("android_action_observed", receipt.getString("actionCode"))
+        assertEquals("android_action_accepted_only", receipt.getJSONObject("postcondition").getString("detailCode"))
+        val next = receipt.getJSONObject("nextObservation")
+        assertEquals("succeeded", next.getString("status"))
+        assertEquals("untrusted_external", next.getString("trust"))
+        assertEquals(2L, next.getJSONObject("correlation").getLong("snapshotId"))
+        assertEquals(listOf(after), session.receiptPins)
+        assertEquals(UiPostconditionExpectation.ACTION_ACCEPTED, (session.commands.single() as AccessibilityCommand.Click).postcondition)
+        assertEquals(0, session.refreshCalls)
+        assertEquals(0, session.captureCalls)
+    }
+
+    @Test
+    fun replayedFailedUnevaluatedUntrustedAndUncorrelatedReceiptsNeverAcquireFollowUpHandles() {
         val after = CORRELATION.copy(snapshotId = AccessibilitySnapshotId(2))
         val variants: List<(AccessibilityExecutionResult) -> AccessibilityExecutionResult> = listOf(
             { it.copy(replayed = true) },
-            { it.copy(postcondition = it.postcondition.copy(status = AccessibilityPostconditionStatus.OBSERVED_NOT_VERIFIED)) },
+            { it.copy(postcondition = it.postcondition.copy(status = AccessibilityPostconditionStatus.FAILED)) },
+            { it.copy(postcondition = it.postcondition.copy(status = AccessibilityPostconditionStatus.NOT_EVALUATED)) },
             { it.copy(postcondition = it.postcondition.copy(kind = AccessibilityPostconditionKind.SNAPSHOT_QUERY)) },
             { it.copy(postcondition = it.postcondition.copy(before = null)) },
             { it.copy(postcondition = it.postcondition.copy(before = after)) },
@@ -102,6 +243,66 @@ class AndroidAccessibilityDynamicToolsTest {
 
             assertFollowUpUnavailable(executor(session).run(followUpActionCall("conservative-$index")))
 
+            assertTrue(session.receiptReads.isEmpty())
+            assertTrue(session.receiptPins.isEmpty())
+            assertEquals(1, session.commands.size)
+        }
+    }
+
+    @Test
+    fun observedReceiptDoesNotBypassMissingStaleLockedOrReplacedSessionGates() {
+        val after = CORRELATION.copy(snapshotId = AccessibilitySnapshotId(2))
+        listOf("missing", "mismatched", "expired", "locked", "replaced").forEach { scenario ->
+            var availability = UiInteractionAvailability.AVAILABLE
+            var active: HansAccessibilitySession? = null
+            val session = FakeSession(
+                snapshot = snapshot(),
+                receiptSnapshot = {
+                    when (scenario) {
+                        "missing" -> null
+                        "mismatched" -> snapshot()
+                        else -> snapshot(packageName = "private.receipt", correlation = after)
+                    }
+                },
+                retainReceipt = { scenario != "expired" },
+            ) { command, _ ->
+                if (scenario == "locked") availability = UiInteractionAvailability.DEVICE_LOCKED
+                if (scenario == "replaced") active = null
+                observedReceipt(command, after)
+            }
+            active = session
+
+            val result = executor(
+                session, availabilityProbe = UiInteractionAvailabilityProbe { availability },
+                sessionSource = AccessibilitySessionSource { active },
+            ).run(followUpActionCall("observed-gate-$scenario"))
+
+            assertFollowUpUnavailable(result)
+            assertEquals("observed_not_verified", JSONObject(result.contentText).getJSONObject("postcondition").getString("status"))
+            assertFalse(result.contentText.contains("private.receipt"))
+            assertEquals(1, session.commands.size)
+            assertEquals(0, session.refreshCalls)
+            assertEquals(0, session.captureCalls)
+            assertEquals(if (scenario == "expired") listOf(after) else emptyList<UiSnapshotCorrelation>(), session.receiptPins)
+            assertEquals(if (scenario == "expired") listOf(after) else emptyList<UiSnapshotCorrelation>(), session.receiptWithdrawals)
+        }
+    }
+
+    @Test
+    fun rejectedOrFailedExecutionNeverPromotesAnObservedReceiptOrRetriesTheAction() {
+        val after = CORRELATION.copy(snapshotId = AccessibilitySnapshotId(2))
+        listOf(AccessibilityExecutionStatus.REJECTED, AccessibilityExecutionStatus.FAILED).forEach { status ->
+            val session = FakeSession(
+                snapshot = snapshot(), receiptSnapshot = { snapshot(correlation = after) },
+                retainReceipt = { true },
+            ) { command, _ ->
+                observedReceipt(command, after).copy(status = status, errorCode = "accessibility_session_closed")
+            }
+
+            val result = executor(session).run(followUpActionCall("cancelled-${status.name.lowercase()}"))
+
+            assertFalse(result.success)
+            assertFalse(JSONObject(result.contentText).has("nextObservation"))
             assertTrue(session.receiptReads.isEmpty())
             assertTrue(session.receiptPins.isEmpty())
             assertEquals(1, session.commands.size)
@@ -242,6 +443,7 @@ class AndroidAccessibilityDynamicToolsTest {
         val tools = AndroidAccessibilityDynamicToolCatalog.namespace.tools.associateBy { it.name }
         assertEquals(
             setOf(
+                "run_steps",
                 "inspect_ui",
                 "inspect_visual_ui",
                 "find_ui",
@@ -261,16 +463,20 @@ class AndroidAccessibilityDynamicToolsTest {
         val visualDescription = tools.getValue("visual_gesture_fallback").description
         assertTrue(visual.getJSONObject("properties").has("fallbackToken"))
         assertTrue(visualDescription.contains("zero-match"))
+        assertTrue(visualDescription.contains("replacement visualFallbackToken returned by inspect_visual_ui"))
+        assertFalse(visualDescription.contains("find_ui call on the same screen for every gesture"))
         assertTrue(visualDescription.contains("selected Hans action policy"))
         assertTrue(visualDescription.contains("for every gesture"))
         assertTrue(visualDescription.contains("user-authorized full access needs no extra Hans prompt"))
         assertTrue(visualDescription.contains("Android security and permission UI is excluded"))
         assertFalse(visualDescription.contains("explicit one-time user confirmation"))
         val screenshot = JSONObject(tools.getValue("inspect_visual_ui").inputSchemaJson)
+        assertTrue(tools.getValue("inspect_visual_ui").description.contains("directly for the next gesture"))
         assertTrue(screenshot.getJSONObject("properties").has("fallbackToken"))
         assertTrue(screenshot.getJSONArray("required").toString().contains("correlation"))
         assertTrue(AndroidAccessibilityDynamicToolCatalog.namespace.description.contains("awake, unlocked"))
         assertTrue(AndroidAccessibilityDynamicToolCatalog.namespace.description.contains("never retry in a loop"))
+        assertTrue(AndroidAccessibilityDynamicToolCatalog.namespace.description.contains("observed_not_verified is not proof"))
     }
 
     @Test
@@ -527,6 +733,9 @@ class AndroidAccessibilityDynamicToolsTest {
         val json = JSONObject(result.contentText)
         assertEquals("ui_snapshot_temporarily_unavailable", json.getString("errorCode"))
         assertEquals("projection_root_read_failed", json.getString("detailCode"))
+        assertEquals(ToolFailureDiagnostic(
+            ToolFailureCode.UI_SNAPSHOT_TEMPORARILY_UNAVAILABLE, ToolFailureDetail.PROJECTION_ROOT_READ_FAILED,
+        ), result.failureDiagnostic)
         assertFalse(result.contentText.contains("RuntimeException"))
         assertFalse(result.contentText.contains("external ui text"))
         assertFalse(result.contentText.contains("accessibility_permission_required"))
@@ -780,6 +989,90 @@ class AndroidAccessibilityDynamicToolsTest {
         assertFalse(json.toString().contains("AQIDBA"))
         assertFalse(json.getBoolean("androidPixelsWrittenToDisk"))
         assertEquals("codex_app_server_input_image", json.getString("transport"))
+    }
+
+    @Test
+    fun screenshotReplacementTokenGoesDirectlyToOneGestureAndReturnsObservedFollowUp() {
+        val after = CORRELATION.copy(snapshotId = AccessibilitySnapshotId(2))
+        val session = FakeSession(
+            snapshot = snapshot(),
+            visualCapture = VisualUiCaptureResult.Success(VisualUiCapture(
+                correlation = CORRELATION,
+                imageDataUrl = "data:image/jpeg;base64,AQIDBA==",
+                pixelWidth = 480,
+                pixelHeight = 800,
+                sourcePixelWidth = 1_440,
+                sourcePixelHeight = 2_400,
+                displayBounds = UiBounds(0, 0, 1_440, 2_400),
+                capturedAtElapsedMillis = 123,
+            )),
+            receiptSnapshot = { snapshot(correlation = after) },
+            retainReceipt = { true },
+        ) { command, _ ->
+            when (command) {
+                is AccessibilityCommand.Find -> succeeded(
+                    command, AccessibilityObservation.FoundNodes(emptyList(), snapshotTruncated = false),
+                )
+                else -> observedReceipt(command, after).let { result ->
+                    result.copy(postcondition = result.postcondition.copy(kind = AccessibilityPostconditionKind.COORDINATE_GESTURE))
+                }
+            }
+        }
+        var tokenCounter = 0
+        val proofs = VisualFallbackProofStore(
+            elapsedRealtimeMillis = { 1L },
+            tokenFactory = { "fallback:direct-image-${++tokenCounter}" },
+        )
+        val executor = executor(session, fallbackProofs = proofs)
+        val find = executor.run(call(
+            "find_ui", "find-before-image",
+            JSONObject().put("correlation", correlationValue()).toString(),
+        ))
+        val originalToken = JSONObject(find.contentText).getString("visualFallbackToken")
+        val visual = executor.run(call(
+            "inspect_visual_ui", "direct-image",
+            JSONObject().put("correlation", correlationValue()).put("fallbackToken", originalToken).toString(),
+        ))
+        val imageReceipt = JSONObject(visual.contentText)
+        val replacementToken = imageReceipt.getString("visualFallbackToken")
+        val args = JSONObject(gestureArgs(replacementToken))
+            .put("correlation", imageReceipt.getJSONObject("correlation")).toString()
+
+        // The consumed semantic proof and other turns/threads cannot reuse the screenshot lease.
+        listOf(
+            call("visual_gesture_fallback", "old-token", gestureArgs(originalToken)),
+            call("visual_gesture_fallback", "other-thread", args, threadId = "other-thread"),
+            call("visual_gesture_fallback", "other-turn", args, turnId = "other-turn"),
+            call("visual_gesture_fallback", "wrong-snapshot", JSONObject(args).put(
+                "correlation", correlationValue().put("snapshotId", 99),
+            ).toString()),
+        ).zip(listOf(
+            ToolFailureDetail.PROOF_MISSING_OR_CONSUMED,
+            ToolFailureDetail.PROOF_THREAD_MISMATCH,
+            ToolFailureDetail.PROOF_TURN_MISMATCH,
+            ToolFailureDetail.PROOF_CORRELATION_MISMATCH,
+        )).forEach { (rejected, detail) ->
+            val result = executor.run(rejected)
+            assertFalse(result.success)
+            assertEquals("semantic_fallback_proof_required", JSONObject(result.contentText).getString("errorCode"))
+            assertEquals(ToolFailureDiagnostic(ToolFailureCode.SEMANTIC_FALLBACK_PROOF_REQUIRED, detail), result.failureDiagnostic)
+        }
+
+        val gesture = executor.run(call("visual_gesture_fallback", "direct-gesture", args))
+
+        assertTrue(gesture.success)
+        assertEquals(null, gesture.failureDiagnostic)
+        val gestureReceipt = JSONObject(gesture.contentText)
+        assertEquals("observed_not_verified", gestureReceipt.getJSONObject("postcondition").getString("status"))
+        assertEquals(2L, gestureReceipt.getJSONObject("nextObservation").getJSONObject("correlation").getLong("snapshotId"))
+        assertEquals(2, session.commands.size)
+        assertTrue(session.commands[0] is AccessibilityCommand.Find)
+        assertTrue(session.commands[1] is AccessibilityCommand.CoordinateGesture)
+        assertEquals(0, session.refreshCalls)
+        assertEquals(1, session.captureCalls)
+        assertEquals(listOf(after), session.receiptPins)
+        assertFalse(executor.run(call("visual_gesture_fallback", "replayed-image-gesture", args)).success)
+        assertEquals(2, session.commands.size)
     }
 
     @Test
@@ -1114,6 +1407,17 @@ class AndroidAccessibilityDynamicToolsTest {
         succeeded(command, observation = AccessibilityObservation.ActionReceipt(
             null, "test_action_succeeded", after, UiDataTrust.LOCAL_SYSTEM,
         )).let { it.copy(postcondition = it.postcondition.copy(after = after)) }
+
+    private fun observedReceipt(command: AccessibilityCommand, after: UiSnapshotCorrelation): AccessibilityExecutionResult =
+        verifiedReceipt(command, after).let { result ->
+            result.copy(
+                observation = (result.observation as AccessibilityObservation.ActionReceipt).copy(actionCode = "android_action_observed"),
+                postcondition = result.postcondition.copy(
+                    status = AccessibilityPostconditionStatus.OBSERVED_NOT_VERIFIED,
+                    detailCode = "android_action_accepted_only",
+                ),
+            )
+        }
 
     private fun assertFollowUpUnavailable(result: DynamicToolExecutionResult) {
         assertTrue(result.success)

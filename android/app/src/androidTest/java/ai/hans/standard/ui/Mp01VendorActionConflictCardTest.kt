@@ -17,11 +17,12 @@ class Mp01VendorActionConflictCardTest {
 
     @Test
     fun compatibleStockShortPressExplainsToggleAndOffersNoFalseConfirmation() {
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 SettingsScreen(
                     state = SettingsUiState(
                         actionKey = ActionKeyUiState(
+                            configured = true,
                             dictationTrigger = ActionKeyTrigger.PRESS,
                             mp01VendorConflict = Mp01VendorActionConflictUiState(
                                 detected = true,
@@ -41,21 +42,21 @@ class Mp01VendorActionConflictCardTest {
         compose.onNodeWithTag("settings_group_input").performScrollTo().performClick()
 
         compose.onNodeWithTag("mp01_vendor_action_instructions")
-            .assertTextContains("Einmal kurz drücken startet die Aufnahme", substring = true)
-            .assertTextContains("Nicht halten; ab ca. 400 ms", substring = true)
+            .assertTextContains("Kurz drücken, nicht halten", substring = true)
+            .assertTextContains("Langes Drücken gehört dem MP01-System", substring = true)
             .assertTextContains(
-                "Die kurze E-Ink-Auffrischung ist normal",
+                "Eine kurze E-Ink-Auffrischung ist normal",
                 substring = true,
             )
         compose.onNodeWithTag("action_key_status")
-            .assertTextContains("nochmals kurz drücken beendet und sendet", substring = true)
+            .assertTextContains("erneut drücken beendet und sendet", substring = true)
         compose.onNodeWithTag("confirm_mp01_vendor_action_cleared").assertDoesNotExist()
         compose.onNodeWithTag("open_mp01_vendor_settings").assertDoesNotExist()
     }
 
     @Test
     fun incompatibleStockHoldExplainsStandardBoundaryAndStaysBlocked() {
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 SettingsScreen(
                     state = SettingsUiState(
@@ -85,7 +86,7 @@ class Mp01VendorActionConflictCardTest {
             .assertTextContains("Wähle eine andere Taste", substring = true)
         compose.onNodeWithTag("action_key_status")
             .assertTextContains(
-                "Stock-MP01 reserviert das Halten",
+                "für Hans noch nicht verfügbar",
                 substring = true,
             )
         compose.onNodeWithTag("confirm_mp01_vendor_action_cleared").assertDoesNotExist()
@@ -93,7 +94,7 @@ class Mp01VendorActionConflictCardTest {
 
     @Test
     fun permanentStandardSettingsExposeNoDiscardedPrivilegedControls() {
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 SettingsScreen(
                     state = SettingsUiState(
@@ -127,7 +128,7 @@ class Mp01VendorActionConflictCardTest {
 
     @Test
     fun legacyAccessibilityCollisionRetainsExplicitNeutralizationFlow() {
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 SettingsScreen(
                     state = SettingsUiState(

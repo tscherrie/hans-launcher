@@ -8,9 +8,17 @@ import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
+import java.nio.file.attribute.BasicFileAttributes
 import java.security.MessageDigest
 
-internal class FileAccessFailure(val code: String) : Exception(code)
+internal class FileAccessFailure(
+    val code: String,
+    val recovery: SharedFileRecoveryInfo? = null,
+    val affectedPath: String? = null,
+    cause: Throwable? = null,
+    val partialFileMayRemain: Boolean = false,
+    val retainedDestination: SharedFileInfo? = null,
+) : Exception(code, cause)
 
 internal data class SharedFileInfo(
     val path: String,
@@ -19,7 +27,10 @@ internal data class SharedFileInfo(
     val bytes: Long,
     val modifiedMillis: Long,
     val sha256: String? = null,
+    val sourceDeletion: SharedFileDeletionInfo? = null,
 )
+
+internal data class SharedFileDeletionInfo(val path: String, val bytes: Long, val sha256: String)
 
 /** Public shared storage only. No root, private-app path, background index or cached grant. */
 internal class SharedFileStore(
@@ -27,8 +38,15 @@ internal class SharedFileStore(
     private val accessGranted: () -> Boolean,
     private val aliases: () -> Map<String, File> = { emptyMap() },
     private val changed: (File) -> Unit = {},
+    recoveryRoots: () -> List<SharedFileRecoveryRoot> = { emptyList() },
+    private val maxBinaryBytes: Long = MAX_BYTES,
+    private val readInput: (Path) -> InputStream = { Files.newInputStream(it, StandardOpenOption.READ, NOFOLLOW_LINKS) },
+    private val unlink: (Path) -> Unit = { Files.delete(it) },
 ) {
     private val mutationLock = Any()
+    private val recovery = SharedFileRecovery(recoveryRoots)
+
+    init { require(maxBinaryBytes in 1..MAX_BYTES) }
 
     fun granted(): Boolean = runCatching(accessGranted).getOrDefault(false)
 
@@ -129,7 +147,7 @@ internal class SharedFileStore(
     fun open(raw: String): InputStream {
         val file = resolve(raw)
         if (!file.isFile) throw FileAccessFailure("file_not_found")
-        return Files.newInputStream(file.toPath(), StandardOpenOption.READ, NOFOLLOW_LINKS)
+        return readInput(file.toPath())
     }
 
     fun readText(raw: String, maxBytes: Int): Pair<String, Boolean> {
@@ -155,16 +173,16 @@ internal class SharedFileStore(
         }
     }
 
-    /** Never overwrites. CREATE_NEW reserves the exact target; failure removes only our new file. */
+    /** Never overwrites. A failed write is retained: unlinking its pathname could delete a replacement. */
     fun save(raw: String, input: InputStream, maxBytes: Long, checkCancelled: () -> Unit): SharedFileInfo =
         synchronized(mutationLock) {
             val destination = resolve(raw, allowRoot = false)
             if (destination.parentFile?.isDirectory != true) throw FileAccessFailure("parent_directory_missing")
-            if (maxBytes !in 1..MAX_BYTES) throw FileAccessFailure("invalid_byte_limit")
+            if (maxBytes !in 1..maxBinaryBytes) throw FileAccessFailure("invalid_byte_limit")
             var created = false
-            var completed = false
             try {
                 checkCancelled()
+                requireAccess()
                 Files.newByteChannel(destination.toPath(), StandardOpenOption.CREATE_NEW,
                     StandardOpenOption.WRITE, NOFOLLOW_LINKS).use { output ->
                     created = true
@@ -173,13 +191,14 @@ internal class SharedFileStore(
                     var total = 0L
                     while (true) {
                         checkCancelled()
-                        val count = input.read(buffer)
+                        requireAccess()
+                        val count = input.read(buffer, 0, minOf(buffer.size.toLong(), maxBytes - total + 1).toInt())
                         if (count < 0) break
                         total += count
                         if (total > maxBytes) throw FileAccessFailure("file_byte_limit_exceeded")
                         digest.update(buffer, 0, count)
                         val bytes = ByteBuffer.wrap(buffer, 0, count)
-                        while (bytes.hasRemaining()) output.write(bytes)
+                        while (bytes.hasRemaining()) { requireAccess(); output.write(bytes) }
                     }
                     if (output is java.nio.channels.FileChannel) output.force(true)
                     requireAccess()
@@ -188,12 +207,14 @@ internal class SharedFileStore(
                     if (receipt.bytes != total || receipt.sha256 != hex(digest.digest())) {
                         throw FileAccessFailure("file_verification_failed")
                     }
-                    completed = true
                     runCatching { changed(destination) }
                     return@synchronized receipt
                 }
-            } finally {
-                if (created && !completed) Files.deleteIfExists(destination.toPath())
+            } catch (failure: Exception) {
+                if (!created) throw failure
+                // The open descriptor belonged to us; the current pathname may not. Do not touch it.
+                throw FileAccessFailure((failure as? FileAccessFailure)?.code ?: "file_write_failed_partial_retained",
+                    affectedPath = destination.path, cause = failure, partialFileMayRemain = true)
             }
         }
 
@@ -208,34 +229,105 @@ internal class SharedFileStore(
             val before = stat(source, hash = true, checkCancelled = checkCancelled)
             if (before.directory) throw FileAccessFailure("file_required")
             if (move && before.sha256 != expectedSha256) throw FileAccessFailure("source_changed_read_stat_first")
-            val saved = open(source).use { save(destination, it, MAX_BYTES, checkCancelled) }
+            val saved = open(source).use { save(destination, it, maxBinaryBytes, checkCancelled) }
             if (saved.sha256 != before.sha256) throw FileAccessFailure("source_changed_destination_retained")
-            if (move) delete(source, checkNotNull(expectedSha256), checkCancelled)
-            saved
+            if (move) {
+                try { saved.copy(sourceDeletion = delete(source, checkNotNull(expectedSha256), checkCancelled)) }
+                catch (failure: Exception) {
+                    throw FileAccessFailure((failure as? FileAccessFailure)?.code ?: "source_removal_failed_destination_retained",
+                        (failure as? FileAccessFailure)?.recovery, destination, failure, retainedDestination = saved)
+                }
+            } else saved
         }
 
-    /** Exact regular file only, digest precondition, no recursive delete or root/dir deletion. */
+    /**
+     * Ordinary path-based deletion, explicitly chosen by the owner. Fresh digest/identity checks
+     * reduce stale-path errors, but cannot bind unlink to an inode: a replacement in the final
+     * check-to-delete gap may be removed. This operation is NOT race-safe or recoverable.
+     */
     fun delete(raw: String, expectedSha256: String, checkCancelled: () -> Unit) = synchronized(mutationLock) {
         val file = resolve(raw, allowRoot = false)
+        val identity = Files.readAttributes(file.toPath(), BasicFileAttributes::class.java, NOFOLLOW_LINKS)
+        if (!identity.isRegularFile) throw FileAccessFailure("file_changed_read_stat_first")
+        val key = identity.fileKey()
         val info = stat(raw, hash = true, checkCancelled = checkCancelled)
         if (info.directory || info.sha256 != expectedSha256) throw FileAccessFailure("file_changed_read_stat_first")
         checkCancelled()
         requireAccess()
-        Files.delete(file.toPath())
-        if (Files.exists(file.toPath(), NOFOLLOW_LINKS)) throw FileAccessFailure("delete_not_verified")
+        val current = Files.readAttributes(file.toPath(), BasicFileAttributes::class.java, NOFOLLOW_LINKS)
+        if (!current.isRegularFile || (key != null && current.fileKey() != key) || digest(file, checkCancelled) != expectedSha256) {
+            throw FileAccessFailure("file_changed_read_stat_first")
+        }
+        checkCancelled()
+        requireAccess()
+        val lastPath = resolve(raw, allowRoot = false)
+        if (lastPath.path != file.path) throw FileAccessFailure("file_changed_read_stat_first")
+        val last = Files.readAttributes(lastPath.toPath(), BasicFileAttributes::class.java, NOFOLLOW_LINKS)
+        if (!last.isRegularFile || (key != null && last.fileKey() != key) || last.size() != current.size() ||
+            last.lastModifiedTime() != current.lastModifiedTime()) throw FileAccessFailure("file_changed_read_stat_first")
+        checkDigestSize(file.toPath())
+        // No recovery, rename, recursive delete, or destination cleanup. The final TOCTOU gap is accepted.
+        requireAccess()
+        try { unlink(file.toPath()) }
+        catch (failure: Exception) {
+            throw FileAccessFailure("file_delete_failed_check_path", affectedPath = file.path, cause = failure)
+        }
+        try {
+            checkCancelled()
+            requireAccess()
+            if (Files.exists(file.toPath(), NOFOLLOW_LINKS)) throw FileAccessFailure("file_removal_unconfirmed_path_present")
+        } catch (failure: Exception) {
+            throw FileAccessFailure((failure as? FileAccessFailure)?.code ?: "file_removal_unconfirmed",
+                affectedPath = file.path, cause = failure)
+        }
         runCatching { changed(file) }
+        SharedFileDeletionInfo(file.path, info.bytes, expectedSha256)
+    }
+
+    /** Metadata only; retained content stays private and is never fed into the model context. */
+    fun listRecovery(): List<SharedFileRecoveryInfo> {
+        requireAccess()
+        val receipts = recovery.list()
+        requireAccess()
+        return receipts
+    }
+
+    /** Recovery creates a new public file and retains the original recovery entry, without overwrite. */
+    fun restoreRecovery(handle: String, destination: String, checkCancelled: () -> Unit): SharedFileInfo = synchronized(mutationLock) {
+        requireAccess()
+        val retained = recovery.find(handle)
+        if (!Files.isRegularFile(File(retained.recoveryPath).toPath(), NOFOLLOW_LINKS)) {
+            throw FileAccessFailure("file_recovery_regular_file_required", retained)
+        }
+        val captured = File(retained.recoveryPath).toPath()
+        if (Files.size(captured) > maxBinaryBytes) throw FileAccessFailure("file_byte_limit_exceeded", retained)
+        readInput(captured).use {
+            save(destination, it, maxBinaryBytes, checkCancelled)
+        }
     }
 
     private fun digest(file: File, checkCancelled: () -> Unit): String {
+        checkDigestSize(file.toPath())
+        open(file.path).use { return digestInput(it, checkCancelled) }
+    }
+
+    private fun checkDigestSize(path: Path) {
+        if (Files.size(path) > maxBinaryBytes) throw FileAccessFailure("file_byte_limit_exceeded")
+    }
+
+    private fun digestInput(input: InputStream, checkCancelled: () -> Unit): String {
         val digest = MessageDigest.getInstance("SHA-256")
-        open(file.path).use { input ->
-            val buffer = ByteArray(64 * 1024)
-            while (true) {
-                checkCancelled()
-                val count = input.read(buffer)
-                if (count < 0) break
-                digest.update(buffer, 0, count)
-            }
+        val buffer = ByteArray(64 * 1024)
+        var total = 0L
+        while (true) {
+            checkCancelled()
+            requireAccess()
+            // Read only the first excessive byte, including when a writer grows the file after preflight.
+            val count = input.read(buffer, 0, minOf(buffer.size.toLong(), maxBinaryBytes - total + 1).toInt())
+            if (count < 0) break
+            total += count
+            if (total > maxBinaryBytes) throw FileAccessFailure("file_byte_limit_exceeded")
+            digest.update(buffer, 0, count)
         }
         return hex(digest.digest())
     }

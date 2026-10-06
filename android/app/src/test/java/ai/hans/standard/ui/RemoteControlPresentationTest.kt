@@ -6,10 +6,15 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class RemoteControlPresentationTest {
+    private val text = ai.hans.standard.localization.TestResourceTextResolver(java.util.Locale.GERMAN)
+    private fun remoteControlPresentation(state: RemoteControlSnapshot) =
+        ai.hans.standard.ui.remoteControlPresentation(state, text)
+    private val REMOTE_CONTROL_CONSENT: String get() = remoteControlConsent(text)
+
     @Test fun defaultsAreNotConsentOrAConfirmedConnection() {
         val view = remoteControlPresentation(RemoteControlSnapshot())
-        assertEquals("Telefonzugriff: nicht freigegeben", view.consent)
-        assertTrue(view.status.startsWith("Unbekannt"))
+        assertEquals("Freigabe: nicht erlaubt", view.consent)
+        assertEquals("Nicht geprüft", view.status)
         assertFalse(view.canEnable)
         assertFalse(view.canPair)
     }
@@ -25,7 +30,7 @@ class RemoteControlPresentationTest {
     @Test fun anEnableRequestCannotOptimisticallyBecomeConnected() {
         val view = remoteControlPresentation(ready().copy(
             localConsentGranted = true, pendingOperation = RemoteControlOperation.ENABLE))
-        assertEquals("Nicht verbunden (ausgeschaltet)", view.status)
+        assertEquals("Aus", view.status)
         assertFalse(view.canEnable)
         assertTrue(view.canDisable)
         assertFalse(view.canPair)
@@ -33,8 +38,8 @@ class RemoteControlPresentationTest {
 
     @Test fun connectedServerWithoutLocalConsentDoesNotAuthorizePhoneTools() {
         val view = remoteControlPresentation(ready(RemoteControlStatus.CONNECTED))
-        assertEquals("Verbunden", view.status)
-        assertEquals("Telefonzugriff: nicht freigegeben", view.consent)
+        assertEquals("Für Desktop bereit", view.status)
+        assertEquals("Freigabe: nicht erlaubt", view.consent)
         assertFalse(view.canPair)
         assertTrue(view.canEnable)
     }
@@ -42,7 +47,7 @@ class RemoteControlPresentationTest {
     @Test fun oldUnconfirmedStatusIsUnknownAndNeverEnablesPairing() {
         val view = remoteControlPresentation(ready(RemoteControlStatus.CONNECTED).copy(
             statusConfirmedForCurrentRuntime = false, localConsentGranted = true))
-        assertTrue(view.status.startsWith("Unbekannt"))
+        assertEquals("Nicht geprüft", view.status)
         assertFalse(view.canPair)
         assertTrue(view.canDisable)
     }
@@ -61,6 +66,21 @@ class RemoteControlPresentationTest {
         assertEquals(RemoteControlStatus.entries.size, labels.distinct().size)
     }
 
+    @Test fun permissionIsSeparateFromServiceReadinessAndNeverClaimsADesktopConnection() {
+        listOf(java.util.Locale.ENGLISH, java.util.Locale.GERMAN).forEach { locale ->
+            val resolver = ai.hans.standard.localization.TestResourceTextResolver(locale)
+            val views = RemoteControlStatus.entries.map { status ->
+                ai.hans.standard.ui.remoteControlPresentation(ready(status).copy(localConsentGranted = true), resolver)
+            }
+            assertEquals(1, views.map { it.consent }.distinct().size)
+            assertTrue(views.none { it.status.contains("connected", ignoreCase = true) || it.status.contains("verbunden", ignoreCase = true) })
+            val ready = ai.hans.standard.ui.remoteControlPresentation(
+                ready(RemoteControlStatus.CONNECTED).copy(localConsentGranted = true), resolver)
+            assertEquals(if (locale.language == "de") "Für Desktop bereit" else "Ready for desktop", ready.status)
+            assertTrue(ready.canPair)
+        }
+    }
+
     @Test fun listAndRevokeNeedAnExistingEnvironmentButNotCurrentConsent() {
         assertTrue(remoteControlPresentation(ready()).canManageClients)
         assertFalse(remoteControlPresentation(ready().copy(connection = null)).canManageClients)
@@ -75,7 +95,10 @@ class RemoteControlPresentationTest {
         assertFalse(source.contains("rememberSaveable("))
         assertFalse(source.contains("LaunchedEffect("))
         assertFalse(source.contains("delay("))
-        assertFalse(source.contains("ClipboardManager"))
+        assertTrue(source.contains(".clickable(role = Role.Button, onClickLabel = copyLabel)"))
+        assertTrue(source.contains("ClipDescription.EXTRA_IS_SENSITIVE"))
+        assertTrue(source.contains("Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU"))
+        assertTrue(source.contains("sensitive = true"))
         assertFalse(source.contains("Log."))
         assertTrue(source.contains("pairing.manualPairingCode ?: pairing.pairingCode"))
     }

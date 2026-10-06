@@ -1,5 +1,7 @@
 package ai.hans.standard.phone.publicapi
 
+import ai.hans.standard.localization.AndroidHansTextResolver
+
 import android.Manifest
 import android.content.Context
 import ai.hans.standard.codex.DynamicToolExecutor
@@ -29,6 +31,7 @@ object PublicPhoneToolIntegrationFactory {
             executor = PublicPhoneDynamicToolExecutor(
                 platform = platform,
                 backgroundExecutor = backgroundExecutor,
+                text = AndroidHansTextResolver(context),
                 confirmations = confirmations,
             ),
             notificationReplyRegistry = notificationReplyRegistry,

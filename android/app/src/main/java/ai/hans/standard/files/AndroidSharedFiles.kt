@@ -1,5 +1,7 @@
 package ai.hans.standard.files
 
+import ai.hans.standard.R
+
 import android.content.ClipData
 import android.content.ContentProvider
 import android.content.ContentValues
@@ -20,16 +22,30 @@ import java.util.UUID
 
 internal object AndroidSharedFiles {
     fun store(context: Context) = SharedFileStore(
-        roots = {
-            val primary = Environment.getExternalStorageDirectory()
-            (listOf(primary) + context.getSystemService(StorageManager::class.java)
-                ?.storageVolumes.orEmpty().mapNotNull { it.directory }).distinctBy { it.canonicalPath }
-        },
+        roots = { publicVolumes(context) },
         accessGranted = Environment::isExternalStorageManager,
         aliases = { mapOf("/sdcard" to Environment.getExternalStorageDirectory(),
             "/storage/self/primary" to Environment.getExternalStorageDirectory()) },
         changed = { file -> MediaScannerConnection.scanFile(context, arrayOf(file.path), null, null) },
+        recoveryRoots = { recoveryRoots(context) },
+        // Public NDK unlink: cannot remove a raced-in directory or follow the final symlink.
+        unlink = AndroidFileUnlink::unlink,
     )
+
+    /** Same-volume app-specific directories are isolated by Android, unlike random public trash names. */
+    internal fun recoveryRoots(context: Context): List<SharedFileRecoveryRoot> {
+        val volumes = publicVolumes(context)
+        return context.getExternalFilesDirs(null).filterNotNull().mapNotNull { privateFiles ->
+            val path = privateFiles.canonicalFile.toPath()
+            val volume = volumes.filter { path.startsWith(it.canonicalFile.toPath()) }
+                .maxByOrNull { it.canonicalFile.toPath().nameCount } ?: return@mapNotNull null
+            SharedFileRecoveryRoot(volume.canonicalFile, File(privateFiles, "hans-file-recovery"))
+        }.distinctBy { it.privateDirectory.canonicalPath }
+    }
+
+    private fun publicVolumes(context: Context): List<File> =
+        (listOf(Environment.getExternalStorageDirectory()) + context.getSystemService(StorageManager::class.java)
+            ?.storageVolumes.orEmpty().mapNotNull { it.directory }).distinctBy { it.canonicalPath }
 
     fun downloads(): String = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS).path
 
@@ -73,7 +89,7 @@ internal class AndroidFileLinks(private val context: Context) {
         } else Intent(Intent.ACTION_VIEW).setDataAndType(content, AndroidSharedFiles.mime(file.path))
         intent.clipData = ClipData.newRawUri(file.name, content)
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        context.startActivity(Intent.createChooser(intent, if (uri.host == "share") "Datei teilen" else "Datei öffnen")
+        context.startActivity(Intent.createChooser(intent, if (uri.host == "share") context.getString(R.string.integration_share_file) else context.getString(R.string.integration_open_file))
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }
 

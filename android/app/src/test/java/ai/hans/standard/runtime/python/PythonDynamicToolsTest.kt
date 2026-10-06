@@ -15,6 +15,32 @@ import org.junit.rules.TemporaryFolder
 class PythonDynamicToolsTest {
     @get:Rule val temporaryFolder = TemporaryFolder()
 
+    @Test fun syntheticRuntimeResultDoesNotReleaseOuterQuiescenceUntilRuntimeAndChildrenAreProvenIdle() {
+        val runtimeReceipt = PythonQuiescenceReceipt()
+        val runtime = object : PythonRuntimeGateway {
+            override fun snapshot() = PythonRuntimeSnapshot(PythonRuntimePhase.STOPPED, 0, 0)
+            override fun execute(request: PythonExecutionRequest, streamListener: PythonStreamListener,
+                callback: PythonResultCallback): PythonExecutionHandle {
+                callback.onResult(PythonExecutionResult(request.requestId, PythonExecutionStatus.PROCESS_DIED))
+                return object : PythonExecutionHandle {
+                    override fun cancel() = true
+                    override fun onQuiescent(listener: () -> Unit) = runtimeReceipt.onQuiescent(listener)
+                }
+            }
+        }
+        val executor = PythonDynamicToolExecutor(runtime, nowElapsedRealtimeMillis = { 1_000 })
+        var result = false
+        var quiet = false
+        val handle = executor.executeCancellable(call("run", "{\"code\":\"pass\"}"),
+            ai.hans.standard.codex.DynamicToolCancellation.NONE) { result = true }
+        assertTrue(result)
+        assertTrue(handle.onQuiescent { quiet = true })
+        handle.cancel()
+        assertFalse(quiet)
+        runtimeReceipt.complete()
+        assertTrue(quiet)
+    }
+
     @Test
     fun sourceToolBuildsABoundedRequestAndProjectsStreamsAndValue() {
         val captured = AtomicReference<PythonExecutionRequest>()

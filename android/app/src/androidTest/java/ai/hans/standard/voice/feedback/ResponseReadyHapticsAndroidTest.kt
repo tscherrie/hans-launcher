@@ -1,5 +1,7 @@
 package ai.hans.standard.voice.feedback
 
+import ai.hans.standard.localization.AndroidHansTextResolver
+
 import android.Manifest
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
@@ -44,7 +46,7 @@ class ResponseReadyHapticsAndroidTest {
         val controller = ResponseReadyFeedbackController(
             haptics = ResponseReadyHaptics { pulses += 1 },
             executor = Executor { handler.post(it) },
-        )
+        text = AndroidHansTextResolver(InstrumentationRegistry.getInstrumentation().targetContext))
         try {
             instrumentation.runOnMainSync {
                 controller.onLiveSnapshot(LiveVoiceSnapshot(LiveVoicePhase.HANS_SPEAKING, generation = 1))

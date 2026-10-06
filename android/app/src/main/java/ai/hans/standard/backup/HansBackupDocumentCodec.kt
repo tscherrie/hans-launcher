@@ -205,6 +205,7 @@ object HansBackupDocumentCodec {
         .put("activeTurnInputMode", activeTurnInputMode.wireValue)
         .put("voice", voice)
         .put("liveVoice", liveVoice)
+        .put("codexLiveVoice", codexLiveVoice)
         .put("speechRate", speechRate.toDouble())
         .put("readAloudMode", readAloudMode.wireValue)
         .put("dictationKeyTrigger", dictationKeyTrigger.name)
@@ -221,7 +222,7 @@ object HansBackupDocumentCodec {
                 "dictationKeyTrigger",
                 "cameraHoldToTalkEnabled",
             )
-        val optionalKeys = setOf("serviceTier", "liveVoice").filterTo(mutableSetOf()) { has(it) }
+        val optionalKeys = setOf("serviceTier", "liveVoice", "codexLiveVoice").filterTo(mutableSetOf()) { has(it) }
         requireExactKeys(legacyKeys + optionalKeys)
         require(getString("activeTurnInputMode") == ActiveTurnInputMode.STEER.wireValue) {
             "backup_input_mode"
@@ -240,6 +241,11 @@ object HansBackupDocumentCodec {
                 getString("liveVoice")
             } else {
                 HansSettings.DEFAULT_LIVE_VOICE
+            },
+            codexLiveVoice = if (has("codexLiveVoice") && !isNull("codexLiveVoice")) {
+                getString("codexLiveVoice")
+            } else {
+                HansSettings.DEFAULT_CODEX_LIVE_VOICE
             },
             speechRate = getDouble("speechRate").toFloat(),
             readAloudMode = ReadAloudMode.fromWire(getString("readAloudMode"))

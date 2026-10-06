@@ -19,6 +19,18 @@ object NotificationTriageIntegration {
     private val validatedSuggestionController =
         AtomicReference<ValidatedNotificationSuggestionController?>(null)
     private val interactiveActivities = ConcurrentHashMap.newKeySet<NotificationInteractiveActivity>()
+    private val idleWakeups = java.util.concurrent.CopyOnWriteArraySet<() -> Unit>()
+    private val notificationEventWakeups = java.util.concurrent.CopyOnWriteArraySet<() -> Unit>()
+
+    internal fun attachNotificationEventWakeup(wakeup: () -> Unit): Closeable {
+        notificationEventWakeups.add(wakeup)
+        return Closeable { notificationEventWakeups.remove(wakeup) }
+    }
+
+    internal fun attachIdleWakeup(wakeup: () -> Unit): Closeable {
+        idleWakeups.add(wakeup)
+        return Closeable { idleWakeups.remove(wakeup) }
+    }
 
     fun attachSuggestionSink(sink: UserFacingNotificationSuggestionSink): Closeable {
         suggestionSink.set(sink)
@@ -142,14 +154,21 @@ object NotificationTriageIntegration {
             interactiveActivities.remove(activity)
         }
         if (!changed) return
+        notificationEventWakeups.forEach { wakeup -> runCatching { wakeup() } }
         if (interactiveActivities.isEmpty()) {
             runtimeWakeup.get()?.invoke()
+            idleWakeups.forEach { wakeup -> runCatching { wakeup() } }
         } else if (active) {
             runtimePreempt.get()?.invoke()
         }
     }
 
     internal fun isInteractiveIdle(): Boolean = interactiveActivities.isEmpty()
+
+    /** Native external messages may join regular work, but never compete with live audio. */
+    internal fun isNotificationEventIntakeAllowed(): Boolean =
+        NotificationInteractiveActivity.DICTATION !in interactiveActivities &&
+            NotificationInteractiveActivity.LIVE_VOICE !in interactiveActivities
 }
 
 /**

@@ -34,8 +34,16 @@ internal class CodexSessionClient(
     pluginInstallDeadline: PluginInstallDeadline? = null,
 ) {
     private val toolPerformance = ToolPerformanceRecorder()
-    private val controller = CodexSessionController(
-        transport = BinderSessionRuntimeTransport(runtime),
+    private val phoneToolsServer = dynamicToolExecutor?.let { executor ->
+        startPhoneToolsServerOrNull { ai.hans.standard.remotecontrol.PhoneToolsMcpServer(
+            specs = { executor.specs },
+            execute = { params, cancellation, onResult ->
+                controller.executeRemotePhoneTool(params, cancellation, onResult)
+            },
+        ) }
+    }
+    private val controller: CodexSessionController = CodexSessionController(
+        transport = BinderSessionRuntimeTransport(runtime, phoneToolsServer?.config),
         sessionStore = sessionStore,
         visibleInputReceipts = visibleInputReceipts,
         settingsStore = settingsStore,
@@ -48,6 +56,20 @@ internal class CodexSessionClient(
         pluginSurfaceEvidenceStager = pluginSurfaceEvidenceStager,
         pluginPreparationExecutor = pluginPreparationExecutor,
         pluginInstallDeadline = pluginInstallDeadline,
+        phoneToolsMcpConfigured = phoneToolsServer != null,
+        performanceObserver = object : PerformanceSessionObserver {
+            override fun onState(
+                generation: Long?, threadId: String?,
+                phase: ai.hans.standard.diagnostics.PerformancePhase,
+            ) {
+                toolPerformance.observeContext(generation, threadId)
+                toolPerformance.observePhase(phase)
+            }
+
+            override fun onEvent(event: ai.hans.standard.diagnostics.PerformanceEvent) {
+                toolPerformance.recordEvent(event)
+            }
+        },
     )
 
     init {
@@ -71,9 +93,33 @@ internal class CodexSessionClient(
     fun addObserver(observer: CodexClientObserver) = controller.addObserver(observer)
     fun removeObserver(observer: CodexClientObserver) = controller.removeObserver(observer)
     fun snapshot(): CodexClientSnapshot = controller.snapshot()
+    fun agentChannelRecoveredHistory(): AgentChannelRecoveredHistory? = controller.agentChannelRecoveredHistory()
+    fun notificationExternalHistory(): NativeNotificationExternalHistory? = controller.notificationExternalHistory()
+    fun refreshNotificationExternalHistory(expectedThreadId: String): Boolean =
+        controller.refreshNotificationExternalHistory(expectedThreadId)
+    fun dispatchNotificationEvent(
+        message: NativeNotificationExternalMessage,
+        expectedThreadId: String,
+        beforeTransport: () -> Boolean,
+        onReceipt: (NativeNotificationDispatchReceipt) -> Unit,
+    ): NativeNotificationDispatchResult = controller.dispatchNotificationEvent(
+        message, expectedThreadId, beforeTransport, onReceipt)
+    /** Passive enum/counter receipt only; never initializes or restarts a session. */
+    fun realtimeDiagnostics(): CodexRealtimeDiagnostics = controller.realtimeDiagnostics()
+    fun voiceControlSessionIdFor(call: ai.hans.standard.codex.DynamicToolCallParams): String? =
+        controller.voiceControlSessionIdFor(call)
     fun start() = controller.start()
     fun restart() = controller.restart()
     fun stop() = controller.stop()
+    fun startRealtime(offerSdp: String, prompt: String, voice: String?, callbacks: CodexRealtimeCallbacks): CodexRealtimeCall? =
+        controller.startRealtime(offerSdp, prompt, voice, callbacks)
+    fun startRealtime(offerSdp: String, prompt: String, voice: String?, options: CodexRealtimeOptions,
+        callbacks: CodexRealtimeCallbacks): CodexRealtimeCall? =
+        controller.startRealtime(offerSdp, prompt, voice, options, callbacks)
+    fun closeRemotePhoneTools() {
+        controller.closeRemotePhoneTools()
+        phoneToolsServer?.close()
+    }
     fun refreshAccount(): Boolean = controller.refreshAccount()
     fun refreshModels(): Boolean = controller.refreshModels()
 
@@ -142,10 +188,12 @@ internal class CodexSessionClient(
         selection: DispatchSelection? = null,
         clientUserMessageId: String? = null,
         dynamicToolTurnPolicy: DynamicToolTurnPolicy = DynamicToolTurnPolicy.ALLOW,
+        expectedThreadId: String? = null,
     ): CodexDispatchAttemptResult = controller.dispatchAttempt(
         input,
         selection,
         clientUserMessageId,
         dynamicToolTurnPolicy,
+        expectedThreadId = expectedThreadId,
     )
 }

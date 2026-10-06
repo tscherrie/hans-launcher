@@ -86,6 +86,7 @@ internal class RemoteWorkDynamicToolExecutor(
         }
         if (!scheduled) gate.complete(failureResult(call, "remote_work_executor_rejected"))
         return object : DynamicToolExecutionHandle {
+            override fun onQuiescent(listener: () -> Unit): Boolean = gate.onQuiescent(listener)
             override fun cancel(): DynamicToolCancellationDisposition = gate.cancel()
         }
     }

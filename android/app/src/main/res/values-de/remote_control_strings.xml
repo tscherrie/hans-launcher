@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="remote_control_direction">Desktop → Telefon</string>
+    <string name="remote_control_allow_title">Desktop-Zugriff auf dieses Telefon erlauben?</string>
+    <string name="remote_control_hans_permission">Hans-Freigabe · keine Android-Berechtigung</string>
+    <string name="remote_control_readiness_help">Erlaubt gekoppelten Desktops, Hans im Hintergrund zu erreichen. Bereit bedeutet nicht, dass gerade ein Desktop verbunden ist.</string>
+    <string name="remote_control_permission_allowed">Freigabe: erlaubt</string>
+    <string name="remote_control_permission_not_allowed">Freigabe: nicht erlaubt</string>
+    <string name="remote_control_service_status">Hintergrundzugriff: %1$s</string>
+    <string name="remote_control_status_unknown">Nicht geprüft</string>
+    <string name="remote_control_status_off">Aus</string>
+    <string name="remote_control_status_starting">Startet</string>
+    <string name="remote_control_status_ready">Für Desktop bereit</string>
+    <string name="remote_control_status_error">Fehler</string>
+    <string name="remote_control_checking_readiness">Bereitschaft wird geprüft…</string>
+    <string name="remote_control_pair_desktop">Desktop koppeln</string>
+    <string name="remote_control_pairing_help">Code antippen und in ChatGPT Desktop oder Codex auf deinem Mac oder Windows-PC einfügen. Nur mit deinem eigenen Desktop teilen.</string>
+    <string name="remote_control_pairing_ephemeral">Hans entfernt den Code beim Ablauf. Ein kopierter Code bleibt in der Zwischenablage, bis er ersetzt oder von Android gelöscht wird.</string>
+    <string name="remote_control_copy_pairing_code">Kopplungscode kopieren</string>
+    <string name="remote_control_copy_thread_id">Gesprächs-ID kopieren</string>
+    <string name="remote_control_copied">Kopiert</string>
+    <string name="remote_control_existing_conversation_help">ID zum Kopieren antippen und dieses Gespräch in ChatGPT Desktop oder Codex öffnen.</string>
+    <string name="remote_control_project_title">Neue Desktop-Aufgabe</string>
+    <string name="remote_control_project_help">In ChatGPT Desktop oder Codex eine neue Aufgabe starten, dieses Telefon wählen und diesen Projektordner verwenden. Zum Kopieren antippen:</string>
+    <string name="remote_control_copy_project_path">Projektordner kopieren</string>
+    <string name="remote_control_project_permissions">Hans richtet diesen Ordner für dich ein. Seine Lage gibt keine zusätzlichen Android-Rechte; der Telefonzugriff nutzt deine Hans-Freigaben.</string>
+    <string name="remote_control_new_task_tools">Neue Desktop-Aufgaben können dieselben Telefonwerkzeuge wie Hans nutzen – mit deinen Freigaben.</string>
+    <string name="remote_control_tools_unavailable">Telefonwerkzeuge für neue Desktop-Aufgaben sind noch nicht bereit. Hans-Laufzeit neu starten und erneut prüfen.</string>
+</resources>

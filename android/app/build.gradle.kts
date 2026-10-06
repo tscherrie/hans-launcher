@@ -1,5 +1,7 @@
 import org.gradle.api.tasks.Exec
 import org.gradle.api.tasks.Sync
+import org.gradle.api.tasks.PathSensitivity
+import org.gradle.api.tasks.testing.Test
 import org.gradle.api.file.DuplicatesStrategy
 import org.gradle.api.artifacts.dsl.LockMode
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
@@ -160,6 +162,10 @@ android {
         versionCode = 1
         versionName = "0.1.0-dev"
 
+        // Do not let library-only translations claim languages Hans does not support.
+        // Unqualified app resources remain the complete English fallback.
+        resourceConfigurations += listOf("en", "de")
+
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
 
@@ -222,7 +228,9 @@ android {
         assets.srcDir(layout.buildDirectory.dir("generated/pythonRuntime/staged/assets"))
         assets.srcDir(layout.buildDirectory.dir("generated/pythonResolver/assets"))
         jniLibs.srcDir(layout.buildDirectory.dir("generated/hansProbe/jniLibs"))
+        jniLibs.srcDir(layout.buildDirectory.dir("generated/hansFileUnlink/jniLibs"))
         jniLibs.srcDir(layout.buildDirectory.dir("generated/codexRuntime/jniLibs"))
+        jniLibs.srcDir(layout.buildDirectory.dir("generated/codexTranscription/jniLibs"))
         jniLibs.srcDir(layout.buildDirectory.dir("generated/pythonRuntime/staged/jniLibs"))
         jniLibs.srcDir(layout.buildDirectory.dir("generated/pythonBridge/jniLibs"))
     }
@@ -238,6 +246,7 @@ android {
             // runtime.lock.json inside the final APK.
             keepDebugSymbols += "**/$codexRuntimeApkName"
             keepDebugSymbols += "**/$codeModeHostApkName"
+            keepDebugSymbols += "**/libcodex_transcribe.so"
             keepDebugSymbols += "**/libpython3.14.so"
             keepDebugSymbols += "**/lib*_python.so"
             keepDebugSymbols += "**/libhans_py_*.so"
@@ -249,6 +258,14 @@ android {
     testOptions {
         unitTests.isIncludeAndroidResources = false
     }
+}
+
+// JVM presentation fixtures read the actual localized XMLs without a Robolectric runtime.
+// Text-only changes must invalidate those tests even when generated R IDs stay unchanged.
+tasks.withType<Test>().configureEach {
+    inputs.files(fileTree("src/main/res") { include("**/*.xml") })
+        .withPropertyName("hansLocalizationResources")
+        .withPathSensitivity(PathSensitivity.RELATIVE)
 }
 
 val generateHansReleaseConfig by tasks.registering {
@@ -507,6 +524,31 @@ val compileHansNativeProbe by tasks.registering(Exec::class) {
     }
 }
 
+val compileHansFileUnlinkBridge by tasks.registering(Exec::class) {
+    group = "build"
+    description = "Builds the root-free public-NDK file-only unlink JNI bridge."
+    val source = layout.projectDirectory.file("src/main/cpp/hans_file_unlink_jni.c")
+    val output = layout.buildDirectory.file("generated/hansFileUnlink/jniLibs/arm64-v8a/libhans_file_unlink_jni.so")
+    inputs.file(source)
+    outputs.file(output)
+    doFirst {
+        val hostTag = when {
+            System.getProperty("os.name").lowercase(Locale.US).contains("linux") -> "linux-x86_64"
+            System.getProperty("os.name").lowercase(Locale.US).contains("mac") -> "darwin-x86_64"
+            System.getProperty("os.name").lowercase(Locale.US).contains("windows") -> "windows-x86_64"
+            else -> error("Unsupported NDK build host: ${System.getProperty("os.name")}")
+        }
+        val compilerName = if (hostTag.startsWith("windows")) "aarch64-linux-android31-clang.cmd" else "aarch64-linux-android31-clang"
+        val compiler = android.ndkDirectory.resolve("toolchains/llvm/prebuilt/$hostTag/bin/$compilerName")
+        check(compiler.isFile) { "Android NDK $hansNdkVersion ARM64 compiler missing" }
+        output.get().asFile.parentFile.mkdirs()
+        commandLine(compiler.absolutePath, source.asFile.absolutePath,
+            "-std=c17", "-O2", "-fPIC", "-shared", "-Wall", "-Wextra", "-Werror",
+            "-Wl,--build-id=sha1", "-Wl,-z,relro", "-Wl,-z,now", "-Wl,-z,max-page-size=16384",
+            "-o", output.get().asFile.absolutePath)
+    }
+}
+
 val codexRuntimeJniLibs = layout.buildDirectory.dir("generated/codexRuntime/jniLibs")
 val codexRuntimeOutput = codexRuntimeJniLibs.map {
     it.file("arm64-v8a/$codexRuntimeApkName")
@@ -546,6 +588,7 @@ val packageCodexRuntime by tasks.registering(Exec::class) {
     group = "build"
     description = "Downloads, verifies, and packages the pinned official Codex App Server and Code Mode host."
     inputs.file(runtimeLockFile)
+    inputs.file(rootProject.file("runtime/transcription/helper.lock.json"))
     inputs.files(
         rootProject.file("runtime/scripts/package-official-musl.sh"),
         rootProject.file("runtime/scripts/verify-package.sh"),
@@ -558,6 +601,22 @@ val packageCodexRuntime by tasks.registering(Exec::class) {
         rootProject.file("runtime/scripts/package-official-musl.sh").absolutePath,
         codexRuntimeJniLibs.get().dir("arm64-v8a").asFile.absolutePath,
     )
+}
+
+val packageCodexTranscription by tasks.registering(Exec::class) {
+    group = "build"
+    description = "Verifies and stages the source-built, subscription-only transcription helper."
+    val helperRoot = rootProject.file("runtime/transcription")
+    inputs.files(helperRoot.resolve("source.lock.json"), helperRoot.resolve("helper.lock.json"),
+        helperRoot.resolve("Cargo.toml"), helperRoot.resolve("Cargo.lock"))
+    inputs.dir(helperRoot.resolve("src"))
+    inputs.file(helperRoot.resolve("build/artifacts/0.1.0/libcodex_transcribe.so"))
+    inputs.files(rootProject.file("runtime/scripts/package-transcription-helper.sh"),
+        rootProject.file("runtime/tests/verify-transcription-elf.py"))
+    val output = layout.buildDirectory.dir("generated/codexTranscription/jniLibs/arm64-v8a")
+    outputs.file(output.map { it.file("libcodex_transcribe.so") })
+    commandLine("/bin/sh", rootProject.file("runtime/scripts/package-transcription-helper.sh").absolutePath,
+        "--stage", output.get().asFile.absolutePath)
 }
 
 tasks.configureEach {
@@ -575,7 +634,9 @@ tasks.configureEach {
         (name.endsWith("NativeLibs") || name.endsWith("JniLibFolders"))
     ) {
         dependsOn(compileHansNativeProbe)
+        dependsOn(compileHansFileUnlinkBridge)
         dependsOn(packageCodexRuntime)
+        dependsOn(packageCodexTranscription)
         dependsOn(verifyStagedPythonRuntime)
         dependsOn(compileHansPythonNativeBridge)
     }
@@ -594,6 +655,7 @@ fun registerCodexRuntimeApkVerification(
     )
     inputs.file(debugApk)
     inputs.file(runtimeLockFile)
+    inputs.file(rootProject.file("runtime/transcription/helper.lock.json"))
 
     doLast {
         val apk = debugApk.get().asFile
@@ -631,6 +693,9 @@ fun registerCodexRuntimeApkVerification(
 
             verifyExecutable(codexRuntimeApkName, codexRuntimeBytes, codexRuntimeSha256)
             verifyExecutable(codeModeHostApkName, codeModeHostBytes, codeModeHostSha256)
+            val helper = JsonSlurper().parse(rootProject.file("runtime/transcription/helper.lock.json")) as Map<*, *>
+            verifyExecutable("libcodex_transcribe.so", (helper["bytes"] as Number).toLong(),
+                helper["sha256"] as String)
         }
     }
 }

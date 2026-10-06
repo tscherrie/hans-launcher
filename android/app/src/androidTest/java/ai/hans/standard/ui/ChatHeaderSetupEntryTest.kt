@@ -11,10 +11,12 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipe
 import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 
@@ -26,7 +28,7 @@ class ChatHeaderSetupEntryTest {
     fun readyHeaderIsSilentAndTappingHansRequiresPhoneCallConfirmation() {
         val liveStatus = mutableStateOf<LiveVoiceUiStatus?>(null)
         var liveStarts = 0
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 ChatScreen(
                     state = ChatUiState(
@@ -76,7 +78,7 @@ class ChatHeaderSetupEntryTest {
     fun startingLiveReplacesTheSleepingHeaderWithThePhoneSurface() {
         val runtimeStatus = mutableStateOf(RuntimeUiStatus.OFFLINE)
         val liveStatus = mutableStateOf<LiveVoiceUiStatus?>(null)
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 ChatScreen(
                     state = ChatUiState(
@@ -118,7 +120,7 @@ class ChatHeaderSetupEntryTest {
         var pluginOpens = 0
         var automationOpens = 0
         var settingsOpens = 0
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 ChatScreen(
                     state = ChatUiState(runtimeStatus = RuntimeUiStatus.ONLINE),
@@ -163,7 +165,7 @@ class ChatHeaderSetupEntryTest {
 
     @Test
     fun talkBackCustomActionStillOpensNavigationPanelAlongsideTheVisibleMenuButton() {
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 ChatScreen(
                     state = ChatUiState(runtimeStatus = RuntimeUiStatus.ONLINE),
@@ -184,7 +186,7 @@ class ChatHeaderSetupEntryTest {
 
     @Test
     fun navigationPanelSupportsCloseButtonScrimBackAndRightSwipe() {
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 ChatScreen(
                     state = ChatUiState(runtimeStatus = RuntimeUiStatus.ONLINE),
@@ -217,6 +219,41 @@ class ChatHeaderSetupEntryTest {
         compose.onNodeWithTag("chat_navigation_panel").assertDoesNotExist()
         compose.onNodeWithTag("choose_media").assertExists()
         compose.onNodeWithTag("choose_existing_media").assertDoesNotExist()
+    }
+
+    @Test
+    fun settingsDetailUsesTheFullWidthAndBackRestoresTheCompactMenu() {
+        compose.setGermanContent {
+            MaterialTheme {
+                ChatScreen(
+                    state = ChatUiState(),
+                    callbacks = callbacks(),
+                    sidebarSettings = SettingsUiState(),
+                    sidebarCallbacks = SettingsUiCallbacks(
+                        onBack = {}, onStartGettingToKnow = {}, onModelSelected = {},
+                        onReasoningEffortSelected = {}, onVoiceSelected = {},
+                        onSpeechRateSelected = {}, onReadAloudModeSelected = {}, onPreviewVoice = {},
+                        onStartActionKeySetup = {}, onStartModelToggleKeySetup = {},
+                        onCancelActionKeySetup = {}, onClearActionKey = {}, onClearModelToggleKey = {},
+                        onCapabilityAccessRequested = {},
+                    ),
+                )
+            }
+        }
+        compose.onNodeWithTag("open_chat_navigation").performClick()
+        val fullWidth = compose.onNodeWithTag("chat_navigation_overlay").fetchSemanticsNode().boundsInRoot.width
+        val drawerWidth = compose.onNodeWithTag("chat_navigation_panel").fetchSemanticsNode().boundsInRoot.width
+        assertTrue(drawerWidth < fullWidth)
+        compose.onNodeWithTag("settings_group_input").performScrollTo().performClick()
+        compose.onNodeWithTag("chat_navigation_scrim").assertDoesNotExist()
+        assertEquals(fullWidth,
+            compose.onNodeWithTag("chat_navigation_panel").fetchSemanticsNode().boundsInRoot.width, 1f)
+        compose.onNodeWithTag("settings_back_to_groups").performClick()
+        compose.onNodeWithTag("chat_navigation_scrim").assertExists()
+        assertEquals(drawerWidth,
+            compose.onNodeWithTag("chat_navigation_panel").fetchSemanticsNode().boundsInRoot.width, 1f)
+        compose.onNodeWithTag("close_chat_navigation").performClick()
+        compose.onNodeWithTag("chat_navigation_panel").assertDoesNotExist()
     }
 
     private fun openNavigationPanel() {

@@ -191,6 +191,7 @@ class PythonDynamicToolExecutor(
         val stdout = BoundedBytes(request.limits.maximumStdoutBytes)
         val stderr = BoundedBytes(request.limits.maximumStderrBytes)
         val delegate = AtomicReference<PythonExecutionHandle?>()
+        val physical = PythonPhysicalExecutionReceipt()
         val handle = runtime.execute(
             request = request,
             streamListener = PythonStreamListener { chunk ->
@@ -209,12 +210,15 @@ class PythonDynamicToolExecutor(
                         .put("errorCode", "invalid_python_result")
                         .toString()
                 }
-                gate.complete(DynamicToolExecutionResult(projection, result.succeeded))
+                try { gate.complete(DynamicToolExecutionResult(projection, result.succeeded)) }
+                finally { physical.callbackFinished() }
             },
         )
         delegate.set(handle)
+        physical.publish(handle)
         if (gate.isCancellationRequested()) handle.cancel()
         return object : DynamicToolExecutionHandle {
+            override fun onQuiescent(listener: () -> Unit): Boolean = physical.onQuiescent(listener)
             override fun cancel(): DynamicToolCancellationDisposition {
                 val disposition = gate.cancel()
                 delegate.get()?.cancel()

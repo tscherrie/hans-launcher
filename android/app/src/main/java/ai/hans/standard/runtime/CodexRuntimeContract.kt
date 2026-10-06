@@ -78,6 +78,9 @@ object CodexRuntimeContract {
         "ANDROID_DATA" to androidData,
         "ANDROID_ROOT" to androidRoot,
         "CODEX_HOME" to directories.codexHomeDirectory.absolutePath,
+        // Native DisabledEphemeral overrides persisted relay enablement without deleting
+        // device pairing or changing outgoing Remote Compute configuration.
+        "CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED" to "1",
         "HOME" to directories.homeDirectory.absolutePath,
         "HTTPS_PROXY" to network.proxyUrl,
         "HTTP_PROXY" to network.proxyUrl,

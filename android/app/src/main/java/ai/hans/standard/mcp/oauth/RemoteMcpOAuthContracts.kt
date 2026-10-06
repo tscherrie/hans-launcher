@@ -1,5 +1,8 @@
 package ai.hans.standard.mcp.oauth
 
+import ai.hans.standard.R
+import androidx.annotation.StringRes
+
 import ai.hans.standard.mcp.RemoteMcpActivationIdentity
 import ai.hans.standard.mcp.RemoteMcpConnectionReason
 import ai.hans.standard.mcp.RemoteMcpConnectionRequest
@@ -227,9 +230,9 @@ internal sealed interface RemoteMcpOAuthCompletionResult {
 internal data class RemoteMcpOAuthUiAction(
     val pluginId: String,
     val serverId: String,
-    val title: String,
-    val message: String,
-    val actionLabel: String,
+    @StringRes val titleResource: Int,
+    @StringRes val messageResource: Int,
+    @StringRes val actionLabelResource: Int,
 )
 
 internal object RemoteMcpOAuthUiActions {
@@ -237,27 +240,27 @@ internal object RemoteMcpOAuthUiActions {
         RemoteMcpOAuthUiAction(
             pluginId = request.pluginId,
             serverId = request.serverId,
-            title = "Verbindung erforderlich",
-            message = when (request.reason) {
+            titleResource = R.string.presentation_mcp_connection_required,
+            messageResource = when (request.reason) {
                 RemoteMcpConnectionReason.MISSING ->
-                    "Verbinde den Dienst, bevor du dieses Plugin installierst."
+                    R.string.presentation_mcp_connect_missing
                 RemoteMcpConnectionReason.EXPIRED ->
-                    "Die Verbindung ist abgelaufen. Verbinde den Dienst erneut."
+                    R.string.presentation_mcp_connect_expired
                 RemoteMcpConnectionReason.STALE_IDENTITY ->
-                    "Die Plugin-Konfiguration hat sich geändert. Verbinde den Dienst erneut."
+                    R.string.presentation_mcp_connect_stale
                 RemoteMcpConnectionReason.CREDENTIAL_STORE_UNAVAILABLE ->
-                    "Der geschützte Anmeldespeicher ist gerade nicht verfügbar."
+                    R.string.presentation_mcp_connect_store_unavailable
             },
-            actionLabel = "Verbinden",
+            actionLabelResource = R.string.presentation_mcp_connect_action,
         )
 
     fun retryInstall(pluginId: String, serverId: String): RemoteMcpOAuthUiAction =
         RemoteMcpOAuthUiAction(
             pluginId = pluginId,
             serverId = serverId,
-            title = "Dienst verbunden",
-            message = "Die Verbindung steht. Starte die Plugin-Installation jetzt erneut.",
-            actionLabel = "Installation erneut versuchen",
+            titleResource = R.string.presentation_mcp_connected_title,
+            messageResource = R.string.presentation_mcp_connected_message,
+            actionLabelResource = R.string.presentation_plugin_retry_install,
         )
 }
 

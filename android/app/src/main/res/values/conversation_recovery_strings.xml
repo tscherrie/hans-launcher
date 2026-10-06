@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools" tools:locale="en">
+    <string name="conversation_recovery_offer">Start a new conversation instead</string>
+    <string name="conversation_recovery_title">Start a new conversation?</string>
+    <string name="conversation_recovery_explanation">Hans will start with an empty context. No previous conversation is deleted; its saved reference is kept. The previous history is not imported into the new conversation. Your sign-in stays saved.</string>
+    <string name="conversation_recovery_confirm">Start new conversation</string>
+    <string name="recovery_new_conversation_unavailable">A new conversation could not be started right now. Wait briefly and try again.</string>
+</resources>

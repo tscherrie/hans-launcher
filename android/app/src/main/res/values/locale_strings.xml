@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools" tools:locale="en">
+    <!-- Deliberately locale-qualified metadata, not user-visible or user-supplied text. -->
+    <string name="hans_resolved_ui_language">en</string>
+</resources>

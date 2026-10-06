@@ -16,9 +16,12 @@ import org.junit.Test
 
 /**
  * Versioned UI output intentionally changes the exact description contract so old output-
- * parsing assumptions are not silently reused. Callable input schemas stay unchanged.
+ * parsing assumptions are not silently reused. The generic sequence tool is additive;
+ * existing callable input schemas stay unchanged.
  * Baseline: metadata-only CatalogContractBaseline runner, 2026-09-12, compiled
  * production classes from the shared-files build before the compact-output changes.
+ * The 2026-09-18 migration exposes observed-but-not-verified follow-up snapshots and
+ * documents screenshot token handoff; it must also replace the prior compact-only context.
  * These are android_ui-only fingerprints, not claims about the entire installed catalog.
  */
 class AndroidUiCatalogContinuityTest {
@@ -30,15 +33,22 @@ class AndroidUiCatalogContinuityTest {
             BASELINE_FULL_FINGERPRINT,
             current,
         )
-        assertEquals(VERSIONED_FULL_FINGERPRINT, current)
+        assertNotEquals(
+            "Observed receipts and direct screenshot token handoff require a fresh model context",
+            COMPACT_VERIFIED_ONLY_FULL_FINGERPRINT,
+            current,
+        )
+        assertNotEquals(VERSIONED_FULL_FINGERPRINT, current)
     }
 
     @Test
     fun versionedOutputMigrationPreservesTheCallableAndroidUiStructure() {
         assertEquals(
             BASELINE_STRUCTURE_FINGERPRINT,
-            DynamicToolContractFingerprint.computeStructure(listOf(AndroidAccessibilityDynamicToolCatalog.namespace)),
+            DynamicToolContractFingerprint.computeStructure(legacyNamespaces()),
         )
+        assertNotEquals(BASELINE_STRUCTURE_FINGERPRINT,
+            DynamicToolContractFingerprint.computeStructure(listOf(AndroidAccessibilityDynamicToolCatalog.namespace)))
     }
 
     @Test
@@ -57,7 +67,8 @@ class AndroidUiCatalogContinuityTest {
             DynamicToolContractFingerprint.compute(delegate.specs),
             DynamicToolContractFingerprint.compute(measured.specs),
         )
-        assertEquals(BASELINE_STRUCTURE_FINGERPRINT, DynamicToolContractFingerprint.computeStructure(measured.specs))
+        assertEquals(DynamicToolContractFingerprint.computeStructure(delegate.specs),
+            DynamicToolContractFingerprint.computeStructure(measured.specs))
 
         var actual: DynamicToolExecutionResult? = null
         measured.execute(DynamicToolCallParams("test-thread", "test-turn", "test-call", "android_ui", "inspect_ui", "{}")) {
@@ -70,15 +81,16 @@ class AndroidUiCatalogContinuityTest {
     fun versionedDescriptionExplainsCompactDefaultsAndReturnedObservation() {
         val description = AndroidAccessibilityDynamicToolCatalog.namespace.description
         listOf(
-            "projectionFormat=compact_nodes_v1",
-            "{...nodeDefaults, ...node}",
-            "explicit fields win",
-            "handles stay complete",
-            "Small views may stay inline",
-            "A verified action can return nextObservation",
-            "reuse it instead of inspect_ui unless a fresh view is needed",
-            "If unavailable, action is not undone",
-            "never repeat mutation just for observation",
+            "compact_nodes_v1/v2",
+            "merge nodeDefaults then node",
+            "integer node.handle n",
+            "{correlation:snapshot.correlation,nodeOrdinal:n}",
+            "object handles stay complete",
+            "Reuse nextObservation handles instead of inspect_ui when fresh",
+            "observed_not_verified is not proof of goal success",
+            "check returned state",
+            "If unavailable, inspect when allowed",
+            "never repeat the mutation just for observation",
         ).forEach { marker ->
             assertTrue("Missing explicit compact-output contract marker: $marker", marker in description)
         }
@@ -110,8 +122,13 @@ class AndroidUiCatalogContinuityTest {
     }
 
     private companion object {
-        const val VERSIONED_FULL_FINGERPRINT = "610b3ed448f67a4b5ab7c552baa936cc226d3ffa6c3ac3eb7d1b02bf0458f2c1"
+        const val VERSIONED_FULL_FINGERPRINT = "cc6968aed0bc268a0983d6c7f5f3929c32d97430368b2c32e731cb29d70e722c"
+        const val COMPACT_VERIFIED_ONLY_FULL_FINGERPRINT = "610b3ed448f67a4b5ab7c552baa936cc226d3ffa6c3ac3eb7d1b02bf0458f2c1"
         const val BASELINE_FULL_FINGERPRINT = "3eaca8a07828a85e8858ed378e60a38239f6607c3124f2cf0b6daafdcfda6cef"
         const val BASELINE_STRUCTURE_FINGERPRINT = "0148ce067d3768ad9644d2b032a6488db9ceb0891293b77c526a99757891daa3"
     }
+
+    private fun legacyNamespaces() = listOf(AndroidAccessibilityDynamicToolCatalog.namespace.copy(
+        tools = AndroidAccessibilityDynamicToolCatalog.namespace.tools.filterNot { it.name == "run_steps" },
+    ))
 }

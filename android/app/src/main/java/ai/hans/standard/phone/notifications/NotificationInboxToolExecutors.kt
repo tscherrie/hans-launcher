@@ -12,11 +12,13 @@ internal class NotificationInboxToolExecutors(
     executor: Executor,
     confirmation: DynamicToolConfirmationProvider,
     isInteractive: (DynamicToolCallParams) -> Boolean,
+    reportPort: NotificationEventReportPort? = null,
 ) {
     private val delegate = NotificationInboxDynamicToolExecutor(
         source = source,
         backgroundExecutor = executor,
         confirmationProvider = confirmation,
+        reportPort = reportPort,
     )
     private val backgroundGate = GatedDynamicToolExecutor(
         delegate = delegate,

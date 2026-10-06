@@ -182,11 +182,10 @@ class LiveVoiceContextTest {
             "ohne die eigentliche Antwort zu überlagern",
             "Höre sofort auf zu sprechen, wenn der Nutzer dich unterbricht",
             "tatsächlich verfügbar und die nötigen Zugriffe freigegeben sind",
-            "Die Anfrage eine Backend-Funktion oder sorgfältige Überlegung erfordert",
-            "Eine Korrektur den bereits angeforderten Arbeitsablauf ändert",
-            "einem noch aktuellen Ergebnis ableiten kannst",
-            "Du lediglich eine kurze Klärung benötigst",
-            "bevor du eine Antwort gibst, die von der Arbeit des Backends abhängt",
+            "Bei jeder inhaltlichen Anfrage, auch einer einfachen Wissensfrage",
+            "Bei Rückfragen, Korrekturen, neuen Angaben, Präferenzen und Bestätigungen",
+            "Wenn du lediglich eine kurze Klärung benötigst",
+            "bevor du eine inhaltliche Antwort gibst",
             "Spekuliere während der Wartezeit nicht über das Ergebnis",
         ).forEach { assertTrue("Missing requested prompt rule: $it", instructions.contains(it)) }
         listOf("Backchannel policy:", "Interruption policy:", "Delegation policy:",
@@ -195,6 +194,39 @@ class LiveVoiceContextTest {
         assertFalse(instructions.contains("inklusive aller Apps"))
         assertFalse("Public product instructions must not hardcode a private owner", instructions.contains("Jeremias"))
         assertFalse(instructions.contains("never speak while the user is speaking", ignoreCase = true))
+    }
+
+    @Test
+    fun codexFirstPolicyHasNoLocalKnowledgeOrNativeSearchException() {
+        val instructions = File("src/main/assets/hans/live-voice-instructions.md")
+            .readText().replace(Regex("\\s+"), " ")
+        val exceptions = instructions.substringAfter("Do not delegate to the backend when:")
+            .substringBefore("# Application boundaries")
+        assertTrue(instructions.contains("Beantworte keine Sachfrage eigenständig"))
+        assertTrue(instructions.contains("Websuche läuft ausschließlich über Codex"))
+        assertTrue(instructions.contains("damit Codex den Kontext erhält und laufende Arbeit steuern kann"))
+        assertTrue(exceptions.contains("ohne neue Frage"))
+        assertTrue(exceptions.contains("neue fachliche Fragen gehen dagegen an Codex"))
+        assertFalse(instructions.contains("einem noch aktuellen Ergebnis ableiten kannst"))
+        assertFalse(instructions.contains("Die Anfrage eine Backend-Funktion oder sorgfältige Überlegung erfordert"))
+    }
+
+    @Test
+    fun workFeedbackAndContextualStopDoNotInventProgressOrCancelOnBargeIn() {
+        val instructions = File("src/main/assets/hans/live-voice-instructions.md")
+            .readText().replace(Regex("\\s+"), " ")
+        listOf(
+            "„Mhm“ dürfen Zuhören signalisieren",
+            "Während bestätigter laufender Backend-Arbeit",
+            "Nicht bei jeder Anfrage, nicht in einer Schleife",
+            "Erfinde keinen Fortschritt",
+            "unterbricht nur deine Sprachausgabe, nicht automatisch die Backend-Arbeit",
+            "delegiere den Abbruchwunsch sofort einmal an Codex im bestehenden Kontext",
+            "Stopp, nimm stattdessen den anderen Termin",
+            "Ist unklar, ob Sprache oder Aufgabe gemeint ist, frage kurz nach",
+            "erst nach einer passenden Backend-Bestätigung",
+            "Auflegen allein bricht angenommene Aufgaben nicht ab",
+        ).forEach { assertTrue("Missing feedback/control boundary: $it", instructions.contains(it)) }
     }
 
     @Test

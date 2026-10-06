@@ -10,6 +10,39 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 class LiveVoiceObserverHubTest {
+    @Test fun typedTranscriptReplayPreservesNativeOriginAndDoesNotCollapseRepeatedSpeech() {
+        val hub = LiveVoiceObserverHub()
+        hub.onSnapshot(LiveVoiceSnapshot(phase = LiveVoicePhase.LISTENING))
+        val source = CodexVoiceWorkScope("main", "turn")
+        val first = LiveVoiceTranscriptRevision("session", 1, "native-1", LiveVoiceTranscriptAuthor.HANS,
+            "Equal wording.", true, source)
+        val second = first.copy(utteranceId = "native-2", dictationWorkScope = null)
+        hub.onTranscriptRevision(first.copy(text = "Equal ", isFinal = false))
+        hub.onTranscriptRevision(first)
+        hub.onTranscriptRevision(second)
+        hub.onTranscriptRevision(first) // Identified redelivery, not text equality.
+        val received = mutableListOf<LiveVoiceTranscriptRevision>()
+        hub.add(object : LiveVoiceObserver {
+            override fun onTranscriptRevision(event: LiveVoiceTranscriptRevision) { received += event }
+        }).cancel()
+        assertEquals(listOf(first, second), received)
+        assertEquals(2, received.map { it.displayId }.distinct().size)
+        assertEquals(source, received.first().dictationWorkScope)
+    }
+
+    @Test fun typedTranscriptStillReachesLegacyObserversOnceAndSourceFenceRejectsStaleMetadata() {
+        val hub = LiveVoiceObserverHub()
+        val received = mutableListOf<String>()
+        hub.add(object : LiveVoiceObserver {
+            override fun onHansTranscript(text: String, isFinal: Boolean) { received += "$text:$isFinal" }
+        })
+        val event = LiveVoiceTranscriptRevision("session", 1, "native-1", LiveVoiceTranscriptAuthor.HANS,
+            "Visible.", true)
+        hub.ifCurrentSource({ false }) { hub.onTranscriptRevision(event) }
+        assertTrue(received.isEmpty())
+        hub.ifCurrentSource({ true }) { hub.onTranscriptRevision(event) }
+        assertEquals(listOf("Visible.:true"), received)
+    }
     @Test
     fun responseReadyReachesProcessObserverWithoutActivityAndIsNeverReplayedOnSubscribe() {
         val hub = LiveVoiceObserverHub()

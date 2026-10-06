@@ -475,6 +475,9 @@ private class GuardedExecutor(
             throw failure
         }
         return object : DynamicToolExecutionHandle {
+            override fun onQuiescent(listener: () -> Unit): Boolean =
+                delegateHandle.onQuiescent(listener)
+
             override fun cancel(): DynamicToolCancellationDisposition {
                 return try {
                     delegateHandle.cancel()

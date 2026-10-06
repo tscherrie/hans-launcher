@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools" tools:locale="en">
+    <string name="voice_settings_task_title">Dictation</string>
+    <string name="voice_settings_task_help">Press the action key briefly and speak right away. Without an assigned key, tap the microphone instead. Press again to stop recording. Hans transcribes the recording and sends the finished text to your current task, including while Codex is working.</string>
+    <string name="voice_settings_task_idle">Recording stops automatically after two minutes. No Live Voice connection is opened for dictation.</string>
+    <string name="voice_settings_call_title">Phone call</string>
+    <string name="voice_settings_call_help">Tap Hans at the top for an ongoing conversation. Say goodbye or choose Hang up to end it.</string>
+    <string name="voice_settings_account_help">Uses your ChatGPT sign-in and account limits. No API key needed.</string>
+    <string name="voice_settings_voice_title">Voice</string>
+    <string name="voice_settings_selected_voice">Hans’ voice: %1$s</string>
+    <string name="voice_settings_choose_voice">Choose Hans’ voice</string>
+    <string name="voice_settings_voice_scope">Applies from the next session.</string>
+    <string name="voice_settings_voice_usage">The same voice is used for calls and text read-aloud. Dictation only transcribes your recording.</string>
+    <string name="voice_settings_usage_title">Speaking with Hans</string>
+    <string name="voice_settings_task_overview">Dictation: key, otherwise microphone. Press again to stop and send.</string>
+    <string name="voice_settings_call_overview">Phone call: tap Hans. Say goodbye to end.</string>
+    <string name="voice_settings_how_it_works">How it works</string>
+    <string name="voice_settings_current_voice">Current session: %1$s</string>
+    <string name="voice_settings_done">Done</string>
+    <string name="voice_settings_text_replies_title">Read text replies aloud</string>
+    <string name="voice_settings_text_replies_help">Reads completed text replies aloud, using the same voice. This does not change replies during a phone call.</string>
+    <string name="voice_settings_key_capture">Briefly press the key you want to use.</string>
+    <string name="voice_settings_key_ready">Press briefly to start recording; press again to stop and send. The on-screen microphone is hidden.</string>
+    <string name="voice_settings_key_unassigned">Choose a physical key for dictation. Until then, use the microphone at the bottom right.</string>
+    <string name="voice_settings_key_blocked">Saved, but not available to Hans. Resolve the existing key assignment below or choose another key.</string>
+    <string name="voice_settings_key_unavailable">Key saved, but not currently available. Check Accessibility in Permissions. You can change or remove the key here.</string>
+    <string name="voice_settings_more">Learn more</string>
+    <string name="voice_settings_less">Show less</string>
+    <string name="voice_settings_mp01_press">Press briefly, do not hold: a long press belongs to the MP01 system. A brief E-Ink refresh is normal.</string>
+</resources>

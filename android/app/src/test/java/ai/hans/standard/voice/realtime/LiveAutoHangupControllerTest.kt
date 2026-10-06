@@ -33,6 +33,34 @@ class LiveAutoHangupControllerTest {
         assertTrue(controller.mayClose(id, "Tschüss!", time(1_800)))
     }
 
+    @Test fun englishFarewellRequiresPlayedOutputAndFreshQuietThenCloses() {
+        val id = arm("Goodbye!")
+        controller.assistantTranscript("Bye!")
+        assertFalse(controller.mayClose(id, "Goodbye!", time(1_800)))
+        playback()
+        assertTrue(controller.mayClose(id, "Goodbye!", time(1_800)))
+        input(1_801, true)
+        assertNull(controller.candidateId)
+        assertFalse(controller.mayClose(id, "Goodbye!", time(1_801)))
+    }
+
+    @Test fun englishFarewellsAndHangupRequestsKeepExactOwnIntentBoundary() {
+        listOf("Bye!", "Goodbye!", "See you later!", "Talk to you later", "Hang up", "End this call")
+            .forEach { assertNotNull(it, controller.arm(it, origin)) }
+        listOf("Thanks", "The task is done", "He said goodbye", "\"Goodbye\"", "Goodbye, but wait",
+            "Say goodbye", "When I say goodbye, hang up")
+            .forEach { assertNull(it, controller.arm(it, origin)) }
+    }
+
+    @Test fun englishUserOrAssistantContinuationCannotAuthorizeClosing() {
+        val id = arm("Goodbye!")
+        controller.assistantTranscript("Bye, here is another result.")
+        playback()
+        assertFalse(controller.mayClose(id, "Goodbye!", time(1_800)))
+        controller.assistantTranscript("Bye!")
+        assertFalse(controller.mayClose(id, "Goodbye! But wait.", time(1_800)))
+    }
+
     @Test fun quotesThanksTaskCompletionAndEmbeddedGoodbyeNeverArm() {
         listOf("Danke", "Die Aufgabe ist fertig", "Er sagte Tschüss", "\"Tschüss\"", "Tschüss, aber warte",
             "Sag bitte Tschüss", "Wenn ich Tschüss sage, leg auf", "", " ").forEach {

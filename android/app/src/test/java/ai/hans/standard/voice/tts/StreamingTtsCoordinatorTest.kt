@@ -10,7 +10,9 @@ import ai.hans.standard.integration.ClientTimelineRole
 import ai.hans.standard.integration.ClientTimelineStatus
 import ai.hans.standard.integration.CodexClientSnapshot
 import ai.hans.standard.integration.DispatchSelection
+import ai.hans.standard.localization.TestResourceTextResolver
 import java.util.ArrayDeque
+import java.util.Locale
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -23,7 +25,7 @@ class StreamingTtsCoordinatorTest {
     @Test
     fun projectedPartialWebLinkKeepsReadySentencesMovingAcrossMessages() {
         val harness = Harness()
-        val projector = CodexTimelineSpeechProjector()
+        val projector = CodexTimelineSpeechProjector(text = TestResourceTextResolver(Locale.GERMAN))
         projector.accept(speechSnapshot(), enabled = true)
         fun accept(vararg items: ClientTimelineItem) {
             projector.accept(speechSnapshot(*items), enabled = true).forEach(harness.coordinator::submit)
@@ -56,7 +58,7 @@ class StreamingTtsCoordinatorTest {
     @Test
     fun everyCharacterStreamThroughRealProjectorNeverRepeatsOrSpeaksUrlFragments() {
         val harness = Harness()
-        val projector = CodexTimelineSpeechProjector()
+        val projector = CodexTimelineSpeechProjector(text = TestResourceTextResolver(Locale.GERMAN))
         projector.accept(speechSnapshot(), enabled = true)
         val raw = "Erster Satz. [Zweiter Satz](https://example.org/a_(b)?next=https://other.test). " +
             "https://tail.test/third. Dritter Satz."
@@ -91,7 +93,7 @@ class StreamingTtsCoordinatorTest {
     @Test
     fun aFinalUrlOnlyMessageDoesNotBlockTheNextQueuedAnswer() {
         val harness = Harness()
-        val projector = CodexTimelineSpeechProjector()
+        val projector = CodexTimelineSpeechProjector(text = TestResourceTextResolver(Locale.GERMAN))
         projector.accept(speechSnapshot(), enabled = true)
         val address = speechItem("address", 1, "https://example.org.", complete = false)
         val next = speechItem("next", 1, "Antwort.", complete = true, order = 2)
@@ -115,7 +117,7 @@ class StreamingTtsCoordinatorTest {
     @Test
     fun emptyFinalProjectionReleasesAWaitingLaterMessageWithoutAnotherSnapshot() {
         val harness = Harness()
-        val projector = CodexTimelineSpeechProjector()
+        val projector = CodexTimelineSpeechProjector(text = TestResourceTextResolver(Locale.GERMAN))
         projector.accept(speechSnapshot(), enabled = true)
         val empty = speechItem("empty", 1, "", complete = false)
         val next = speechItem("next", 1, "Nächste Antwort.", complete = true, order = 2)
@@ -136,7 +138,7 @@ class StreamingTtsCoordinatorTest {
     @Test
     fun everyCharacterOfFormattedAnswersKeepsSpokenPrefixesAndTheFollowingMessageMoving() {
         val harness = Harness()
-        val projector = CodexTimelineSpeechProjector()
+        val projector = CodexTimelineSpeechProjector(text = TestResourceTextResolver(Locale.GERMAN))
         projector.accept(speechSnapshot(), enabled = true)
         val raw = "**Erster Satz.** *Zweiter Satz.* `Dritter Satz.` " +
             "[**Vierter Satz.**](https://example.org/a_(b)?q=private \"Titel\") " +

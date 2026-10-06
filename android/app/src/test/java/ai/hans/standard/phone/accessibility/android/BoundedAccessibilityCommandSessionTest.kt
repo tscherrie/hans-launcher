@@ -22,6 +22,7 @@ import java.util.Collections
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -30,6 +31,308 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class BoundedAccessibilityCommandSessionTest {
+    @Test
+    fun guardedCommandCancelledBeforeEnqueueReturnsOneTerminalReceiptWithoutAction() {
+        val harness = SessionHarness(queueCapacity = 1)
+        val callbacks = AtomicInteger()
+        var result: AccessibilityExecutionResult? = null
+        try {
+            assertTrue(harness.session.submitGuarded(harness.click("guard-already-cancelled"), { true }) {
+                result = it
+                callbacks.incrementAndGet()
+            })
+            assertEquals(1, callbacks.get())
+            assertEquals("accessibility_command_cancelled", result?.errorCode)
+            assertEquals(AccessibilityExecutionStatus.REJECTED, result?.status)
+            assertTrue(harness.host.nodeCalls.isEmpty())
+        } finally { harness.close() }
+    }
+
+    @Test
+    fun guardedCommandCancelledWhileQueuedNeverReachesDomainOrPlatformAndCompletesOnce() {
+        val harness = SessionHarness(queueCapacity = 2)
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val completed = CountDownLatch(2)
+        val cancelled = AtomicBoolean(false)
+        val guardedCallbacks = AtomicInteger()
+        var result: AccessibilityExecutionResult? = null
+        harness.host.onNodeAction = { entered.countDown(); release.await(3, TimeUnit.SECONDS) }
+        try {
+            assertTrue(harness.session.submit(harness.click("guard-blocking-first")) { completed.countDown() })
+            assertTrue(entered.await(2, TimeUnit.SECONDS))
+            assertTrue(harness.session.submitGuarded(harness.click("guard-cancelled-queued"), cancelled::get) {
+                result = it
+                guardedCallbacks.incrementAndGet()
+                completed.countDown()
+            })
+            cancelled.set(true)
+            release.countDown()
+            assertTrue(completed.await(2, TimeUnit.SECONDS))
+            assertEquals(1, guardedCallbacks.get())
+            assertEquals("accessibility_command_cancelled", result?.errorCode)
+            assertEquals(1, harness.host.nodeCalls.size)
+        } finally { release.countDown(); harness.close() }
+    }
+
+    @Test
+    fun cancellationAfterGuardedPlatformEntryDoesNotInventUnexecutedResultOrRepeatAction() {
+        val harness = SessionHarness(queueCapacity = 1)
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val completed = CountDownLatch(1)
+        val cancelled = AtomicBoolean(false)
+        var result: AccessibilityExecutionResult? = null
+        harness.host.onNodeAction = { entered.countDown(); release.await(3, TimeUnit.SECONDS) }
+        try {
+            assertTrue(harness.session.submitGuarded(harness.click("guard-already-entered"), cancelled::get) {
+                result = it
+                completed.countDown()
+            })
+            assertTrue(entered.await(2, TimeUnit.SECONDS))
+            cancelled.set(true)
+            release.countDown()
+            assertTrue(completed.await(2, TimeUnit.SECONDS))
+            assertEquals(1, harness.host.nodeCalls.size)
+            assertEquals(AccessibilityExecutionStatus.SUCCEEDED, result?.status)
+            assertEquals(null, result?.errorCode)
+        } finally { release.countDown(); harness.close() }
+    }
+
+    @Test
+    fun closingSessionCompletesGuardedQueuedCommandWithoutAction() {
+        val harness = SessionHarness(queueCapacity = 1)
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val queuedDone = CountDownLatch(1)
+        val runningDone = CountDownLatch(1)
+        var result: AccessibilityExecutionResult? = null
+        harness.host.onNodeAction = { entered.countDown(); awaitDespiteInterruption(release) }
+        try {
+            assertTrue(harness.session.submit(harness.click("guard-close-running")) { runningDone.countDown() })
+            assertTrue(entered.await(2, TimeUnit.SECONDS))
+            assertTrue(harness.session.submitGuarded(harness.click("guard-close-queued"), { false }) {
+                result = it
+                queuedDone.countDown()
+            })
+            harness.session.close()
+            assertTrue(queuedDone.await(2, TimeUnit.SECONDS))
+            assertEquals("accessibility_session_closed", result?.errorCode)
+            assertEquals(1, harness.host.nodeCalls.size)
+            assertFalse(harness.session.submitGuarded(harness.click("guard-close-late"), { false }) {})
+            release.countDown()
+            assertTrue(runningDone.await(2, TimeUnit.SECONDS))
+        } finally { release.countDown(); harness.close() }
+    }
+
+    @Test
+    fun throwingGuardFailsClosedAndDoesNotKillWorker() {
+        val harness = SessionHarness(queueCapacity = 1)
+        var rejected: AccessibilityExecutionResult? = null
+        val finished = CountDownLatch(1)
+        try {
+            assertTrue(harness.session.submitGuarded(harness.click("guard-probe-throws"), { error("probe failed") }) {
+                rejected = it
+            })
+            assertEquals("accessibility_command_cancelled", rejected?.errorCode)
+            assertTrue(harness.session.submitGuarded(harness.click("guard-normal-next"), { false }) {
+                finished.countDown()
+            })
+            assertTrue(finished.await(2, TimeUnit.SECONDS))
+            assertEquals(1, harness.host.nodeCalls.size)
+        } finally { harness.close() }
+    }
+
+    @Test
+    fun closingWhileGuardRunsCannotEnterPlatform() {
+        val harness = SessionHarness(queueCapacity = 1)
+        val guardCalls = AtomicInteger()
+        val workerGuardEntered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val completed = CountDownLatch(1)
+        var result: AccessibilityExecutionResult? = null
+        try {
+            assertTrue(harness.session.submitGuarded(harness.click("guard-close-in-probe"), {
+                if (guardCalls.incrementAndGet() == 2) {
+                    workerGuardEntered.countDown()
+                    awaitDespiteInterruption(release)
+                }
+                false
+            }) { result = it; completed.countDown() })
+            assertTrue(workerGuardEntered.await(2, TimeUnit.SECONDS))
+            harness.session.close()
+            release.countDown()
+            assertTrue(completed.await(2, TimeUnit.SECONDS))
+            assertEquals("accessibility_session_closed", result?.errorCode)
+            assertTrue(harness.host.nodeCalls.isEmpty())
+        } finally { release.countDown(); harness.close() }
+    }
+
+    @Test
+    fun snapshotAwaitRejectsClosedCancelledAndCrossSessionResultsAndCloseWakesWaiters() {
+        val providerCalls = AtomicInteger()
+        val wakes = AtomicInteger()
+        val other = semanticSnapshot(correlation = testCorrelation(session = "different-session"))
+        val harness = SessionHarness(
+            queueCapacity = 1,
+            awaitFreshSnapshot = { _, _, _ -> providerCalls.incrementAndGet(); other },
+            wakeSnapshotWait = { wakes.incrementAndGet() },
+        )
+        try {
+            assertNull(harness.session.awaitSnapshot(100, { true }) { true })
+            assertEquals(0, providerCalls.get())
+            assertNull(harness.session.awaitSnapshot(100, { false }) { true })
+            assertEquals(1, providerCalls.get())
+            harness.session.wakeSnapshotWaiters()
+            assertEquals(1, wakes.get())
+            harness.session.close()
+            assertEquals(2, wakes.get())
+            assertNull(harness.session.awaitSnapshot(100, { false }) { true })
+            assertEquals(1, providerCalls.get())
+        } finally { harness.close() }
+    }
+
+    @Test
+    fun sessionCloseCancelsActiveSnapshotAwaitAndCannotReturnLateMatchingState() {
+        val started = CountDownLatch(1)
+        val awakened = CountDownLatch(1)
+        val completed = CountDownLatch(1)
+        var result: SemanticUiSnapshot? = null
+        val sawClosed = AtomicBoolean(false)
+        val harness = SessionHarness(
+            queueCapacity = 1,
+            awaitFreshSnapshot = { _, cancelled, _ ->
+                started.countDown()
+                awakened.await(2, TimeUnit.SECONDS)
+                sawClosed.set(cancelled())
+                semanticSnapshot()
+            },
+            wakeSnapshotWait = { awakened.countDown() },
+        )
+        try {
+            Thread {
+                result = harness.session.awaitSnapshot(5_000, { false }) { true }
+                completed.countDown()
+            }.apply { isDaemon = true; start() }
+            assertTrue(started.await(2, TimeUnit.SECONDS))
+            harness.session.close()
+            assertTrue(completed.await(2, TimeUnit.SECONDS))
+            assertTrue(sawClosed.get())
+            assertNull(result)
+            assertTrue(harness.host.nodeCalls.isEmpty())
+        } finally { harness.close() }
+    }
+
+    @Test
+    fun closingCompletesQueuedCallsButRunningCallWaitsForActualReturn() {
+        val harness = SessionHarness(queueCapacity = 2)
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val runningDone = CountDownLatch(1)
+        val queuedDone = CountDownLatch(1)
+        val runningCallbacks = AtomicInteger()
+        val queuedCallbacks = AtomicInteger()
+        var queuedResult: AccessibilityExecutionResult? = null
+        harness.host.onNodeAction = {
+            entered.countDown()
+            awaitDespiteInterruption(release)
+        }
+        try {
+            assertTrue(harness.session.submit(harness.click("close-running")) {
+                runningCallbacks.incrementAndGet()
+                runningDone.countDown()
+            })
+            assertTrue(entered.await(2, TimeUnit.SECONDS))
+            assertTrue(harness.session.submit(harness.click("close-queued")) {
+                queuedResult = it
+                queuedCallbacks.incrementAndGet()
+                queuedDone.countDown()
+            })
+            harness.session.close()
+            assertTrue(queuedDone.await(2, TimeUnit.SECONDS))
+            assertEquals("accessibility_session_closed", queuedResult?.errorCode)
+            assertEquals(AccessibilityExecutionStatus.REJECTED, queuedResult?.status)
+            assertEquals(0, runningCallbacks.get())
+            assertEquals(1, harness.host.nodeCalls.size)
+            assertFalse(harness.session.submit(harness.click("must-not-reopen")) {})
+            release.countDown()
+            assertTrue(runningDone.await(2, TimeUnit.SECONDS))
+            assertEquals(1, runningCallbacks.get())
+            assertEquals(1, queuedCallbacks.get())
+            assertEquals(1, harness.host.nodeCalls.size)
+        } finally {
+            release.countDown()
+            harness.close()
+        }
+    }
+
+    @Test
+    fun acceptedCommandRacingCloseAlwaysCompletesExactlyOnce() {
+        repeat(32) { index ->
+            val harness = SessionHarness(queueCapacity = 1)
+            val completed = CountDownLatch(1)
+            val callbacks = AtomicInteger()
+            var result: AccessibilityExecutionResult? = null
+            try {
+                assertTrue(harness.session.submit(harness.click("close-race-$index")) {
+                    result = it
+                    callbacks.incrementAndGet()
+                    completed.countDown()
+                })
+                harness.session.close()
+                assertTrue(completed.await(2, TimeUnit.SECONDS))
+                assertEquals(1, callbacks.get())
+                assertTrue(harness.host.nodeCalls.size <= 1)
+                if (result?.errorCode == "accessibility_session_closed") {
+                    assertEquals(0, harness.host.nodeCalls.size)
+                }
+            } finally { harness.close() }
+        }
+    }
+
+    @Test
+    fun throwingAndReentrantQueuedCallbacksDoNotPreventOtherClosureReceipts() {
+        val harness = SessionHarness(queueCapacity = 2)
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val runningDone = CountDownLatch(1)
+        val queuedDone = CountDownLatch(2)
+        var reentryRejected = false
+        harness.host.onNodeAction = {
+            entered.countDown()
+            awaitDespiteInterruption(release)
+        }
+        try {
+            assertTrue(harness.session.submit(harness.click("close-callback-running")) { runningDone.countDown() })
+            assertTrue(entered.await(2, TimeUnit.SECONDS))
+            assertTrue(harness.session.submit(harness.click("close-callback-throws")) {
+                queuedDone.countDown()
+                error("disconnected consumer")
+            })
+            assertTrue(harness.session.submit(harness.click("close-callback-reentrant")) {
+                reentryRejected = !harness.session.submit(harness.click("late-reentry")) {}
+                harness.session.close()
+                queuedDone.countDown()
+            })
+            harness.session.close()
+            assertTrue(queuedDone.await(2, TimeUnit.SECONDS))
+            assertTrue(reentryRejected)
+            assertEquals(1L, runningDone.count)
+            release.countDown()
+            assertTrue(runningDone.await(2, TimeUnit.SECONDS))
+        } finally {
+            release.countDown()
+            harness.close()
+        }
+    }
+
+    private fun awaitDespiteInterruption(latch: CountDownLatch) {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
+        while (latch.count > 0 && System.nanoTime() < deadline) {
+            try { latch.await(100, TimeUnit.MILLISECONDS) } catch (_: InterruptedException) { /* simulate an active platform call */ }
+        }
+    }
+
     @Test
     fun commandsRunSeriallyOffCallerAndQueueRejectsOverflow() {
         val harness = SessionHarness(queueCapacity = 1)
@@ -341,6 +644,9 @@ class BoundedAccessibilityCommandSessionTest {
         receiptSnapshot: (UiSnapshotCorrelation) -> SemanticUiSnapshot? = { null },
         retainReceiptForCommands: (UiSnapshotCorrelation) -> Boolean = { false },
         withdrawReceiptForCommands: (UiSnapshotCorrelation) -> Unit = {},
+        awaitFreshSnapshot: (Long, () -> Boolean, (SemanticUiSnapshot) -> Boolean) -> SemanticUiSnapshot? =
+            { _, _, _ -> null },
+        wakeSnapshotWait: () -> Unit = {},
     ) {
         val before = semanticSnapshot(
             roots = listOf(
@@ -422,6 +728,8 @@ class BoundedAccessibilityCommandSessionTest {
             receiptSnapshot = receiptSnapshot,
             retainReceiptForCommands = retainReceiptForCommands,
             withdrawReceiptForCommands = withdrawReceiptForCommands,
+            awaitFreshSnapshot = awaitFreshSnapshot,
+            wakeSnapshotWait = wakeSnapshotWait,
         )
 
         fun click(key: String) = AccessibilityCommand.Click(

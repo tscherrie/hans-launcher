@@ -13,6 +13,45 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AndroidCodexSessionHostNotificationSpeechPrivacyTest {
+    @Test fun failedLogicalReceiptDoesNotEraseAnUnconfirmedPhysicalOwnerAtPrivacyOrMute() {
+        for (privacy in listOf(true, false)) {
+            val state = NotificationSpeechHostState()
+            val attempt = NotificationSpeechAttempt("notice", "notice:attempt:1", 0, 1)
+            state.inFlight = attempt
+            state.registerPlaybackFailure(attempt.playbackId, false, 0)
+            assertNull(state.inFlight)
+            val mustStop = if (privacy) state.cancelAllForPrivacyPurge(physicalOutputActive = true)
+                else state.pauseForInaudiblePolicy(physicalOutputActive = true)
+            assertTrue(mustStop)
+            assertTrue(state.requiresPhysicalStop())
+            state.resumeDeferred()
+            assertTrue("Interaction resume is not physical release proof", state.requiresPhysicalStop())
+            state.acknowledgePhysicalStop()
+            assertFalse(state.requiresPhysicalStop())
+        }
+    }
+
+    @Test fun queuedDropAfterInteractionResumedCannotPermanentlyDeferItsOldAttempt() {
+        val state = NotificationSpeechHostState()
+        val old = NotificationSpeechAttempt("notice", "notice:attempt:1", state.gateEpoch, 1)
+        state.inFlight = old
+        state.advanceGate()
+        state.resumeDeferred() // Async stop receipt has not reached the bookkeeping worker yet.
+        assertTrue(state.dropPlayback(old))
+        assertNull(state.inFlight)
+        assertFalse("The real interaction already resumed", "notice" in state.deferredAnnouncementIds)
+        assertFalse("Duplicate old callback cannot alter a newer attempt", state.dropPlayback(old))
+    }
+
+    @Test fun explicitStopWithoutANewInteractionKeepsNoticeDeferred() {
+        val state = NotificationSpeechHostState()
+        state.resumeDeferred()
+        val attempt = NotificationSpeechAttempt("notice", "notice:attempt:1", state.gateEpoch, 1)
+        state.inFlight = attempt
+        assertTrue(state.dropPlayback(attempt))
+        assertTrue("An explicit stop is not permission to replay immediately", "notice" in state.deferredAnnouncementIds)
+    }
+
     @Test
     fun silentPeriodAcrossInteractionAndDelayedTriageNeverReplaysButFreshNoticeSpeaksOnce() {
         var now = 100L

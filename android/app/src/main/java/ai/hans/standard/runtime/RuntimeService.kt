@@ -28,8 +28,46 @@ class RuntimeService : Service() {
     private lateinit var sessionSupervisor: AppServerSessionSupervisor
     private lateinit var codeModeHostSupervisor: CodeModeHostSupervisor
     private lateinit var bootstrapMaterializer: CodexRuntimeBootstrapMaterializer
+    @Volatile private var phoneToolsBridge: ai.hans.standard.remotecontrol.RemotePhoneToolsBridgeConfig? = null
+    private val nativeHistoryDumpActive = AtomicBoolean(false)
+
+    override fun dump(fd: java.io.FileDescriptor?, writer: java.io.PrintWriter, args: Array<out String>?) {
+        if (args?.singleOrNull() != "--hans-tool-history") {
+            super.dump(fd, writer, args)
+            return
+        }
+        fun status(value: ai.hans.standard.diagnostics.NativeToolHistoryStatus) =
+            ai.hans.standard.diagnostics.NativeToolHistoryResult(value).encode()
+        // The framework's existing service DUMP authorization is the only entry point. This
+        // does not bind/start a runtime. DUMP may run on the main thread; IO never does.
+        if (!::sessionSupervisor.isInitialized || !nativeHistoryDumpActive.compareAndSet(false, true)) {
+            writer.println("HANS_NATIVE_TOOL_HISTORY " + status(ai.hans.standard.diagnostics.NativeToolHistoryStatus.BUSY))
+            return
+        }
+        val future = java.util.concurrent.CompletableFuture<String>()
+        val worker = Thread({
+            try { future.complete(sessionSupervisor.readNativeToolHistory(File(applicationInfo.dataDir).canonicalFile)) }
+            catch (_: Exception) { future.complete(status(ai.hans.standard.diagnostics.NativeToolHistoryStatus.IO)) }
+            finally { nativeHistoryDumpActive.set(false) }
+        }, "hans-native-history-dump").apply { isDaemon = true }
+        try { worker.start() } catch (_: Exception) {
+            nativeHistoryDumpActive.set(false)
+            writer.println("HANS_NATIVE_TOOL_HISTORY " + status(ai.hans.standard.diagnostics.NativeToolHistoryStatus.IO))
+            return
+        }
+        val output = try { future.get(3, TimeUnit.SECONDS) }
+        catch (_: TimeoutException) { status(ai.hans.standard.diagnostics.NativeToolHistoryStatus.TIMEOUT) }
+        catch (_: Exception) { status(ai.hans.standard.diagnostics.NativeToolHistoryStatus.IO) }
+        finally { worker.interrupt() }
+        writer.println("HANS_NATIVE_TOOL_HISTORY " + output)
+    }
 
     private val binder = object : IRuntimeService.Stub() {
+        override fun configurePhoneToolsBridge(port: Int, token: String) {
+            check(android.os.Binder.getCallingUid() == Process.myUid()) { "Caller not authorized" }
+            phoneToolsBridge = if (port == 0 && token.isEmpty()) null else
+                ai.hans.standard.remotecontrol.RemotePhoneToolsBridgeConfig(port, token)
+        }
         override fun readNativeMemoryHealth(expectedGeneration: Long): String {
             check(android.os.Binder.getCallingUid() == Process.myUid()) { "Caller not authorized" }
             return sessionSupervisor.readNativeMemoryHealth(expectedGeneration, noBackupFilesDir.canonicalFile)
@@ -151,15 +189,23 @@ class RuntimeService : Service() {
             },
             bootstrapProvider = bootstrapMaterializer::materialize,
             environmentProvider = { directories ->
-                controlledEnvironment(directories)
+                controlledEnvironment(directories) + (phoneToolsBridge?.let {
+                    mapOf(ai.hans.standard.remotecontrol.RemotePhoneToolsBridgeConfig.TOKEN_ENV to it.token,
+                        ai.hans.standard.remotecontrol.RemotePhoneToolsBridgeConfig.PORT_ENV to it.port.toString())
+                } ?: emptyMap())
             },
             argumentsProvider = { directories, environment ->
                 CodeModeHostContract.appServerArguments(
                     codeModeHostSupervisor.endpoint(
                         workingDirectory = directories.workingDirectory,
-                        environment = environment,
+                        environment = environment - ai.hans.standard.remotecontrol.RemotePhoneToolsBridgeConfig.TOKEN_ENV -
+                            ai.hans.standard.remotecontrol.RemotePhoneToolsBridgeConfig.PORT_ENV,
                     ),
-                )
+                ) + (environment[ai.hans.standard.remotecontrol.RemotePhoneToolsBridgeConfig.TOKEN_ENV]?.let { token ->
+                    ai.hans.standard.remotecontrol.RemotePhoneToolsBridgeConfig(
+                        environment.getValue(ai.hans.standard.remotecontrol.RemotePhoneToolsBridgeConfig.PORT_ENV).toInt(), token,
+                    ).arguments()
+                } ?: emptyList())
             },
             clientVersion = BuildConfig.VERSION_NAME,
             expectedExecutableBytes = BuildConfig.CODEX_RUNTIME_BYTES,

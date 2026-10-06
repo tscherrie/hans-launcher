@@ -72,9 +72,15 @@ internal class HansAccessibilityService : AccessibilityService(), RootFreeAccess
     private val snapshots = RetainedAccessibilityFrameStore(SystemClock::elapsedRealtime)
     private val snapshotDiagnostics = AccessibilitySnapshotDiagnostics()
     private val snapshotMonitor = Object()
+    private val semanticSnapshotWaiter = EventDrivenSemanticSnapshotWaiter(
+        freshSnapshot = { remainingMillis ->
+            callOnMain(remainingMillis) { captureAndPublishOnMain() }
+        },
+        currentSnapshot = snapshots::current,
+        elapsedRealtimeMillis = SystemClock::elapsedRealtime,
+    )
     private val nextSnapshotId = AtomicLong(0)
     private val connected = AtomicBoolean(false)
-    private val captureScheduled = AtomicBoolean(false)
     private val gestureInFlight = AtomicBoolean(false)
     private val screenshotInFlight = AtomicBoolean(false)
     private val screenshotExecutor: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
@@ -93,14 +99,17 @@ internal class HansAccessibilityService : AccessibilityService(), RootFreeAccess
     private var confirmationOverlay: AndroidAccessibilitySensitiveActionConfirmation? = null
     private var serviceGenerationNonce: String? = null
 
-    private val captureRunnable = Runnable {
-        captureScheduled.set(false)
-        if (connected.get()) {
-            runCatching { captureAndPublishOnMain() }.getOrElse {
-                clearSnapshot(AccessibilitySnapshotFailure.CAPTURE_FAILED)
+    private val eventCaptureScheduler = AccessibilityEventCaptureScheduler(
+        postDelayed = { mainHandler.postDelayed(it, EVENT_DEBOUNCE_MILLIS) },
+        removeCallbacks = mainHandler::removeCallbacks,
+        capture = {
+            if (connected.get()) {
+                runCatching { captureAndPublishOnMain() }.getOrElse {
+                    clearSnapshot(AccessibilitySnapshotFailure.CAPTURE_FAILED)
+                }
             }
-        }
-    }
+        },
+    )
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -152,6 +161,11 @@ internal class HansAccessibilityService : AccessibilityService(), RootFreeAccess
                 canExposeReceipt(correlation) && snapshots.promoteReceiptForCommands(correlation)
             },
             withdrawReceiptForCommands = snapshots::withdrawReceiptPromotion,
+            invalidateEvidence = snapshots::clearRetainedEvidence,
+            awaitFreshSnapshot = { timeoutMillis, cancelled, predicate ->
+                awaitSemanticSnapshot(newSessionId, timeoutMillis, cancelled, predicate)
+            },
+            wakeSnapshotWait = semanticSnapshotWaiter::wake,
         ).also { session ->
             commandSession = session
             HansAccessibilitySessions.publish(newConnectionOwner, session)
@@ -166,11 +180,7 @@ internal class HansAccessibilityService : AccessibilityService(), RootFreeAccess
         confirmationOverlay?.onAccessibilityContextMayHaveChanged()
         // Copy no event/node object. A single one-shot refresh is enough for a
         // burst and avoids polling or an idle rendering loop.
-        if (captureScheduled.compareAndSet(false, true)) {
-            if (!mainHandler.postDelayed(captureRunnable, EVENT_DEBOUNCE_MILLIS)) {
-                captureScheduled.set(false)
-            }
-        }
+        eventCaptureScheduler.onEvent()
     }
 
     /** Consumes only an exact user-demonstrated dictation mapping. */
@@ -647,7 +657,9 @@ internal class HansAccessibilityService : AccessibilityService(), RootFreeAccess
     }
 
     private fun captureAndPublishOnMain(): SemanticUiSnapshot? {
+        check(Looper.myLooper() == Looper.getMainLooper())
         if (!connected.get()) return null
+        val coveredEvents = eventCaptureScheduler.captureStarted()
         if (!currentUiAvailability().isAvailable) {
             return clearSnapshot(AccessibilitySnapshotFailure.CAPTURE_FAILED)
         }
@@ -723,6 +735,10 @@ internal class HansAccessibilityService : AccessibilityService(), RootFreeAccess
         if (!published) {
             return clearSnapshot(AccessibilitySnapshotFailure.SNAPSHOT_PUBLICATION_FAILED)
         }
+        // This fresh frame already covers events received before its capture began. Leaving
+        // their queued refresh alive would immediately supersede a just-issued visual token.
+        // Later events and all failed captures still keep their one-shot refresh.
+        eventCaptureScheduler.capturePublished(coveredEvents)
         snapshotDiagnostics.clear()
         notifySnapshotChanged()
         return semantic
@@ -791,6 +807,26 @@ internal class HansAccessibilityService : AccessibilityService(), RootFreeAccess
         HansAccessibilitySessions.ensurePublished(owner, session)
     }
 
+    private fun awaitSemanticSnapshot(
+        expectedSession: AccessibilitySessionId,
+        timeoutMillis: Long,
+        cancelled: () -> Boolean,
+        predicate: (SemanticUiSnapshot) -> Boolean,
+    ): SemanticUiSnapshot? {
+        if (Looper.myLooper() == Looper.getMainLooper()) return null
+        return semanticSnapshotWaiter.await(
+            timeoutMillis = timeoutMillis,
+            cancelled = cancelled,
+            available = {
+                connected.get() && sessionId == expectedSession &&
+                    currentUiAvailability().isAvailable
+            },
+            predicate = { snapshot ->
+                snapshot.correlation.sessionId == expectedSession && predicate(snapshot)
+            },
+        )
+    }
+
     private fun clearSnapshot(failure: AccessibilitySnapshotFailure): SemanticUiSnapshot? {
         snapshotDiagnostics.record(failure)
         snapshots.clearCurrent()
@@ -800,6 +836,7 @@ internal class HansAccessibilityService : AccessibilityService(), RootFreeAccess
 
     private fun notifySnapshotChanged() {
         synchronized(snapshotMonitor) { snapshotMonitor.notifyAll() }
+        semanticSnapshotWaiter.wake()
     }
 
     private fun gestureDescription(
@@ -984,8 +1021,7 @@ internal class HansAccessibilityService : AccessibilityService(), RootFreeAccess
         actionKeyController?.close()
         actionKeyController = null
         connected.set(false)
-        mainHandler.removeCallbacks(captureRunnable)
-        captureScheduled.set(false)
+        eventCaptureScheduler.cancel()
         gestureInFlight.set(false)
         HansAccessibilityApprovals.remove(confirmationGate)
         val owner = connectionOwner
@@ -1014,15 +1050,19 @@ internal class HansAccessibilityService : AccessibilityService(), RootFreeAccess
         serviceInfo = current
     }
 
-    private fun <T> callOnMain(block: () -> T): T? {
+    private fun <T> callOnMain(
+        timeoutMillis: Long = MAIN_CALL_TIMEOUT_MILLIS,
+        block: () -> T,
+    ): T? {
         if (!connected.get()) return null
+        if (timeoutMillis <= 0) return null
         if (Looper.myLooper() == Looper.getMainLooper()) {
             return runCatching(block).getOrNull()
         }
         val task = FutureTask(block)
         if (!mainHandler.post(task)) return null
         return try {
-            task.get(MAIN_CALL_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
+            task.get(timeoutMillis.coerceAtMost(MAIN_CALL_TIMEOUT_MILLIS), TimeUnit.MILLISECONDS)
         } catch (_: Exception) {
             task.cancel(false)
             null

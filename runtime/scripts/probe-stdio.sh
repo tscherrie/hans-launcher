@@ -13,7 +13,7 @@ mkdir -p "$test_root/codex-home" "$test_root/tmp"
 version_output=$(CODEX_HOME="$test_root/codex-home" TMPDIR="$test_root/tmp" \
   "$artifact" --version 2> "$test_root/version.stderr")
 case "$version_output" in
-  "codex-app-server 0.154.0") ;;
+  "codex-app-server 0.160.1") ;;
   *)
     echo "unexpected version response: $version_output" >&2
     exit 1

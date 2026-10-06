@@ -1,125 +1,62 @@
 package ai.hans.standard.ui
 
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.ui.semantics.SemanticsProperties
-import androidx.compose.ui.test.SemanticsMatcher
-import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
-import androidx.compose.ui.test.performTextReplacement
-import androidx.compose.ui.text.AnnotatedString
-import ai.hans.standard.voice.stt.SttTranscriptionPromptBuilder
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 
+/** The continuous voice path must not advertise glossary settings it does not consume. */
 class SettingsSttGlossaryTest {
-    @get:Rule
-    val compose = createComposeRule()
+    @get:Rule val compose = createComposeRule()
 
     @Test
-    fun confirmedTermsAreEditedOnlyBehindThePersonalSettingsGroupAndExplicitSave() {
+    fun savedGlossaryIsRetainedWithoutOfferingAnIneffectiveEditor() {
+        val terms = listOf("Grenzebach", "Skill Me Now")
+        val state = SettingsUiState(confirmedSttGlossary = ConfirmedSttGlossaryUiState(terms = terms))
         val saves = mutableListOf<String>()
-        compose.setContent {
-            MaterialTheme {
-                SettingsScreen(
-                    state = SettingsUiState(
-                        confirmedSttGlossary = ConfirmedSttGlossaryUiState(
-                            terms = listOf("Grenzebach", "Skill Me Now"),
-                        ),
-                    ),
-                    callbacks = callbacks { saves += it },
-                )
-            }
+        show(state, saves::add)
+
+        listOf("confirmed_stt_glossary_status", "confirmed_stt_glossary_editor",
+            "edit_confirmed_stt_glossary", "save_confirmed_stt_glossary",
+            "stt_delay_low", "stt_delay_minimal").forEach { tag ->
+            compose.onNodeWithTag(tag).assertDoesNotExist()
         }
-
-        compose.onNodeWithTag("confirmed_stt_glossary_status").assertDoesNotExist()
-        compose.onNodeWithTag("settings_group_personal").performScrollTo().performClick()
-        compose.onNodeWithTag("confirmed_stt_glossary_status")
-            .performScrollTo()
-            .assert(
-                SemanticsMatcher.expectValue(
-                    SemanticsProperties.Text,
-                    listOf(
-                        AnnotatedString(
-                            "2 von ${SttTranscriptionPromptBuilder.MAX_GLOSSARY_TERMS} Begriffen gespeichert",
-                        ),
-                    ),
-                ),
-            )
-        compose.onNodeWithTag("edit_confirmed_stt_glossary")
-            .performScrollTo()
-            .performClick()
-        compose.onNodeWithTag("confirmed_stt_glossary_editor")
-            .assert(
-                SemanticsMatcher.expectValue(
-                    SemanticsProperties.EditableText,
-                    AnnotatedString("Grenzebach\nSkill Me Now"),
-                ),
-            )
-            .performTextReplacement(" Gamsbart \nGAMSbART")
-
-        assertTrue(saves.isEmpty())
-        compose.onNodeWithTag("save_confirmed_stt_glossary")
-            .performScrollTo()
-            .performClick()
-
-        assertEquals(listOf(" Gamsbart \nGAMSbART"), saves)
+        compose.onNodeWithTag("voice_task_overview").assertExists()
+        compose.onNodeWithTag("codex_dictation_access").assertDoesNotExist()
+        compose.onNodeWithTag("voice_usage_help_toggle").performScrollTo().performClick()
+        compose.onNodeWithTag("codex_dictation_access").assertExists()
+        compose.runOnIdle {
+            assertEquals(terms, state.confirmedSttGlossary.terms)
+            assertTrue(saves.isEmpty())
+        }
     }
 
     @Test
-    fun cancellingAnEditDoesNotCrossTheConfirmationBoundary() {
+    fun anEmptyGlossaryDoesNotOfferAnAddButtonOrMutateStorage() {
         val saves = mutableListOf<String>()
-        compose.setContent {
-            MaterialTheme {
-                SettingsScreen(
-                    state = SettingsUiState(),
-                    callbacks = callbacks { saves += it },
-                )
-            }
+        show(SettingsUiState(), saves::add)
+        compose.onNodeWithTag("edit_confirmed_stt_glossary").assertDoesNotExist()
+        compose.onNodeWithTag("dictation_microphone_access").assertExists()
+        compose.runOnIdle { assertTrue(saves.isEmpty()) }
+    }
+
+    private fun show(state: SettingsUiState, onSave: (String) -> Unit) {
+        compose.setGermanContent {
+            MaterialTheme { SettingsScreen(state, callbacks(onSave)) }
         }
-
-        compose.onNodeWithTag("settings_group_personal").performScrollTo().performClick()
-        compose.onNodeWithTag("edit_confirmed_stt_glossary").performScrollTo().performClick()
-        compose.onNodeWithTag("confirmed_stt_glossary_editor").performTextReplacement("Jeremias")
-        compose.onNodeWithTag("cancel_confirmed_stt_glossary")
-            .performScrollTo()
-            .performClick()
-
-        assertTrue(saves.isEmpty())
-        compose.onNodeWithTag("confirmed_stt_glossary_editor").assertDoesNotExist()
-
-        // Reopening starts from durable state, not the discarded draft.
-        compose.onNodeWithTag("edit_confirmed_stt_glossary")
-            .performScrollTo()
-            .performClick()
-        compose.onNodeWithTag("confirmed_stt_glossary_editor")
-            .assert(
-                SemanticsMatcher.expectValue(
-                    SemanticsProperties.EditableText,
-                    AnnotatedString(""),
-                ),
-            )
+        compose.onNodeWithTag("settings_group_speech").performScrollTo().performClick()
     }
 
     private fun callbacks(onSave: (String) -> Unit) = SettingsUiCallbacks(
-        onBack = {},
-        onStartGettingToKnow = {},
-        onModelSelected = {},
-        onReasoningEffortSelected = {},
-        onVoiceSelected = {},
-        onSpeechRateSelected = {},
-        onReadAloudModeSelected = {},
-        onPreviewVoice = {},
-        onStartActionKeySetup = {},
-        onStartModelToggleKeySetup = {},
-        onCancelActionKeySetup = {},
-        onClearActionKey = {},
-        onClearModelToggleKey = {},
-        onCapabilityAccessRequested = {},
-        onConfirmedSttGlossarySaved = onSave,
+        onBack = {}, onStartGettingToKnow = {}, onModelSelected = {},
+        onReasoningEffortSelected = {}, onVoiceSelected = {}, onSpeechRateSelected = {},
+        onReadAloudModeSelected = {}, onPreviewVoice = {}, onStartActionKeySetup = {},
+        onStartModelToggleKeySetup = {}, onCancelActionKeySetup = {}, onClearActionKey = {},
+        onClearModelToggleKey = {}, onCapabilityAccessRequested = {}, onConfirmedSttGlossarySaved = onSave,
     )
 }

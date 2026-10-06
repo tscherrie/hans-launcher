@@ -11,6 +11,8 @@ import ai.hans.standard.notifications.NotificationTriageTransactionCoordinator
 import ai.hans.standard.notifications.RestrictedNotificationTriageExecutor
 import ai.hans.standard.notifications.UserFacingDeliveryDisposition
 import ai.hans.standard.notifications.UserFacingNotificationSuggestionSink
+import ai.hans.standard.notifications.agentchannel.WhatsAppNotificationMessage
+import ai.hans.standard.notifications.agentchannel.WhatsAppNotificationSource
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -22,6 +24,154 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class NotificationDurableOutboxReplayTest {
+    @Test fun nativeHookDeliversEveryOrdinaryUpdateWithoutLegacyIngressOrRelevanceFiltering() {
+        val delivered = mutableListOf<Long>()
+        listOf(agentEvent(901L), agentEvent(902L).copy(kind = NotificationEventKind.UPDATED)).forEach { event ->
+            assertTrue(replayNativeNotificationHookEvent(event,
+                acceptAgentSource = { true }, exclusivelyAdmittedAgentSource = { false },
+                acceptHook = { delivered += it.sequence; true }, invalidate = { _, _ -> error("Unexpected legacy invalidation") }))
+        }
+        assertEquals(listOf(901L, 902L), delivered)
+    }
+
+    @Test fun nativeHookConsumesAlreadyAdmittedAgentCommandsOnlyAndNeverAcknowledgesFailedDurability() {
+        val event = agentEvent(903L)
+        var hookCalls = 0
+        assertTrue(replayNativeNotificationHookEvent(event, { true }, { true }, { hookCalls++; true }, { _, _ -> true }))
+        assertEquals(0, hookCalls)
+        assertFalse(replayNativeNotificationHookEvent(event, { false }, { true }, { hookCalls++; true }, { _, _ -> true }))
+        assertFalse(replayNativeNotificationHookEvent(event, { true }, { false }, { hookCalls++; false }, { _, _ -> true }))
+        assertEquals(1, hookCalls)
+    }
+
+    @Test fun nativeRemovedSourceCancelsUnsentHooksBeforeAcknowledgementAndNeverCreatesAgentWork() {
+        val event = agentEvent(904L).copy(kind = NotificationEventKind.REMOVED)
+        val order = mutableListOf<String>()
+        assertTrue(replayNativeNotificationHookEvent(event, { error("Removed source admitted agent work") },
+            { error("Removed source routed as command") }, { order += "cancel"; true },
+            { _, _ -> order += "invalidate"; true }))
+        assertEquals(listOf("cancel", "invalidate"), order)
+    }
+
+    @Test
+    fun failedAgentSourcePersistenceStopsIngressAckAndRemainingOutboxReplay() {
+        val first = agentEvent(sequence = 51L)
+        val pending = mutableListOf(first, agentEvent(sequence = 52L))
+        val order = mutableListOf<String>()
+        var acknowledgements = 0
+        var wakes = 0
+
+        val result = drainNotificationOutboxBatch(
+            lock = Any(),
+            pending = { pending.toList() },
+            replay = { event ->
+                order += "replay:${event.sequence}"
+                replayDurableNotificationOutboxEvent(
+                    event = event,
+                    applyIngress = { _, _ -> error("Unpersisted agent source reached triage ingress") },
+                    invalidate = { _, _ -> error("Unpersisted agent source invalidated Center") },
+                    preempt = { error("Unpersisted agent source preempted model work") },
+                    acceptAgentSource = { source ->
+                        assertEquals(first.snapshot.agentChannelSource, source)
+                        order += "persist:${event.sequence}"
+                        false
+                    },
+                )
+            },
+            acknowledge = { acknowledgements += 1; true },
+            onReplayed = { wakes += 1 },
+        )
+
+        assertEquals(OutboxDrainBatch.FAILED, result)
+        assertEquals(listOf("replay:51", "persist:51"), order)
+        assertEquals(listOf(51L, 52L), pending.map { it.sequence })
+        assertEquals(0, acknowledgements)
+        assertEquals(0, wakes)
+    }
+
+    @Test
+    fun successfulAgentSourcePersistencePrecedesIngressAckAndWakeExactlyOnce() {
+        val event = agentEvent(sequence = 53L)
+        val pending = mutableListOf(event)
+        val queue = queue()
+        val ingress = NotificationTriageIngress(queue)
+        val order = mutableListOf<String>()
+        var acceptedSources = 0
+        fun drain() = drainNotificationOutboxBatch(
+            lock = Any(),
+            pending = { pending.toList() },
+            replay = { replayed ->
+                replayDurableNotificationOutboxEvent(
+                    event = replayed,
+                    applyIngress = { signal, stored ->
+                        order += "ingress"
+                        assertEquals(NotificationSignal.Upsert(event.snapshot, event.observedAtEpochMillis), signal)
+                        ingress.afterInboxWrite(signal, stored)
+                    },
+                    invalidate = { _, _ -> order += "invalidate"; true },
+                    preempt = { error("Fresh source must not preempt an absent model lease") },
+                    acceptAgentSource = { source ->
+                        assertEquals(event.snapshot.agentChannelSource, source)
+                        acceptedSources += 1
+                        order += "persist"
+                        true
+                    },
+                )
+            },
+            acknowledge = { sequence ->
+                order += "ack"
+                pending.removeAll { it.sequence == sequence }
+            },
+            onReplayed = { order += "wake" },
+        )
+
+        assertEquals(OutboxDrainBatch.REPLAYED, drain())
+        assertEquals(listOf("persist", "ingress", "invalidate", "ack", "wake"), order)
+        assertEquals(1, acceptedSources)
+        assertEquals(1, queue.receipts().size)
+        assertTrue(pending.isEmpty())
+        assertEquals(OutboxDrainBatch.EMPTY, drain())
+        assertEquals(1, acceptedSources)
+        assertEquals(listOf("persist", "ingress", "invalidate", "ack", "wake"), order)
+    }
+
+    @Test
+    fun removedAgentSourceNeverHandsOffAndStillCancelsBeforeDurableAck() {
+        val queue = queue()
+        queue.ingest(agentEvent(sequence = 54L))
+        val ingress = NotificationTriageIngress(queue)
+        val removed = agentEvent(sequence = 55L, kind = NotificationEventKind.REMOVED)
+        val pending = mutableListOf(removed)
+        val order = mutableListOf<String>()
+
+        assertEquals(OutboxDrainBatch.REPLAYED, drainNotificationOutboxBatch(
+            lock = Any(),
+            pending = { pending.toList() },
+            replay = { event ->
+                replayDurableNotificationOutboxEvent(
+                    event = event,
+                    applyIngress = { signal, stored ->
+                        assertTrue(signal is NotificationSignal.Removed)
+                        order += "ingress"
+                        ingress.afterInboxWrite(signal, stored)
+                    },
+                    invalidate = { _, _ -> order += "invalidate"; true },
+                    preempt = { error("Unclaimed queue item must not preempt a model lease") },
+                    acceptAgentSource = { error("Removed notification must never hand off its retained agent source") },
+                )
+            },
+            acknowledge = { sequence ->
+                order += "ack"
+                pending.removeAll { it.sequence == sequence }
+            },
+            onReplayed = { order += "wake" },
+        ))
+
+        assertEquals(listOf("ingress", "invalidate", "ack", "wake"), order)
+        assertTrue(pending.isEmpty())
+        assertEquals(NotificationDeliveryState.DISMISSED_BY_TRIAGE, queue.receipts().single().state)
+    }
+
     @Test
     fun replayWakeRunsAfterDurableAckAndOutsideTheHelpersTransaction() {
         val lock = Any()
@@ -334,6 +484,22 @@ class NotificationDurableOutboxReplayTest {
         exclusionPolicy = HansNotificationExclusionPolicy(setOf("ai.hans.standard")),
         clock = { 10_000L },
     )
+
+    private fun agentEvent(sequence: Long, kind: NotificationEventKind = NotificationEventKind.POSTED): NotificationInboxEvent {
+        val source = WhatsAppNotificationSource(
+            packageName = "com.whatsapp", androidUserId = 0, postingUid = 10_001,
+            notificationKey = "synthetic-agent-self-chat", shortcutId = "synthetic-self-shortcut",
+            ownPersonIdentity = "a".repeat(64), isGroupConversation = false, isGroupSummary = false,
+            messages = listOf(WhatsAppNotificationMessage(
+                text = "FROM: synthetic-desktop TO: Hans Synthetic request $sequence",
+                timestampEpochMillis = sequence * 100, senderIdentity = null, senderIsOwnUser = true,
+            )),
+        )
+        val event = event(sequence = sequence, kind = kind, text = "Synthetic agent source $sequence")
+        return event.copy(snapshot = event.snapshot.copy(
+            packageName = source.packageName, androidKey = source.notificationKey, agentChannelSource = source,
+        ))
+    }
 
     private fun event(
         sequence: Long,

@@ -15,6 +15,8 @@ enum class DictationUiPhase {
     FINALIZING,
     WAITING_TO_SEND,
     SENT,
+    /** Correlated native Voice reply, not a task dispatch/completion acknowledgement. */
+    NATIVE_COMPLETED,
     FAILED,
 }
 
@@ -26,6 +28,10 @@ data class DictationRuntimeSnapshot(
     /** Ephemeral UI only: never persisted or submitted as a conversation message. */
     val provisionalTranscript: String = "",
     val confirmedTranscriptionDelay: SttTranscriptionDelay? = null,
+    /** Confirmed capture mute; the Voice session and its Codex task remain active. */
+    val inputMuted: Boolean = false,
+    /** Current recording is accepted, but no visible own transcript has arrived yet. */
+    val awaitingFirstUserTranscript: Boolean = false,
 )
 
 fun interface DictationRuntimeObserver {
@@ -83,6 +89,16 @@ object HansDictationRuntime : ReadOnlyDictationLifecycleProbe {
             confirmedTranscriptionDelay = current.confirmedTranscriptionDelay.takeIf {
                 active && current.activeRecordingId == state.recordingIdOrNull()
             },
+            inputMuted = active && current.activeRecordingId == state.recordingIdOrNull() && current.inputMuted,
+            awaitingFirstUserTranscript = active && if (
+                current.activeRecordingId == state.recordingIdOrNull() && recordingActive &&
+                current.phase in setOf(DictationUiPhase.PREPARING, DictationUiPhase.LISTENING,
+                    DictationUiPhase.FINALIZING)
+            ) {
+                current.awaitingFirstUserTranscript
+            } else {
+                state is RecordingState.AwaitingAudioFocus
+            },
         )
         current = next
         observers.toList().forEach { runCatching { it.onSnapshot(next) } }
@@ -100,6 +116,23 @@ object HansDictationRuntime : ReadOnlyDictationLifecycleProbe {
         observers.toList().forEach { runCatching { it.onSnapshot(next) } }
     }
 
+    /** Voice owns delivery; clearing its UI is neither a draft nor proof of completed work. */
+    @Synchronized
+    fun completeNativeSession(recordingId: RecordingId) {
+        if (current.activeRecordingId != recordingId) return
+        pendingDeliveryId = null
+        if (recordingActive) {
+            recordingActive = false
+            lifecycleGeneration += 1
+        }
+        current = DictationRuntimeSnapshot(
+            phase = DictationUiPhase.NATIVE_COMPLETED,
+            activeRecordingId = recordingId,
+            revision = current.revision + 1,
+        )
+        observers.toList().forEach { runCatching { it.onSnapshot(current) } }
+    }
+
     @Synchronized
     fun publishPartial(recordingId: RecordingId, transcript: String) {
         if (!recordingActive || current.activeRecordingId != recordingId ||
@@ -108,7 +141,24 @@ object HansDictationRuntime : ReadOnlyDictationLifecycleProbe {
         val preview = transcript.takeLast(MAX_PREVIEW_CHARACTERS)
             .let { if (it.firstOrNull()?.isLowSurrogate() == true) it.drop(1) else it }
         if (preview.isBlank() || preview == current.provisionalTranscript) return
-        current = current.copy(provisionalTranscript = preview, revision = current.revision + 1)
+        current = current.copy(provisionalTranscript = preview,
+            awaitingFirstUserTranscript = false, revision = current.revision + 1)
+        observers.toList().forEach { runCatching { it.onSnapshot(current) } }
+    }
+
+    /** Only the current native recording can retire its own UI wait; no text is retained here. */
+    @Synchronized
+    fun observeNativeUserTranscript(recordingId: RecordingId, text: String) {
+        if (text.isBlank()) return
+        confirmNativeTranscriptAwaiting(recordingId, false)
+    }
+
+    /** False includes closing/error with retained safety ownership, not just successful speech. */
+    @Synchronized
+    fun confirmNativeTranscriptAwaiting(recordingId: RecordingId, awaiting: Boolean) {
+        if (awaiting || !recordingActive || current.activeRecordingId != recordingId ||
+            !current.awaitingFirstUserTranscript) return
+        current = current.copy(awaitingFirstUserTranscript = false, revision = current.revision + 1)
         observers.toList().forEach { runCatching { it.onSnapshot(current) } }
     }
 
@@ -122,6 +172,14 @@ object HansDictationRuntime : ReadOnlyDictationLifecycleProbe {
     }
 
     const val MAX_PREVIEW_CHARACTERS = 4_000
+
+    /** Only the matching native owner may publish a successful media mute transition. */
+    @Synchronized
+    fun confirmInputMuted(recordingId: RecordingId, muted: Boolean) {
+        if (!recordingActive || current.activeRecordingId != recordingId || current.inputMuted == muted) return
+        current = current.copy(inputMuted = muted, revision = current.revision + 1)
+        observers.toList().forEach { runCatching { it.onSnapshot(current) } }
+    }
 
     @Synchronized
     fun awaitDelivery(recordingId: RecordingId, pendingId: String) {

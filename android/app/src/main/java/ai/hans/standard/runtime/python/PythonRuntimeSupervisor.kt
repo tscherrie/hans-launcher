@@ -44,7 +44,7 @@ class PythonRuntimeSupervisor(
         override fun onServiceConnected(name: ComponentName, binder: IBinder) {
             val service = IPythonRuntimeService.Stub.asInterface(binder)
             val recipient = IBinder.DeathRecipient {
-                handleBinderLoss(this, "Python worker died")
+                handleBinderLoss(this, "Python worker died", workerTerminationProven = true)
             }
             val candidate = runCatching {
                 binder.linkToDeath(recipient, 0)
@@ -142,7 +142,11 @@ class PythonRuntimeSupervisor(
         } else {
             bind()
         }
-        return LocalPythonExecutionHandle { cancel(pendingExecution) }
+        val cancellation = LocalPythonExecutionHandle { cancel(pendingExecution) }
+        return object : PythonExecutionHandle {
+            override fun cancel(): Boolean = cancellation.cancel()
+            override fun onQuiescent(listener: () -> Unit): Boolean = pendingExecution.physical.onQuiescent(listener)
+        }
     }
 
     override fun close() {
@@ -165,19 +169,37 @@ class PythonRuntimeSupervisor(
     }
 
     private fun dispatch(work: PendingExecution) {
-        if (!work.started.compareAndSet(false, true)) return
+        synchronized(work.lifecycleLock) {
+            if (work.completed.get() || !work.started.compareAndSet(false, true)) return
+        }
         val target = synchronized(lock) { client }
         if (target == null) {
-            work.started.set(false)
+            val alreadyCompleted = synchronized(work.lifecycleLock) {
+                work.started.set(false)
+                work.completed.get()
+            }
+            if (alreadyCompleted) work.physical.notDispatched()
             bind()
             return
         }
-        work.delegate = target.execute(work.request, work.streamListener) { result ->
-            val accepted = synchronized(lock) { pending.remove(work.request.requestId) === work }
-            if (accepted && work.completed.compareAndSet(false, true)) {
-                runCatching { work.callback.onResult(result) }
+        try {
+            val handle = target.execute(work.request, work.streamListener) { result ->
+                val accepted = synchronized(lock) { pending.remove(work.request.requestId) === work }
+                val complete = synchronized(work.lifecycleLock) { accepted && work.completed.compareAndSet(false, true) }
+                if (complete) {
+                    try { runCatching { work.callback.onResult(result) } }
+                    finally { work.physical.callbackFinished() }
+                }
+                releaseBindingIfIdle()
             }
-            releaseBindingIfIdle()
+            work.delegate = handle
+            work.physical.publish(handle)
+            if (work.workerTerminationProven.get()) (handle as? PythonWorkerTerminationAware)?.workerTerminated()
+            if (work.completed.get()) handle.cancel()
+        } catch (_: Exception) {
+            // A throwing dispatch may have crossed an effect boundary. Keep physical state
+            // unknown instead of converting the synthetic failure callback into a receipt.
+            completeProcessDied(work, "Python dispatch failed")
         }
     }
 
@@ -186,14 +208,18 @@ class PythonRuntimeSupervisor(
         val delegate = work.delegate
         if (delegate != null) return delegate.cancel()
         val removed = synchronized(lock) { pending.remove(work.request.requestId) === work }
-        if (removed && work.completed.compareAndSet(false, true)) {
-            work.callback.onResult(
+        val (complete, noDispatch) = synchronized(work.lifecycleLock) {
+            (removed && work.completed.compareAndSet(false, true)) to !work.started.get()
+        }
+        if (complete) {
+            try { work.callback.onResult(
                 PythonExecutionResult(
                     requestId = work.request.requestId,
                     status = PythonExecutionStatus.CANCELLED,
-                    errorCode = "cancelled_before_dispatch",
+                    errorCode = if (noDispatch) "cancelled_before_dispatch" else "cancel_requested_dispatch_in_progress",
                 ),
-            )
+            ) } finally { work.physical.callbackFinished() }
+            if (noDispatch) work.physical.notDispatched()
             releaseBindingIfIdle()
         }
         return removed
@@ -216,7 +242,9 @@ class PythonRuntimeSupervisor(
         if (!succeeded) handleBinderLoss(binding, "Python worker could not be bound")
     }
 
-    private fun handleBinderLoss(binding: RuntimeServiceConnection, detail: String) {
+    private fun handleBinderLoss(binding: RuntimeServiceConnection, detail: String, workerTerminationProven: Boolean = false) {
+        val physicallyTerminated = workerTerminationProven ||
+            runCatching { binding.binder?.isBinderAlive == false }.getOrDefault(false)
         val work = synchronized(lock) {
             if (activeBinding !== binding) return
             activeBinding = null
@@ -232,12 +260,22 @@ class PythonRuntimeSupervisor(
             values
         }
         detachBinding(binding)
-        work.forEach { completeProcessDied(it, detail) }
+        work.forEach {
+            if (physicallyTerminated) {
+                it.workerTerminationProven.set(true)
+                (it.delegate as? PythonWorkerTerminationAware)?.workerTerminated()
+            }
+            it.delegate?.cancel()
+            completeProcessDied(it, detail)
+        }
     }
 
     private fun completeProcessDied(work: PendingExecution, detail: String) {
-        if (work.completed.compareAndSet(false, true)) {
-            runCatching {
+        val (complete, noDispatch) = synchronized(work.lifecycleLock) {
+            work.completed.compareAndSet(false, true) to !work.started.get()
+        }
+        if (complete) {
+            try { runCatching {
                 work.callback.onResult(
                     PythonExecutionResult(
                         requestId = work.request.requestId,
@@ -246,7 +284,8 @@ class PythonRuntimeSupervisor(
                         errorMessage = detail,
                     ),
                 )
-            }
+            } } finally { work.physical.callbackFinished() }
+            if (noDispatch) work.physical.notDispatched()
         }
     }
 
@@ -287,6 +326,9 @@ class PythonRuntimeSupervisor(
         val callback: PythonResultCallback,
         val started: AtomicBoolean = AtomicBoolean(false),
         val completed: AtomicBoolean = AtomicBoolean(false),
+        val lifecycleLock: Any = Any(),
+        val physical: PythonPhysicalExecutionReceipt = PythonPhysicalExecutionReceipt(),
+        val workerTerminationProven: AtomicBoolean = AtomicBoolean(false),
         @Volatile var delegate: PythonExecutionHandle? = null,
     )
 

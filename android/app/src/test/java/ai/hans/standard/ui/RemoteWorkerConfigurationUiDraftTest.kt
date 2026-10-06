@@ -1,5 +1,7 @@
 package ai.hans.standard.ui
 
+import ai.hans.standard.localization.TestResourceTextResolver
+
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -11,7 +13,7 @@ class RemoteWorkerConfigurationUiDraftTest {
     fun exactHttpsPinAndAdapterVersionAreAccepted() {
         val draft = validDraft()
 
-        assertNull(draft.validationMessage)
+        assertNull(draft.validationMessage(TestResourceTextResolver()))
         assertTrue(draft.canSave)
     }
 

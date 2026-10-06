@@ -1,33 +1,34 @@
 package ai.hans.standard.voice.android
 
+import ai.hans.standard.localization.AndroidHansTextResolver
+
 import ai.hans.standard.HansApplication
 import ai.hans.standard.voice.DictationCaptureStartBarrier
 import ai.hans.standard.voice.DictationForegroundServiceCore
-import ai.hans.standard.voice.DictationRecordingConfig
 import ai.hans.standard.voice.DictationRecordingListener
 import ai.hans.standard.voice.ExecutorRecordingDeadlineScheduler
 import ai.hans.standard.voice.ExecutorRecordingTaskDispatcher
 import ai.hans.standard.voice.MonotonicClock
-import ai.hans.standard.voice.PcmAudioFormat
 import ai.hans.standard.voice.RecordAudioPermissionChecker
 import ai.hans.standard.voice.RecordingFailure
 import ai.hans.standard.voice.RecordingForegroundHost
 import ai.hans.standard.voice.RecordingId
 import ai.hans.standard.voice.RecordingIdGenerator
 import ai.hans.standard.voice.RecordingState
-import ai.hans.standard.voice.openAiDictationFailure
-import ai.hans.standard.voice.stt.android.AndroidSttTranscriptionContextSource
-import ai.hans.standard.voice.stt.android.OpenAiRealtimeTranscriptionProvider
-import ai.hans.standard.voice.stt.android.RealtimeTranscriptionObserver
-import ai.hans.standard.voice.stt.android.SttLatencyPreferenceStore
-import ai.hans.standard.voice.stt.SttTranscriptionDelay
-import ai.hans.standard.voice.tts.android.SpeechCredentialStatus
+import ai.hans.standard.voice.realtime.AndroidLiveVoiceRuntime
+import ai.hans.standard.voice.realtime.LiveVoiceEntryPoint
+import ai.hans.standard.voice.stt.CodexBatchTranscriptionObserver
+import ai.hans.standard.voice.stt.CodexBatchTranscriptionProvider
+import ai.hans.standard.voice.stt.BoundedPcmInputProvider
+import ai.hans.standard.voice.stt.android.AndroidCodexBatchTranscriptionGateway
 import android.Manifest
 import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.SystemClock
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import androidx.core.content.ContextCompat
 import java.io.Closeable
@@ -36,9 +37,12 @@ import java.io.Closeable
 class HansDictationService : BaseDictationForegroundService(), DictationRecordingListener {
     private var deadlineScheduler: ExecutorRecordingDeadlineScheduler? = null
     private var dispatcher: ExecutorRecordingTaskDispatcher? = null
-    private var sttProvider: OpenAiRealtimeTranscriptionProvider? = null
+    private var sttProvider: AutoCloseable? = null
     private var internetSubscription: Closeable? = null
-    @Volatile private var lastTranscriptionFailureCode: String? = null
+    private var batchGateway: AndroidCodexBatchTranscriptionGateway? = null
+    @Volatile private var admissionStillValid: () -> Boolean = { false }
+    private val commandRetirement = DictationCommandRetirement()
+    private val retirementHandler = Handler(Looper.getMainLooper())
 
     override fun createServiceCore(
         foregroundHost: RecordingForegroundHost,
@@ -51,59 +55,52 @@ class HansDictationService : BaseDictationForegroundService(), DictationRecordin
             dispatcher = it
         }
         val host = (application as HansApplication).sessionHost
-        val latencyPreferences = SttLatencyPreferenceStore(this)
-        val newSttProvider = OpenAiRealtimeTranscriptionProvider(
-            host.speechCredentialStore,
-            delaySource = latencyPreferences::read,
-            contextSource = AndroidSttTranscriptionContextSource(this),
-            observer = object : RealtimeTranscriptionObserver {
-                override fun onPartialTranscript(recordingId: RecordingId, transcript: String) {
-                    serviceOwners.runIfOwner(this@HansDictationService) {
-                        HansDictationRuntime.publishPartial(recordingId, transcript)
-                    }
-                }
-
-                override fun onTranscriptionDelayConfirmed(
-                    recordingId: RecordingId,
-                    delay: SttTranscriptionDelay,
-                ) {
-                    serviceOwners.runIfOwner(this@HansDictationService) {
-                        HansDictationRuntime.confirmTranscriptionDelay(recordingId, delay)
-                    }
-                }
-
+        // Each recording gets a fresh context lease. The gateway consults the currently active
+        // upload lease; final text delivery consults that recording's retained original lease.
+        val gateway = AndroidCodexBatchTranscriptionGateway(this) { admissionStillValid() }.also {
+            batchGateway = it
+        }
+        val newSttProvider = CodexBatchTranscriptionProvider(
+            gateway = gateway,
+            observer = object : CodexBatchTranscriptionObserver {
                 override fun onFailure(recordingId: RecordingId, code: String) {
-                    lastTranscriptionFailureCode = code
+                    serviceOwners.runIfOwner(this@HansDictationService) {
+                        ai.hans.standard.voice.feedback.HansSpeechFailureRuntime.report(code)
+                    }
                     Log.i(DIAGNOSTIC_TAG, "dictation_failure=$code")
                 }
-
-                override fun onInterruptedTranscript(recordingId: RecordingId, transcript: String) {
-                    host.preserveInterruptedDictation(transcript)
-                }
             },
-        ).also { sttProvider = it }
+        )
+        sttProvider = AutoCloseable {
+            try { newSttProvider.close() } finally { gateway.close() }
+        }
         internetSubscription = (application as HansApplication).internetConnectivity.observe {
             if (!it.status.permitsExplicitRequest) newSttProvider.onNetworkUnavailable()
         }
+        val boundedInputProvider = BoundedPcmInputProvider(
+            delegate = newSttProvider,
+            maximumPcmBytes = CodexBatchTranscriptionProvider.MAX_PCM_BYTES,
+            maximumChunkBytes = CodexDictationIntegration.recordingConfig.chunkBytes,
+            onLimitReached = { recordingId ->
+                Log.i(DIAGNOSTIC_TAG, "dictation_pcm_limit_reached")
+                stopRecording(recordingId)
+            },
+        )
         return DictationForegroundServiceCore(
-            config = DictationRecordingConfig(
-                audioFormat = PcmAudioFormat(sampleRateHz = 24_000),
-                chunkDurationMillis = 250L,
-                maximumDurationMillis = DictationRecordingConfig.HARD_MAXIMUM_DURATION_MILLIS,
-            ),
+            config = CodexDictationIntegration.recordingConfig,
             clock = MonotonicClock { SystemClock.elapsedRealtime() },
             permissionChecker = RecordAudioPermissionChecker {
                 ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
                     PackageManager.PERMISSION_GRANTED
             },
-            captureStartBarrier = DictationCaptureStartBarrier(
-                host::awaitDictationCaptureReady,
-            ),
+            captureStartBarrier = DictationCaptureStartBarrier {
+                !phoneOwnsCapture() && host.awaitDictationCaptureReady() && !phoneOwnsCapture()
+            },
             audioFocus = AndroidRecordingAudioFocusCoordinator(this),
             captureFactory = AndroidPcmAudioCaptureFactory(
                 MonotonicClock { SystemClock.elapsedRealtime() },
             ),
-            sttProvider = newSttProvider,
+            sttProvider = boundedInputProvider,
             deadlineScheduler = newDeadlineScheduler,
             dispatcher = newDispatcher,
             foregroundHost = foregroundHost,
@@ -117,19 +114,35 @@ class HansDictationService : BaseDictationForegroundService(), DictationRecordin
         flags: Int,
         startId: Int,
     ): Int {
+        val current = recordingState()
+        // Pending STARTs must be visible before their queued AwaitingAudioFocus publication.
+        val activeRecordingId = commandRetirement.activeRecordingId()
+            ?: current.recordingIdOrNull()?.takeIf { current.isActive() }
         when (intent?.action) {
-            ACTION_START -> if (!recordingState().isActive()) requestRecording()
+            ACTION_START -> if (activeRecordingId != null) {
+                commandRetirement.associateCommand(activeRecordingId, startId)
+            } else requestRecording(startId)
             ACTION_STOP -> {
-                val current = recordingState()
-                current.recordingIdOrNull()?.takeIf { current.isActive() }
-                    ?.let(::stopRecording)
-                    ?: stopSelf(startId)
+                if (activeRecordingId != null) {
+                    commandRetirement.associateCommand(activeRecordingId, startId)
+                    commandRetirement.expectStartupCancellation(activeRecordingId)
+                    stopRecording(activeRecordingId)
+                } else stopSelf(startId)
             }
             ACTION_TOGGLE -> {
-                val current = recordingState()
-                current.recordingIdOrNull()?.takeIf { current.isActive() }
-                    ?.let(::stopRecording)
-                    ?: requestRecording()
+                if (activeRecordingId != null) {
+                    commandRetirement.associateCommand(activeRecordingId, startId)
+                    if (current.recordingIdOrNull() == activeRecordingId &&
+                        (current is RecordingState.Stopping || current is RecordingState.Finalizing)) {
+                        // Refresh retirement ownership only; never retry a finalizing recording.
+                        Unit
+                    } else {
+                        commandRetirement.expectStartupCancellation(activeRecordingId)
+                        stopRecording(activeRecordingId)
+                    }
+                } else {
+                    requestRecording(startId)
+                }
             }
             else -> stopSelf(startId)
         }
@@ -147,11 +160,22 @@ class HansDictationService : BaseDictationForegroundService(), DictationRecordin
     }
 
     override fun onRecordingStateChanged(state: RecordingState) {
+        if (state is RecordingState.Finalizing) commandRetirement.finalizing(state.recordingId)
+        val cancelledStartup = if (state == RecordingState.Idle) {
+            commandRetirement.takeIdleStartupCancellation()
+        } else null
+        // cancelBeforeCapture emits Completed without a transcript callback. A successful
+        // upload always passed through Finalizing and must retain its lease until delivery.
+        val completedWithoutTranscript = state is RecordingState.Completed &&
+            commandRetirement.completedWithoutTranscript(state.recordingId)
+        if (state is RecordingState.Completed || state is RecordingState.Failed) {
+            state.recordingIdOrNull()?.let(commandRetirement::terminal)
+        }
         val published = if (
             state is RecordingState.Failed &&
             state.failure == RecordingFailure.TRANSCRIPTION_FAILED
         ) {
-            state.copy(failure = openAiDictationFailure(lastTranscriptionFailureCode))
+            state.copy(failure = RecordingFailure.CODEX_TRANSCRIPTION_FAILED)
         } else {
             state
         }
@@ -160,45 +184,77 @@ class HansDictationService : BaseDictationForegroundService(), DictationRecordin
                 (application as HansApplication).sessionHost.setDictationActive(published.isActive())
             }
         ) return
-        if (published is RecordingState.Failed) stopSelf()
+        if (published is RecordingState.Failed) retireRecording(published.recordingId)
+        if (published is RecordingState.Completed && completedWithoutTranscript) {
+            retireRecording(published.recordingId)
+        }
+        cancelledStartup?.let(::retireRecording)
     }
 
     override fun onUserMessageReady(recordingId: RecordingId, transcript: String) {
+        val recordingAdmission = commandRetirement.admission(recordingId) ?: return
+        var finishCurrentRecording = false
         if (!serviceOwners.runIfOwner(this) {
-                val saved = (application as HansApplication).sessionHost
-                    .submitDictationTranscript(transcript, recordingId)
-                if (!saved) HansDictationRuntime.reportStartFailure(RecordingFailure.INTERNAL_ERROR)
-            }
-        ) return
-        stopSelf()
+                finishCurrentRecording = true
+                if (recordingAdmission() && commandRetirement.claimDelivery(recordingId)) {
+                    // Existing durable Start/Steer delivery owns the only submitted user message.
+                    val saved = (application as HansApplication).sessionHost.submitDictationTranscript(
+                        transcript, recordingId, admissionStillValid = recordingAdmission,
+                    )
+                    if (!saved && HansDictationRuntime.snapshotUi().activeRecordingId == recordingId) {
+                        HansDictationRuntime.reportStartFailure(RecordingFailure.INTERNAL_ERROR)
+                    }
+                } else if (!recordingAdmission() &&
+                    HansDictationRuntime.snapshotUi().activeRecordingId == recordingId) {
+                    HansDictationRuntime.reportStartFailure(RecordingFailure.CODEX_TRANSCRIPTION_FAILED)
+                }
+            }) return
+        if (finishCurrentRecording) retireRecording(recordingId)
     }
 
-    private fun requestRecording() {
-        val credentialStatus = (application as HansApplication).sessionHost.speechCredentialStatus()
-        when (credentialStatus) {
-            SpeechCredentialStatus.MISSING -> {
-                HansDictationRuntime.reportStartFailure(RecordingFailure.SPEECH_CREDENTIAL_MISSING)
-                stopSelf()
-                return
-            }
-            SpeechCredentialStatus.TEMPORARILY_UNAVAILABLE -> {
-                HansDictationRuntime.reportStartFailure(
-                    RecordingFailure.SPEECH_CREDENTIAL_TEMPORARILY_UNAVAILABLE,
-                )
-                stopSelf()
-                return
-            }
-            SpeechCredentialStatus.AVAILABLE -> Unit
+    private fun requestRecording(startId: Int) {
+        // Capture starts locally; there is no Live connection and never a paid API fallback.
+        // The recording core is lazy: probe without requiring batchGateway to exist yet.
+        val helperAvailable = batchGateway?.isAvailable() ?: AndroidCodexBatchTranscriptionGateway(this)
+            .use { it.isAvailable() }
+        if (!(application as HansApplication).sessionHost.hasCodexSpeechAccess() ||
+            !helperAvailable || phoneOwnsCapture()) {
+            HansDictationRuntime.reportStartFailure(RecordingFailure.CODEX_TRANSCRIPTION_FAILED)
+            stopSelf(startId)
+            return
         }
         val internet = (application as HansApplication).internetConnectivity.snapshot().status
         if (!internet.permitsExplicitRequest) {
             HansDictationRuntime.reportStartFailure(RecordingFailure.NETWORK_UNAVAILABLE)
-            android.widget.Toast.makeText(this, internet.notice, android.widget.Toast.LENGTH_LONG).show()
-            stopSelf()
+            android.widget.Toast.makeText(this, internet.notice(AndroidHansTextResolver(this)), android.widget.Toast.LENGTH_LONG).show()
+            stopSelf(startId)
             return
         }
-        lastTranscriptionFailureCode = null
-        startRecording()
+        val lease = newAdmissionLease()
+        admissionStillValid = lease
+        val recordingId = startRecording()
+        commandRetirement.started(recordingId, startId, lease)
+    }
+
+    private fun newAdmissionLease(): () -> Boolean {
+        // The helper owns credentials; the lease contains only existing account/context state.
+        val host = (application as HansApplication).sessionHost
+        val admitted = host.snapshot()
+        return {
+            val current = host.snapshot()
+            host.hasCodexSpeechAccess() && admitted != null && current != null &&
+                current.generation == admitted.generation &&
+                current.session.currentThreadId == admitted.session.currentThreadId &&
+                current.session.account.identity == admitted.session.account.identity
+        }
+    }
+
+    private fun retireRecording(recordingId: RecordingId) {
+        // Posting lets a just-returning startRecording() bind its command ID after an early
+        // async failure. An unrelated later START has a newer Android startId and survives.
+        retirementHandler.post {
+            commandRetirement.takeRetirementStartId(recordingId)?.let { startId -> stopSelf(startId) }
+        }
     }
 
     override fun onStartRejected(activeRecordingId: RecordingId) = Unit
@@ -208,6 +264,10 @@ class HansDictationService : BaseDictationForegroundService(), DictationRecordin
         internetSubscription = null
         ignoreExpectedRuntimeFailure { sttProvider?.close() }
         sttProvider = null
+        batchGateway = null
+        admissionStillValid = { false }
+        retirementHandler.removeCallbacksAndMessages(null)
+        commandRetirement.clear()
         ignoreExpectedRuntimeFailure { deadlineScheduler?.close() }
         deadlineScheduler = null
         ignoreExpectedRuntimeFailure { dispatcher?.close() }
@@ -230,6 +290,10 @@ class HansDictationService : BaseDictationForegroundService(), DictationRecordin
         fun start(context: Context) {
             if (!hasRecordAudioPermission(context)) {
                 HansDictationRuntime.reportStartFailure(RecordingFailure.PERMISSION_DENIED)
+                return
+            }
+            if (phoneOwnsCapture()) {
+                HansDictationRuntime.reportStartFailure(RecordingFailure.CODEX_TRANSCRIPTION_FAILED)
                 return
             }
             dispatchDictationServiceCommand(
@@ -258,7 +322,9 @@ class HansDictationService : BaseDictationForegroundService(), DictationRecordin
         }
 
         fun toggle(context: Context) {
-            if (HansDictationRuntime.snapshotUi().phase.isActiveRecordingPhase()) {
+            val phase = HansDictationRuntime.snapshotUi().phase
+            if (phase == DictationUiPhase.FINALIZING) return
+            if (phase.isActiveRecordingPhase()) {
                 stop(context)
                 return
             }
@@ -280,6 +346,13 @@ class HansDictationService : BaseDictationForegroundService(), DictationRecordin
 
         internal fun requiresForegroundStart(action: String?): Boolean =
             action == ACTION_START || action == ACTION_TOGGLE
+
+        internal fun phoneOwnsCapture(): Boolean =
+            AndroidLiveVoiceRuntime.entryPoint() == LiveVoiceEntryPoint.PHONE &&
+                ai.hans.standard.ui.VoiceInputTransitionPolicy.liveOwnsVoice(
+                    AndroidLiveVoiceRuntime.snapshot().phase,
+                    AndroidLiveVoiceRuntime.isCaptureRequestedOrActive(),
+                )
 
         private fun hasRecordAudioPermission(context: Context): Boolean =
             ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
@@ -314,6 +387,7 @@ internal fun DictationUiPhase.isActiveRecordingPhase(): Boolean = when (this) {
     DictationUiPhase.IDLE,
     DictationUiPhase.WAITING_TO_SEND,
     DictationUiPhase.SENT,
+    DictationUiPhase.NATIVE_COMPLETED,
     DictationUiPhase.FAILED,
     -> false
 }

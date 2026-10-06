@@ -1,5 +1,10 @@
 package ai.hans.standard.integration
 
+import ai.hans.standard.R
+import ai.hans.standard.localization.AndroidHansTextResolver
+import ai.hans.standard.localization.hansUiLanguageTag
+import ai.hans.standard.voice.realtime.LiveVoiceLanguage
+
 import android.app.NotificationManager
 import android.content.BroadcastReceiver
 import android.content.ComponentName
@@ -84,6 +89,11 @@ import ai.hans.standard.voice.android.HansDictationRuntime
 import ai.hans.standard.network.InternetStatus
 import ai.hans.standard.voice.tts.ExecutorTtsTaskDispatcher
 import ai.hans.standard.voice.tts.CodexTimelineSpeechProjector
+import ai.hans.standard.voice.tts.CodexReadAloudDelivery
+import ai.hans.standard.voice.tts.CodexReadAloudDeliveryPhase
+import ai.hans.standard.voice.tts.CodexReadAloudSessionPort
+import ai.hans.standard.voice.tts.TtsSegmentId
+import ai.hans.standard.voice.tts.TtsFailure
 import ai.hans.standard.voice.tts.StreamingTtsCoordinator
 import ai.hans.standard.voice.tts.TtsMessageId
 import ai.hans.standard.voice.tts.TtsMessageKind
@@ -103,6 +113,11 @@ import ai.hans.standard.voice.tts.android.AndroidTtsAudioFocusCoordinator
 import ai.hans.standard.voice.tts.android.OpenAiStreamingTtsProvider
 import ai.hans.standard.voice.tts.android.SpeechCredentialStatus
 import ai.hans.standard.voice.realtime.AndroidLiveVoiceRuntime
+import ai.hans.standard.voice.realtime.AndroidWebRtcRealtimeTransport
+import ai.hans.standard.voice.realtime.LiveVoiceMediaMode
+import ai.hans.standard.voice.realtime.CodexReadAloudSession
+import ai.hans.standard.voice.realtime.CodexLiveVoiceVoiceResolver
+import ai.hans.standard.voice.realtime.LiveVoiceVoiceSelectionProvider
 import ai.hans.standard.voice.realtime.BoundedLiveVoiceInstructionsProvider
 import ai.hans.standard.voice.realtime.LiveVoiceObserver
 import ai.hans.standard.voice.realtime.LiveVoicePhase
@@ -147,6 +162,12 @@ class AndroidCodexSessionHost internal constructor(
     private val pluginSurfaceEvidenceStager: PluginSurfaceEvidenceStager? = null,
 ) {
     private val appContext = context.applicationContext
+    // One process-host fence spans client/runtime and tool-revision replacement. Local and
+    // desktop-created turns must never reuse each other's retained screen-action evidence.
+    private val phoneToolFence = ai.hans.standard.remotecontrol.CrossTurnPhoneToolFence(
+        invalidateRetainedUi = ai.hans.standard.phone.accessibility.android.HansPhoneToolEvidence::invalidateRetainedEvidence,
+        onQuiescent = ::onPhoneToolWorkQuiescent,
+    )
     private val remoteControlMain = Handler(Looper.getMainLooper())
     // Main-thread confined. Never persist incoming access or retain an Activity.
     private var remoteForegroundSubscription: AutoCloseable? = null
@@ -254,12 +275,25 @@ class AndroidCodexSessionHost internal constructor(
         executor = toolExecutorService,
         confirmation = confirmationRouter,
         isInteractive = ::isInteractiveDynamicToolCall,
+        reportPort = ai.hans.standard.phone.notifications.NotificationEventReportPort(::reportNotificationEvent),
     )
     private val dynamicToolContractMigrator = DynamicToolContractMigrator(
         state = AppPrivateDynamicToolContractStateStore(appContext),
         sessions = sessionStore,
     )
     private val staticDynamicToolContributors: List<DynamicToolContributor> = buildList {
+        add(DynamicToolContributor(
+            interactiveExecutor = ai.hans.standard.voice.realtime.VoiceControlDynamicTools(
+                executor = toolExecutorService,
+                allowed = { call -> isInteractiveDynamicToolCall(call) &&
+                    snapshot()?.session?.currentThreadId == call.threadId },
+                sessionForCall = { call -> currentClient()?.voiceControlSessionIdFor(call) },
+                currentToken = AndroidLiveVoiceRuntime::currentCallToken,
+                currentSessionId = AndroidLiveVoiceRuntime::currentVoiceSessionId,
+                stopToken = { token -> AndroidLiveVoiceRuntime.stopIfCurrent(appContext, token) },
+            ),
+            backgroundExecutor = null,
+        ))
         add(
             DynamicToolContributor(
                 androidDynamicToolExecutor,
@@ -358,7 +392,6 @@ class AndroidCodexSessionHost internal constructor(
         dispatcher = ttsDispatcher,
         listener = object : TtsPlaybackListener {
             override fun onStateChanged(state: TtsPlaybackState) {
-                updateSpeechRoutePlaybackLifetime(state)
                 val refreshedCredential = if (
                     state is TtsPlaybackState.Failed &&
                     state.failure.code == "credential_unavailable"
@@ -376,10 +409,7 @@ class AndroidCodexSessionHost internal constructor(
                 if (state is TtsPlaybackState.Failed && state.failure.kind == TtsFailureKind.PROVIDER) {
                     HansSpeechFailureRuntime.report(state.failure.code)
                 }
-                updateActiveWorkReason(
-                    HansActiveWorkReason.SPEECH_ACTIVE,
-                    state.holdsSpeechActiveWork(),
-                )
+                updateCombinedSpeechActivity()
                 if (state == TtsPlaybackState.Idle || state == TtsPlaybackState.Stopped) {
                     drainPendingNotificationSpeech()
                 }
@@ -427,9 +457,215 @@ class AndroidCodexSessionHost internal constructor(
             }
         }
     }
-    private val timelineSpeechProjector = CodexTimelineSpeechProjector()
+    private val timelineSpeechProjector = CodexTimelineSpeechProjector(text = AndroidHansTextResolver(appContext))
+    private val speechAdmission: CodexSpeechAdmission = CodexSpeechAdmission(this, object : CodexSpeechAdmission.Sink {
+        override fun begin(epoch: Long) { codexReadAloud.beginTurn(epoch) }
+        override fun configure(enabled: Boolean, allowIntermediate: Boolean, epoch: Long) {
+            codexReadAloud.configure(enabled, allowIntermediate, epoch)
+        }
+        override fun held(active: Boolean, inputRevision: Long) {
+            codexReadAloud.setDictationHeld(active, inputRevision)
+        }
+        override fun prepare(epoch: Long) { codexReadAloud.prepare(epoch) }
+        override fun submit(revision: TtsMessageRevision, epoch: Long) {
+            codexReadAloud.submitGuarded(revision, epoch) {
+                !nativeNotificationSpeechAdmission.outputIsNotificationOwned(revision.messageId.value) ||
+                    (nativeNotificationSpeechAdmission.outputAllowed(revision.messageId.value, epoch) &&
+                        nativeNotificationSpeechGateReason() == null &&
+                        nativeNotificationSpeechAdmission.outputSource(revision.messageId.value)?.let { source ->
+                            notificationPrivacyRepository.captureDecision(source.packageName) ==
+                                ai.hans.standard.phone.notifications.NotificationCaptureDecision.Allowed
+                        } == true)
+            }
+        }
+    })
+    private val codexReadAloud: CodexReadAloudDelivery by lazy {
+        CodexReadAloudDelivery(
+            playbackEvent = nativeNotificationSpeechAdmission::deliveryEvent,
+            sessionFactory = { speechEpoch, phaseChanged ->
+                synchronized(this) { notificationSpeechState.advanceGate() }
+                check(stopNotificationSpeechAndAwait(DICTATION_TTS_STOP_TIMEOUT_MILLIS)) {
+                    "codex_read_aloud_notification_release_unconfirmed"
+                }
+                createCodexReader(speechEpoch, phaseChanged, notification = false)
+            },
+            observer = { state ->
+                synchronized(this) {
+                    codexSpeechState = readAloudPlaybackState(state)
+                    codexOutputReleaseConfirmed = state.releaseConfirmed
+                    codexCurrentOutputMessageId = state.messageId?.value
+                    nativeNotificationSpeechAdmission.playback(state.messageId?.value, state.phase.name, state.failureCode,
+                        state.releaseConfirmed)
+                    if (state.releaseConfirmed) nativeNotificationOutputStopRequired = false
+                }
+                updateCombinedSpeechActivity()
+                if (state.releaseConfirmed) {
+                    onPhoneToolWorkQuiescent()
+                    remoteControlMain.post { drainPendingNotificationSpeech() }
+                }
+            },
+        )
+    }
+    private val notificationReadAloud: CodexReadAloudDelivery by lazy {
+        CodexReadAloudDelivery(
+            sessionFactory = { speechEpoch, phaseChanged ->
+                createCodexReader(speechEpoch, phaseChanged, notification = true)
+            },
+            playbackEvent = { event ->
+                // Durable receipt I/O must not block a physical-stop waiter holding dispatch/privacy locks.
+                snapshotDeliveryExecutor.execute { acceptTtsPlaybackEvent(event) }
+            },
+            observer = { state ->
+                synchronized(this) {
+                    notificationCodexSpeechState = readAloudPlaybackState(state)
+                    notificationOutputReleaseConfirmed = state.releaseConfirmed
+                }
+                updateCombinedSpeechActivity()
+                if (state.releaseConfirmed) {
+                    onPhoneToolWorkQuiescent()
+                    remoteControlMain.post {
+                        if (synchronized(this) { notificationSpeechState.requiresPhysicalStop() }) {
+                            notificationPhysicalStopRecovery.request()
+                        } else drainPendingNotificationSpeech()
+                    }
+                }
+            },
+        )
+    }
+
+    /** A notification reader never waits for the interactive reader: admission must be idle. */
+    private fun createCodexReader(
+        speechEpoch: Long,
+        phaseChanged: (CodexReadAloudDeliveryPhase) -> Unit,
+        notification: Boolean,
+    ): CodexReadAloudSessionPort {
+        fun admissionCurrent(): Boolean = synchronized(this) {
+            if (notification) notificationSpeechState.inFlight?.let {
+                it.deliveryEpoch == speechEpoch && it.gateEpoch == notificationSpeechState.gateEpoch &&
+                    notificationSpeechGateOpenLocked(includeNotificationLease = false) && isNotificationSpeechAudibleAtCommit()
+            } == true else speechAdmission.epoch == speechEpoch
+        }
+        val owner = synchronized(this) {
+            check(admissionCurrent()) { "codex_read_aloud_context_changed" }
+            client ?: error("codex_read_aloud_session_not_ready")
+        }
+        // Preserve an explicit/private selection before stopping the older endpoint,
+        // whose removal otherwise clears the route controller's transient preference.
+        val outputPreference = speechAudioRoutes?.captureOutputOnlyPreference()
+        val readerGateway = object : CodexRealtimeGateway {
+            override fun start(offerSdp: String, prompt: String, voice: String?, callbacks: CodexRealtimeCallbacks) =
+                start(offerSdp, prompt, voice, CodexRealtimeOptions(), callbacks)
+            override fun start(offerSdp: String, prompt: String, voice: String?, options: CodexRealtimeOptions,
+                callbacks: CodexRealtimeCallbacks): CodexRealtimeCall? {
+                if (!admissionCurrent() || currentClient() !== owner) {
+                    callbacks.onStartRejected()
+                    callbacks.onError(CodexRealtimeIssue.SESSION_CHANGED)
+                    return null
+                }
+                val call = owner.startRealtime(offerSdp, prompt, voice, options, callbacks) ?: return null
+                return object : CodexRealtimeCall {
+                    override fun stop() = call.stop()
+                    override fun appendSpeech(text: String, callback: (Result<Unit>) -> Unit): Boolean =
+                        admissionCurrent() && currentClient() === owner &&
+                            call.appendSpeech(text, callback)
+                }
+            }
+            override fun interruptCurrentTurn(): Boolean = false
+        }
+        val reader = CodexReadAloudSession(
+            gateway = readerGateway,
+            transportFactory = { provider -> AndroidWebRtcRealtimeTransport(
+                appContext, provider, audioRoutes = speechAudioRoutes,
+                mediaMode = LiveVoiceMediaMode.OUTPUT_ONLY,
+                outputRoute = outputPreference,
+            ) },
+            voiceSelectionProvider = LiveVoiceVoiceSelectionProvider {
+                CodexLiveVoiceVoiceResolver.resolve(settingsStore.read().codexLiveVoice)
+            },
+            observer = CodexReadAloudSession.Observer { state ->
+                ai.hans.standard.voice.realtime.LiveVoiceDiagnostics.event("CODEX_READ_ALOUD",
+                    "phase=${state.phase.name} outputObserved=${state.outputObserved}" +
+                        (state.failureCode?.takeIf { it.matches(Regex("[a-z0-9_]{1,80}")) }
+                            ?.let { " code=$it" } ?: ""))
+                if (state.phase == CodexReadAloudSession.Phase.FAILED) {
+                    state.failureCode?.let(HansSpeechFailureRuntime::report)
+                }
+                phaseChanged(CodexReadAloudDeliveryPhase.valueOf(state.phase.name))
+            },
+        )
+        return object : CodexReadAloudSessionPort {
+            override val completedNaturally: Boolean get() = reader.snapshot.completedNaturally
+            private var legacyOutputStopped = false
+            private fun awaitLegacyOutput(): Boolean {
+                if (!legacyOutputStopped) legacyOutputStopped =
+                    ttsCoordinator.stopAndAwait(DICTATION_TTS_STOP_TIMEOUT_MILLIS)
+                return legacyOutputStopped
+            }
+            override fun prepare() {
+                check(awaitLegacyOutput()) { "codex_read_aloud_audio_busy" }
+                reader.prepare()
+            }
+            override fun speak(text: String): Boolean = awaitLegacyOutput() && reader.speak(text)
+            override fun prepareGuarded(admissionGuard: () -> Boolean): Boolean =
+                awaitLegacyOutput() && admissionCurrent() && reader.prepareGuarded {
+                    admissionCurrent() && admissionGuard()
+                }
+            override fun speakGuarded(text: String, admissionGuard: () -> Boolean): Boolean =
+                awaitLegacyOutput() && admissionCurrent() && reader.speakGuarded(text) {
+                    admissionCurrent() && admissionGuard()
+                }
+            override fun stop() = reader.stop()
+            override fun stopAndAwait(timeoutMillis: Long): Boolean = reader.stopAndAwait(timeoutMillis)
+            override fun close() = reader.close()
+        }
+    }
+
+    private fun readAloudPlaybackState(state: ai.hans.standard.voice.tts.CodexReadAloudDeliverySnapshot): TtsPlaybackState {
+        val segment = TtsSegmentId(state.messageId ?: TtsMessageId("codex-read-aloud"), 0)
+        val playback = when (state.phase) {
+            CodexReadAloudDeliveryPhase.IDLE -> TtsPlaybackState.Idle
+            CodexReadAloudDeliveryPhase.CONNECTING -> TtsPlaybackState.AcquiringAudioFocus(segment)
+            CodexReadAloudDeliveryPhase.READY -> TtsPlaybackState.WaitingForText(segment.messageId)
+            CodexReadAloudDeliveryPhase.SPEAKING -> TtsPlaybackState.Playing(segment)
+            CodexReadAloudDeliveryPhase.STOPPING -> TtsPlaybackState.Paused(segment, emptySet())
+            CodexReadAloudDeliveryPhase.STOPPED -> TtsPlaybackState.Stopped
+            CodexReadAloudDeliveryPhase.FAILED -> TtsPlaybackState.Failed(segment,
+                TtsFailure(TtsFailureKind.PROVIDER, "codex_read_aloud_failed", false))
+        }
+        return playback
+    }
     private val previewSequence = AtomicLong(0)
     private val liveVoiceContextRefreshGate = LiveVoiceContextRefreshGate()
+    val codexRealtimeGateway: CodexRealtimeGateway = object : CodexRealtimeGateway {
+        override fun start(offerSdp: String, prompt: String, voice: String?, callbacks: CodexRealtimeCallbacks): CodexRealtimeCall? =
+            start(offerSdp, prompt, voice, CodexRealtimeOptions(), callbacks)
+
+        override fun start(offerSdp: String, prompt: String, voice: String?, options: CodexRealtimeOptions,
+            callbacks: CodexRealtimeCallbacks): CodexRealtimeCall? {
+            val current = currentClient()
+            if (current == null) {
+                callbacks.onStartRejected()
+                callbacks.onError(CodexRealtimeIssue.SESSION_NOT_READY)
+                return null
+            }
+            // Recording can prepare its network before the physical microphone barrier. It
+            // must still wait for the reader's native close before claiming the same thread.
+            // The reader itself uses client-managed return speech and cannot stop itself here.
+            if (!options.clientManagedHandoffs &&
+                (!stopNotificationSpeechAndAwait(10_000) || !codexReadAloud.stopOutputAndAwait(10_000))) {
+                callbacks.onStartRejected()
+                callbacks.onError(CodexRealtimeIssue.RECOVERY_REQUIRED)
+                return null
+            }
+            if (currentClient() !== current) {
+                callbacks.onStartRejected()
+                callbacks.onError(CodexRealtimeIssue.SESSION_CHANGED)
+                return null
+            }
+            return current.startRealtime(offerSdp, prompt, voice, options, callbacks)
+        }
+        override fun interruptCurrentTurn(): Boolean = interrupt()
+    }
 
     private var bound = false
     private var runtime: IRuntimeService? = null
@@ -437,13 +673,14 @@ class AndroidCodexSessionHost internal constructor(
     private var clientObserver: CodexClientObserver? = null
     private var currentSnapshot: CodexClientSnapshot? = null
     private var speechCredentialStatus = speechCredentialStore.credentialStatus()
-    private var speechIntent = SpeechTurnIntent.SILENT
-    private var pendingSpeechDispatch: PendingSpeechDispatch? = null
-    private var speechDispatchEpoch = 0L
     private var clientEpoch = 0L
     private val backgroundProtectionRejected = linkedSetOf<HansActiveWorkReason>()
     private var ttsState: TtsPlaybackState = TtsPlaybackState.Idle
-    private var dictationActive = false
+    private var codexSpeechState: TtsPlaybackState = TtsPlaybackState.Idle
+    private var notificationCodexSpeechState: TtsPlaybackState = TtsPlaybackState.Idle
+    private var codexOutputReleaseConfirmed = true
+    private var notificationOutputReleaseConfirmed = true
+    private val dictationActive: Boolean get() = speechAdmission.inputHeld
     private var liveVoiceActiveForDynamicTools = false
     private var dynamicToolGenerationTransitionActive = false
     private val notificationSpeechState = NotificationSpeechHostState()
@@ -453,11 +690,11 @@ class AndroidCodexSessionHost internal constructor(
             cancelHostSpeech = {
                 synchronized(this) {
                     notificationRevocationInProgress = true
-                    notificationSpeechState.cancelAllForPrivacyPurge()
+                    notificationSpeechState.cancelAllForPrivacyPurge(!notificationOutputReleaseConfirmed)
                 }
             },
             stopPlaybackAndAwait = {
-                ttsCoordinator.stopAndAwait(NOTIFICATION_PRIVACY_STOP_TIMEOUT_MILLIS)
+                stopNotificationSpeechAndAwait(NOTIFICATION_PRIVACY_STOP_TIMEOUT_MILLIS)
             },
             acknowledgePlaybackStopped = {
                 synchronized(this) {
@@ -468,6 +705,14 @@ class AndroidCodexSessionHost internal constructor(
     private var notificationCodexWorkActive = false
     private var notificationLiveVoiceActive = false
     private var notificationRevocationInProgress = false
+    private val nativeNotificationSpeechAdmission = NativeNotificationSpeechAdmission()
+    private var notificationReportOwnerRevision = 0L
+    private var notificationReportDisplayedThread: String? = null
+    private val notificationReportObservers = java.util.concurrent.CopyOnWriteArraySet<(List<NativeNotificationReportCard>) -> Unit>()
+    private var codexCurrentOutputMessageId: String? = null
+    private var nativeNotificationSilentThroughEpochMillis = 0L
+    private var nativeNotificationOutputStopRequired = false
+    private val nativeNotificationRevokedOutputIds = linkedSetOf<String>()
     private val notificationAudioPolicyHandler = Handler(Looper.getMainLooper())
     private var notificationAudioMonitorArmed = false
     private val notificationAudibilitySuppression =
@@ -477,7 +722,7 @@ class AndroidCodexSessionHost internal constructor(
             synchronized(this) { notificationSpeechState.requiresPhysicalStop() }
         },
         stopPlaybackAndAwait = {
-            ttsCoordinator.stopAndAwait(NOTIFICATION_PRIVACY_STOP_TIMEOUT_MILLIS)
+            stopNotificationSpeechAndAwait(NOTIFICATION_PRIVACY_STOP_TIMEOUT_MILLIS)
         },
         acknowledgePlaybackStopped = {
             synchronized(this) { notificationSpeechState.acknowledgePhysicalStop() }
@@ -549,6 +794,7 @@ class AndroidCodexSessionHost internal constructor(
         )
         AndroidLiveVoiceRuntime.configure(
             LiveVoiceRuntimeDependencies(
+                codexRealtimeGateway = codexRealtimeGateway,
                 taskExecutor = AndroidCodexLiveVoiceTaskExecutor(
                     host = this,
                     setupWorkflowProvider = ::currentLiveVoiceSetupWorkflow,
@@ -559,6 +805,7 @@ class AndroidCodexSessionHost internal constructor(
                     capabilitySummaryProvider = ::currentLiveVoiceCapabilitySummary,
                     setupWorkflowProvider = ::currentLiveVoiceSetupWorkflow,
                     confirmedProfileSummaryProvider = ::currentConfirmedProfileSummary,
+                    languageProvider = { LiveVoiceLanguage.forLanguageTag(appContext.hansUiLanguageTag()) },
                 ),
                 captureStartBarrier = LiveVoiceCaptureStartBarrier(
                     ::awaitLiveVoiceCaptureReady,
@@ -633,17 +880,63 @@ class AndroidCodexSessionHost internal constructor(
         synchronized(this) { observers.remove(observer) }
     }
 
+    internal fun observeNotificationReports(observer: (List<NativeNotificationReportCard>) -> Unit): Closeable {
+        notificationReportObservers.add(observer)
+        notificationAudioPolicyHandler.post { if (observer in notificationReportObservers) observer(currentNotificationReports()) }
+        return Closeable { notificationReportObservers.remove(observer) }
+    }
+
+    private fun currentNotificationReports(): List<NativeNotificationReportCard> {
+        val threadId = snapshot()?.session?.currentThreadId
+        return (appContext as? ai.hans.standard.HansApplication)?.notificationEvents?.persistedReports(threadId)
+            .orEmpty().map { NativeNotificationReportCard(it.id, checkNotNull(threadId), it.text, it.timelineAnchorId) }
+    }
+
+    private fun publishNotificationReports() {
+        // No UI callback while holding Host/privacy/Admission monitors. Read again at delivery
+        // so source clearing between commit and callback cannot publish stale private text.
+        notificationAudioPolicyHandler.post {
+            val cards = currentNotificationReports()
+            notificationReportObservers.forEach { observer -> runCatching { observer(cards) } }
+        }
+    }
+
     fun snapshot(): CodexClientSnapshot? = synchronized(this) { currentSnapshot }
+
+    /** Null means unbound, not an implicitly started runtime or a successful Voice session. */
+    internal fun realtimeDiagnostics(): CodexRealtimeDiagnostics? = currentClient()?.realtimeDiagnostics()
+
+    internal fun notificationExternalHistory(): NativeNotificationExternalHistory? =
+        currentClient()?.notificationExternalHistory()
+
+    internal fun refreshNotificationExternalHistory(expectedThreadId: String): Boolean =
+        synchronized(dispatchLock) { currentClient()?.refreshNotificationExternalHistory(expectedThreadId) == true }
+
+    /** Passive persisted-history proof; no restart, new task, content, or synthetic completion. */
+    internal fun agentChannelRecoveredHistory(): AgentChannelRecoveredHistory? =
+        currentClient()?.agentChannelRecoveredHistory()
 
     internal fun performanceDiagnostics(command: String): String = currentClient()
         ?.performanceDiagnostics(command)
         ?: ai.hans.standard.diagnostics.PerformanceDiagnostics.encode(null, null)
 
-    fun ttsPlaybackState(): TtsPlaybackState = synchronized(this) { ttsState }
+    fun ttsPlaybackState(): TtsPlaybackState = synchronized(this) {
+        if (codexSpeechState.holdsSpeechActiveWork()) codexSpeechState
+        else if (notificationCodexSpeechState.holdsSpeechActiveWork()) notificationCodexSpeechState
+        else if (ttsState.holdsSpeechActiveWork()) ttsState
+        else if (codexSpeechState != TtsPlaybackState.Idle) codexSpeechState else ttsState
+    }
+
+    fun hasCodexSpeechAccess(): Boolean = snapshot()?.let {
+        it.session.account.phase == AccountPhase.SIGNED_IN &&
+            it.session.account.identity is ai.hans.standard.codex.AccountIdentity.ChatGpt &&
+            it.runtimePhase == ClientRuntimePhase.READY &&
+            it.sessionPhase in setOf(ClientSessionPhase.READY, ClientSessionPhase.BUSY)
+    } == true
 
     /** Interactive-only tools are excluded from independent background automation turns. */
     fun backgroundDynamicToolExecutor(): DynamicToolExecutor =
-        dynamicToolCoordinator.backgroundExecutor()
+        phoneToolFence.wrap(dynamicToolCoordinator.backgroundExecutor())
 
     /**
      * Publishes a complete immutable contract. Active turns, tool calls, dictation and Live Voice
@@ -710,41 +1003,40 @@ class AndroidCodexSessionHost internal constructor(
     }
 
     fun previewSpeech(): Boolean {
-        val available = speechCredentialStatus() == SpeechCredentialStatus.AVAILABLE
+        val available = hasCodexSpeechAccess()
         val microphoneAllowsSpeech = synchronized(this) { !dictationActive } &&
             !AndroidLiveVoiceRuntime.isCaptureRequestedOrActive()
-        if (!available || !microphoneAllowsSpeech) return false
+        if (!available || !microphoneAllowsSpeech || !isSpeechAudible()) return false
         val id = TtsMessageId("hans-preview-${previewSequence.incrementAndGet()}")
-        ttsCoordinator.submit(
+        return beginExplicitReadAloud(
             TtsMessageRevision(
                 messageId = id,
                 revision = 1,
-                text = "Hallo, ich bin Hans. So klinge ich mit diesen Einstellungen.",
+                text = AndroidHansTextResolver(appContext).text(R.string.integration_preview_voice),
                 kind = TtsMessageKind.FINAL_OUTPUT,
                 isFinal = true,
             ),
         )
-        return true
     }
 
     /**
      * Explicit user replay of one already-visible Hans response. This deliberately reuses the
-     * process-owned streaming queue, effective voice/speed and the same credential/capture gates
-     * as the ordinary speech preview. A fresh id prevents a completed timeline revision from
+     * process-owned native speech queue, the selected Live voice and the capture gates
+     * of the ordinary speech preview. A fresh id prevents a completed timeline revision from
      * being mistaken for a duplicate while leaving the visible Codex history untouched.
      */
     fun replayVisibleAssistantMessage(text: String): Boolean {
-        val available = speechCredentialStatus() == SpeechCredentialStatus.AVAILABLE
+        val available = hasCodexSpeechAccess()
         val microphoneAllowsSpeech = synchronized(this) { !dictationActive } &&
             !AndroidLiveVoiceRuntime.isCaptureRequestedOrActive()
-        if (!available || !microphoneAllowsSpeech || text.isBlank()) return false
+        if (!available || !microphoneAllowsSpeech || !isSpeechAudible() || text.isBlank()) return false
         val spokenText = AssistantMarkdown.parse(text, complete = true).spokenText
         if (
             spokenText.isBlank() ||
-            spokenText.length > StreamingTtsCoordinator.MAX_MESSAGE_CHARACTERS
+            spokenText.length > CodexReadAloudSession.MAX_TEXT_CHARACTERS
         ) return false
         val id = TtsMessageId("hans-replay-${previewSequence.incrementAndGet()}")
-        ttsCoordinator.submit(
+        return beginExplicitReadAloud(
             TtsMessageRevision(
                 messageId = id,
                 revision = 1,
@@ -753,10 +1045,40 @@ class AndroidCodexSessionHost internal constructor(
                 isFinal = true,
             ),
         )
-        return true
     }
 
-    fun stopSpeech() = ttsCoordinator.stop()
+    private fun beginExplicitReadAloud(revision: TtsMessageRevision): Boolean {
+        val audible = isSpeechAudible() && !AndroidLiveVoiceRuntime.isCaptureRequestedOrActive()
+        return synchronized(this) {
+            if (!audible || dictationActive || !hasCodexSpeechAccess()) return@synchronized false
+            notificationSpeechState.advanceGate()
+            speechAdmission.preview(revision)
+            true
+        }
+    }
+
+    fun stopSpeech() {
+        synchronized(this) { speechAdmission.revoke() }
+        notificationReadAloud.stop()
+        ttsCoordinator.stop()
+    }
+
+    private fun stopSpeechAndAwait(timeoutMillis: Long): Boolean {
+        val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(timeoutMillis)
+        if (!stopNotificationSpeechAndAwait(timeoutMillis)) return false
+        val remaining = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime())
+        return remaining > 0 && codexReadAloud.stopOutputAndAwait(remaining)
+    }
+
+    private fun stopNotificationSpeechAndAwait(timeoutMillis: Long): Boolean {
+        val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(timeoutMillis)
+        // Revoke queued work first, so no delayed preparation can claim a new native lease.
+        notificationReadAloud.stop()
+        ttsCoordinator.stop()
+        if (!notificationReadAloud.stopAndAwait(timeoutMillis)) return false
+        val remaining = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime())
+        return remaining > 0 && ttsCoordinator.stopAndAwait(remaining)
+    }
 
     /**
      * This boundary accepts only the typed output of the isolated notification classifier. It
@@ -833,6 +1155,7 @@ class AndroidCodexSessionHost internal constructor(
         }
 
     fun clearValidatedNotificationSuggestions(): Boolean = synchronized(dispatchLock) {
+        if (!cancelNativeNotificationSpeechAndAwait()) return@synchronized false
         // A privacy purge raises the shared fence before entering this method, which deliberately
         // hides every center record. Cancellation therefore cannot depend on enumerating IDs:
         // invalidate every host attempt and await the physical stop before clearing the center.
@@ -848,6 +1171,7 @@ class AndroidCodexSessionHost internal constructor(
 
     /** Unknown listener state hides Center data globally and stops audio, but keeps its stage. */
     fun quarantineValidatedNotificationOutput(): Boolean = synchronized(dispatchLock) {
+        if (!cancelNativeNotificationSpeechAndAwait()) return@synchronized false
         beginNotificationRevocationAndAwaitStop()
     }
 
@@ -861,13 +1185,14 @@ class AndroidCodexSessionHost internal constructor(
         }
 
     fun setDictationActive(active: Boolean) {
+        val audible = isSpeechAudible()
+        val allowIntermediate = readAloudAllowsIntermediate()
         val changed = synchronized(this) {
-            if (dictationActive == active) {
-                false
-            } else {
-                dictationActive = active
-                true
-            }
+            speechAdmission.setInputHeld(active,
+                baselineOrder = currentSnapshot?.timeline?.maxOfOrNull { it.order } ?: 0L,
+                audible = audible && hasCodexSpeechAccess(),
+                allowIntermediate = allowIntermediate,
+                prepareAfterRelease = currentSnapshot?.requiresCodexActiveWork() == true)
         }
         NotificationTriageIntegration.setInteractiveActivity(
             NotificationInteractiveActivity.DICTATION,
@@ -892,19 +1217,46 @@ class AndroidCodexSessionHost internal constructor(
         if (!synchronized(this) { dictationActive }) return false
         return awaitMicrophoneCaptureAudioSilence(
             timeoutMillis = DICTATION_TTS_STOP_TIMEOUT_MILLIS,
-            stopAndAwait = ttsCoordinator::stopAndAwait,
+            stopAndAwait = ::stopSpeechAndAwait,
         )
+    }
+
+    /** Continuous dictation owns its answer too; never start a second reader on release. */
+    fun setContinuousDictationActive(active: Boolean) {
+        synchronized(this) {
+            speechAdmission.revoke()
+            speechAdmission.setInputHeld(active,
+                baselineOrder = currentSnapshot?.timeline?.maxOfOrNull { it.order } ?: 0L,
+                audible = false, allowIntermediate = false, prepareAfterRelease = false)
+            speechAdmission.revoke()
+        }
+        NotificationTriageIntegration.setInteractiveActivity(NotificationInteractiveActivity.DICTATION, active)
+        if (active) {
+            blockNotificationSpeechForInteraction()
+            ttsCoordinator.stop()
+        } else {
+            resumeDeferredNotificationSpeech()
+            dynamicToolCoordinator.onActivityChanged()
+        }
     }
 
     /** Live Voice shares the same acknowledged physical-output boundary as dictation capture. */
     fun awaitLiveVoiceCaptureReady(): Boolean = awaitMicrophoneCaptureAudioSilence(
         timeoutMillis = LIVE_VOICE_TTS_STOP_TIMEOUT_MILLIS,
-        stopAndAwait = ttsCoordinator::stopAndAwait,
+        stopAndAwait = ::stopSpeechAndAwait,
     )
 
     /** Persist first. Failed/offline submissions require an explicit retry, never a reconnect. */
-    fun submitDictationTranscript(transcript: String, recordingId: RecordingId? = null): Boolean {
+    fun submitDictationTranscript(
+        transcript: String,
+        recordingId: RecordingId? = null,
+        admissionStillValid: () -> Boolean = { true },
+    ): Boolean {
         synchronized(dispatchLock) {
+            // Revalidate the recording lease at the durable submission boundary. A late clip
+            // cannot silently become input to a replacement account or conversation.
+            if (!admissionStillValid()) return false
+            val expectedThreadId = snapshot()?.session?.currentThreadId
             val stored = runCatching { pendingDictationStore.enqueue(transcript) }.getOrElse {
                 publishPendingDictations()
                 return false
@@ -912,7 +1264,7 @@ class AndroidCodexSessionHost internal constructor(
             if (recordingId != null) HansDictationRuntime.awaitDelivery(recordingId, stored.id)
             // This is a durable safety receipt, not a user-send queue. Attempt the completed
             // text immediately (BUSY -> turn/steer) before publishing any manual recovery UI.
-            tryDispatchPendingDictation(stored.id)
+            tryDispatchPendingDictation(stored.id, expectedThreadId)
             publishPendingDictations()
             return true
         }
@@ -969,6 +1321,7 @@ class AndroidCodexSessionHost internal constructor(
     fun remoteControlSettingsOpened(): Boolean = currentClient()?.remoteControlSettingsOpened() == true
     /** Called only after the visible Settings consent dialog, before any enable RPC. */
     fun remoteControlEnable(activity: android.app.Activity): Boolean {
+        if (!ai.hans.standard.remotecontrol.DesktopRemoteAccessPolicy.enabled) return false
         if (Looper.myLooper() != Looper.getMainLooper()) return false
         if (remoteForegroundSubscription == null) {
             remoteLifecycle.seedStopSequence(HansActiveWorkOwner.foregroundSnapshot().remoteStopRequestSequence)
@@ -987,7 +1340,8 @@ class AndroidCodexSessionHost internal constructor(
         if (Looper.myLooper() != Looper.getMainLooper()) return false
         return remoteLifecycle.requestDisable()
     }
-    fun remoteControlPair(): Boolean = currentClient()?.remoteControlPair() == true
+    fun remoteControlPair(): Boolean = ai.hans.standard.remotecontrol.DesktopRemoteAccessPolicy.enabled &&
+        currentClient()?.remoteControlPair() == true
     fun remoteControlRefresh(): Boolean = currentClient()?.remoteControlRefresh() == true
     fun remoteControlRefreshClients(): Boolean = currentClient()?.remoteControlRefreshClients() == true
     fun remoteControlLoadMoreClients(): Boolean = currentClient()?.remoteControlLoadMoreClients() == true
@@ -1010,9 +1364,244 @@ class AndroidCodexSessionHost internal constructor(
         return true
     }
 
-    fun logout(): Boolean = currentClient()?.logout() == true
+    /** Called only by the user's confirmed recovery dialog, never by a model or bootstrap retry. */
+    fun startNewConversationAfterRecoveryFailure(): Boolean = synchronized(dispatchLock) {
+        val active = currentClient() ?: return@synchronized false
+        val selected = runCatching { sessionStore.readThreadId() }.getOrNull()
+        val accepted = ExplicitConversationRecoveryPolicy.startConfirmed(
+            client = active.snapshot(),
+            realtimeState = active.realtimeDiagnostics().state,
+            selectedThreadId = selected,
+            preserveSelected = sessionStore::preserveSelectedThreadForExplicitRecovery,
+            restart = { active.restart() },
+        )
+        if (accepted) Log.i("HansSessionRecovery", "explicit_reference_preserved=true restart_requested=true")
+        accepted
+    }
 
-    fun interrupt(): Boolean = currentClient()?.interrupt() == true
+    fun logout(): Boolean = (currentClient()?.logout() == true).also { if (it) stopSpeech() }
+
+    fun interrupt(): Boolean {
+        (appContext as? ai.hans.standard.HansApplication)?.whatsAppAgentChannel?.cancelPending()
+        return currentClient()?.interrupt() == true
+    }
+
+    /** Host-owned native external facts. Never a fake user message or a callable model tool. */
+    internal fun dispatchNotificationEvent(
+        message: NativeNotificationExternalMessage,
+        expectedThreadId: String,
+        source: NativeNotificationSpeechAdmission.Source,
+        beforeTransport: () -> Boolean,
+        onReceipt: (NativeNotificationDispatchReceipt) -> Unit,
+    ): NativeNotificationDispatchResult = synchronized(dispatchLock) {
+        if (!internetStatus().permitsExplicitRequest ||
+            appContext.getSystemService(android.app.KeyguardManager::class.java)?.isDeviceLocked != false ||
+            AndroidLiveVoiceRuntime.isCaptureRequestedOrActive()) {
+            return@synchronized NativeNotificationDispatchResult.RejectedBeforeTransport
+        }
+        val owner = currentClient() ?: return@synchronized NativeNotificationDispatchResult.RejectedBeforeTransport
+        val current = owner.snapshot()
+        if (current.session.currentThreadId != expectedThreadId || current.session.account.phase != AccountPhase.SIGNED_IN ||
+            synchronized(this) { dictationActive || notificationRevocationInProgress || speechAdmission.dispatchPending }) {
+            return@synchronized NativeNotificationDispatchResult.RejectedBeforeTransport
+        }
+        val observedAt = org.json.JSONObject(message.payloadJson).optLong("observedAtEpochMillis", -1L)
+        val initiallyAudible = isNotificationSpeechAudibleAtCommit()
+        val baselineOrder = current.timeline.maxOfOrNull { it.order } ?: 0L
+        // Native intake is not relevance or speech authority. Only an explicit source-bound
+        // report selected by main Hans may later initialize the mic-free output queue.
+        val speechToken = synchronized(this) {
+            val gate = nativeNotificationSpeechGateReason()
+                ?: if (!initiallyAudible) "initial_audio_not_audible" else null
+                ?: if (observedAt <= nativeNotificationSilentThroughEpochMillis) "mute_backlog_suppressed" else null
+            nativeNotificationSpeechAdmission.begin(message.eventId, source, expectedThreadId,
+                notificationReportOwnerRevision,
+                baselineOrder, observedAt, gate)
+        }
+        val result = owner.dispatchNotificationEvent(message, expectedThreadId, beforeTransport) { receipt ->
+            // Publish ONLY pure immutable ACK correlation before snapshots can consume a FINAL.
+            // This private monitor calls no host/controller, ledger, Android service or audio.
+            nativeNotificationSpeechAdmission.receipt(speechToken, receipt)
+            // Controller callbacks hold its monitor. All Android/ledger/delivery work enqueues.
+            notificationAudioPolicyHandler.post {
+                synchronized(this) {
+                    if (client === owner && currentSnapshot?.session?.currentThreadId == expectedThreadId) {
+                        currentDeliveryLocked(emptyList())?.let(::enqueueSnapshotDelivery)
+                    }
+                }
+                onReceipt(receipt)
+            }
+        }
+        if (result !is NativeNotificationDispatchResult.Submitted) {
+            if (result == NativeNotificationDispatchResult.RejectedBeforeTransport)
+                nativeNotificationSpeechAdmission.unsent(speechToken)
+            else nativeNotificationSpeechAdmission.receipt(speechToken, NativeNotificationDispatchReceipt.OutcomeAmbiguous)
+        }
+        result
+    }
+
+    internal fun notificationHookOutcomeDiagnostics(): ai.hans.standard.notifications.hooks.NotificationHookOutcomeSnapshot =
+        nativeNotificationSpeechAdmission.snapshot()
+
+    /** Only main Hans' exact report call selects a relevant notice. Ordinary FINALs never do. */
+    private fun reportNotificationEvent(call: DynamicToolCallParams, eventId: String, text: String,
+        admitEffect: () -> Boolean): ai.hans.standard.phone.notifications.NotificationEventReportResult {
+        val app = appContext as? ai.hans.standard.HansApplication
+            ?: return ai.hans.standard.phone.notifications.NotificationEventReportResult.Rejected("notification_report_unavailable")
+        val owner = synchronized(this) { client to notificationReportOwnerRevision }
+        val source = nativeNotificationSpeechAdmission.awaitSourceForReport(eventId, call.threadId,
+            call.turnId, owner.second, 3_000)
+        val cleaned = AssistantOutputSanitizer.sanitize(text)
+        if (cleaned.isBlank()) return ai.hans.standard.phone.notifications.NotificationEventReportResult.Rejected("notification_report_empty")
+        // ACK waits above hold no Host/privacy/controller locks. The unchanged call's execution
+        // gate is re-entered at the actual visible boundary, so a local Stop wins meanwhile.
+        val result = synchronized(ai.hans.standard.phone.notifications.NotificationPrivacyMutationCoordinator.lock) {
+            if (!isInteractiveDynamicToolCall(call)) return@synchronized ai.hans.standard.phone.notifications.NotificationEventReportResult.Rejected("notification_report_origin_forbidden")
+            synchronized(this) report@{
+                val current = currentSnapshot
+                if (client !== owner.first || notificationReportOwnerRevision != owner.second ||
+                    current?.session?.currentThreadId != call.threadId || current.session.account.phase != AccountPhase.SIGNED_IN ||
+                    current.runtimePhase != ClientRuntimePhase.READY || current.workInterrupt.phase == ClientWorkInterruptPhase.PENDING ||
+                    current.terminalTurns.any { it.threadId == call.threadId && it.turnId == call.turnId } ||
+                    notificationRevocationInProgress) return@report ai.hans.standard.phone.notifications.NotificationEventReportResult.Rejected("notification_report_owner_changed")
+                val persisted = app.notificationEvents.persistedReport(eventId, call.threadId, call.turnId)
+                if (source == null) {
+                    // A process-resumed exact durable receipt is display-only and never replays
+                    // sound. It cannot create a new report or change the original text.
+                    if (persisted == null || persisted.textSha256 != ai.hans.standard.notifications.hooks.notificationEventSha256(cleaned))
+                        return@report ai.hans.standard.phone.notifications.NotificationEventReportResult.Rejected("notification_report_native_ack_pending")
+                    if (!admitEffect()) return@report ai.hans.standard.phone.notifications.NotificationEventReportResult.Rejected("dynamic_tool_cancelled")
+                    return@report ai.hans.standard.phone.notifications.NotificationEventReportResult.Presented(persisted.id, false, true)
+                }
+                if (!app.notificationEvents.isReportSourceCurrent(eventId, call.threadId, source))
+                    return@report ai.hans.standard.phone.notifications.NotificationEventReportResult.Rejected("notification_report_source_revoked")
+                if (!admitEffect()) return@report ai.hans.standard.phone.notifications.NotificationEventReportResult.Rejected("dynamic_tool_cancelled")
+                val candidate = ai.hans.standard.notifications.hooks.NotificationEventReport(
+                    "hans-notice-" + java.util.UUID.randomUUID().toString(), cleaned,
+                    ai.hans.standard.notifications.hooks.notificationEventSha256(cleaned),
+                    current.timeline.filter { it.role in setOf(ClientTimelineRole.USER, ClientTimelineRole.HANS) }
+                        .maxByOrNull { it.order }?.id)
+                val stored = app.notificationEvents.commitReport(eventId, call.threadId, call.turnId, source, candidate)
+                    ?: return@report ai.hans.standard.phone.notifications.NotificationEventReportResult.Rejected("notification_report_commit_failed_or_conflict")
+                if (persisted != null) return@report ai.hans.standard.phone.notifications.NotificationEventReportResult.Presented(stored.id, false, true)
+                val gate = nativeNotificationSpeechGateReason()
+                    ?: if (!isNotificationSpeechAudibleAtCommit()) "initial_audio_not_audible" else null
+                val epoch = speechAdmission.ensureOutputEpoch(rotateQuiescentSupplement =
+                    codexOutputReleaseConfirmed && !nativeNotificationSpeechAdmission.hasOutstandingSpeech(speechAdmission.epoch))
+                when (val report = nativeNotificationSpeechAdmission.report(eventId, call.threadId, call.turnId,
+                    owner.second, stored.text, stored.timelineAnchorId, epoch, gate, stored.id)) {
+                    is NativeNotificationSpeechAdmission.ReportResult.Rejected ->
+                        ai.hans.standard.phone.notifications.NotificationEventReportResult.Rejected(report.code)
+                    is NativeNotificationSpeechAdmission.ReportResult.Presented -> {
+                        val queued = report.speechAllowed && speechAdmission.submitSupplementary(TtsMessageRevision(
+                            TtsMessageId(report.card.id), 1, ai.hans.standard.text.AssistantMarkdown.parse(stored.text, true).spokenText,
+                            TtsMessageKind.FINAL_OUTPUT, true), epoch, gate == null, readAloudAllowsIntermediate())
+                        nativeNotificationSpeechAdmission.reportSubmissionResult(report.card.id, queued)
+                        ai.hans.standard.phone.notifications.NotificationEventReportResult.Presented(report.card.id, queued, report.replay)
+                    }
+                }
+            }
+        }
+        if (result is ai.hans.standard.phone.notifications.NotificationEventReportResult.Presented) publishNotificationReports()
+        return result
+    }
+
+    /** Source privacy invalidation cannot retract cloud context but must revoke its local output. */
+    internal fun cancelNativeNotificationSpeech() {
+        if (revokeNativeNotificationSpeech()) codexReadAloud.cancelMessages(
+            synchronized(this) { nativeNotificationRevokedOutputIds.mapTo(linkedSetOf(), ::TtsMessageId) })
+    }
+
+    internal fun cancelNativeNotificationSpeechAndAwait(
+        timeoutMillis: Long = NOTIFICATION_PRIVACY_STOP_TIMEOUT_MILLIS,
+    ): Boolean {
+        if (!revokeNativeNotificationSpeech()) return true
+        val ids = synchronized(this) { nativeNotificationRevokedOutputIds.toSet() }
+        val confirmed = codexReadAloud.cancelMessagesAndAwait(ids.mapTo(linkedSetOf(), ::TtsMessageId), timeoutMillis)
+        if (confirmed) synchronized(this) {
+            nativeNotificationSpeechAdmission.confirmOutputsReleased(ids)
+            nativeNotificationRevokedOutputIds.removeAll(ids)
+            nativeNotificationOutputStopRequired = nativeNotificationRevokedOutputIds.isNotEmpty()
+        }
+        return confirmed
+    }
+
+    /** A routine unrelated REMOVED is not a global mute/privacy event. */
+    internal fun cancelNativeNotificationSourceSpeechAndAwait(
+        source: NativeNotificationSpeechAdmission.Source,
+        timeoutMillis: Long = NOTIFICATION_PRIVACY_STOP_TIMEOUT_MILLIS,
+    ): Boolean {
+        val removedOutputs = nativeNotificationSpeechAdmission.revokeSource(source)
+        publishNotificationReports()
+        val mustStop = synchronized(this) {
+            nativeNotificationRevokedOutputIds.addAll(removedOutputs)
+            if (removedOutputs.isNotEmpty()) nativeNotificationOutputStopRequired = true
+            nativeNotificationOutputStopRequired
+        }
+        if (!mustStop) return true // queued outputs are protected by their source-specific guard
+        val ids = synchronized(this) { nativeNotificationRevokedOutputIds.toSet() }
+        val confirmed = codexReadAloud.cancelMessagesAndAwait(ids.mapTo(linkedSetOf(), ::TtsMessageId), timeoutMillis)
+        if (confirmed) synchronized(this) {
+            nativeNotificationSpeechAdmission.confirmOutputsReleased(ids)
+            nativeNotificationRevokedOutputIds.removeAll(ids)
+            nativeNotificationOutputStopRequired = nativeNotificationRevokedOutputIds.isNotEmpty()
+        }
+        return confirmed
+    }
+
+    private fun revokeNativeNotificationSpeech(): Boolean {
+        val shouldStop = synchronized(this) {
+            nativeNotificationSilentThroughEpochMillis = maxOf(nativeNotificationSilentThroughEpochMillis, System.currentTimeMillis())
+            val revokedOutputs = nativeNotificationSpeechAdmission.revokeAll("privacy_revoked")
+            nativeNotificationRevokedOutputIds.addAll(revokedOutputs)
+            if (revokedOutputs.isNotEmpty()) nativeNotificationOutputStopRequired = true
+            nativeNotificationOutputStopRequired
+        }
+        publishNotificationReports()
+        return shouldStop
+    }
+
+    /** No model may call this boundary. Only a durable claim from locally enrolled intake enters. */
+    internal fun dispatchWhatsAppAgentRequest(
+        channel: ai.hans.standard.notifications.agentchannel.WhatsAppAgentChannel,
+        receipt: ai.hans.standard.notifications.agentchannel.AgentChannelRequestReceipt,
+    ): CodexDispatchAttemptResult = synchronized(ai.hans.standard.phone.notifications.NotificationPrivacyMutationCoordinator.lock) {
+        synchronized(dispatchLock) {
+            synchronized(channel) claim@{
+                val current = snapshot()
+                if (!channel.isCurrent(receipt) ||
+                    current?.runtimePhase != ClientRuntimePhase.READY ||
+                    current.sessionPhase != ClientSessionPhase.READY ||
+                    current.session.account.phase != AccountPhase.SIGNED_IN ||
+                    current.migrationReadiness.activeTurn ||
+                    !NotificationTriageIntegration.isInteractiveIdle() ||
+                    (appContext as? ai.hans.standard.HansApplication)?.whatsAppAgentChannel?.intakeAvailable() != true ||
+                    appContext.getSystemService(android.app.KeyguardManager::class.java)?.isDeviceLocked != false ||
+                    NotificationPrivacyRepository(appContext).captureDecision("com.whatsapp") !=
+                        ai.hans.standard.phone.notifications.NotificationCaptureDecision.Allowed ||
+                    !ai.hans.standard.phone.publicapi.ActiveNotificationReplyRegistry.processWide.isAvailable()
+                ) return@claim CodexDispatchAttemptResult.RejectedBeforeTransport
+                val target = ai.hans.standard.phone.publicapi.ActiveNotificationReplyRegistry.processWide
+                    .replyTargetForAgentRequest(receipt)
+                val action = target?.actions?.firstOrNull { it.acceptsFreeFormText && !it.authenticationRequired }
+                val clientId = "whatsapp-agent-${receipt.id}"
+                val threadId = current.session.currentThreadId
+                    ?: return@claim CodexDispatchAttemptResult.RejectedBeforeTransport
+                if (!channel.prepareDispatch(receipt.id, threadId, clientId)) {
+                    return@claim CodexDispatchAttemptResult.RejectedBeforeTransport
+                }
+                dispatchSerial(
+                    input = listOf(CodexInput.Text(WhatsAppAgentRequestPrompt.build(
+                        receipt, target?.replyToken.takeIf { action != null }, action?.actionIndex,
+                    ))),
+                    selection = null,
+                    readResponseAloud = false,
+                    clientUserMessageId = clientId,
+                    expectedThreadId = threadId,
+                )
+            }
+        }
+    }
 
     fun dispatch(
         input: List<CodexInput>,
@@ -1038,6 +1627,7 @@ class AndroidCodexSessionHost internal constructor(
         selection: DispatchSelection?,
         readResponseAloud: Boolean,
         clientUserMessageId: String? = null,
+        expectedThreadId: String? = null,
     ): CodexDispatchAttemptResult {
         // This is a cloud submission boundary only; local Android capabilities remain available.
         // A VPN can suppress Android validation, so LIMITED/UNKNOWN allow an explicit attempt.
@@ -1050,16 +1640,12 @@ class AndroidCodexSessionHost internal constructor(
         val effectiveInput = NotificationFullAccessTurnIsolation.explicitInput(input)
             ?: return CodexDispatchAttemptResult.RejectedBeforeTransport
         val active: CodexSessionClient
-        val previousSpeechIntent: SpeechTurnIntent
         val baselineOrder: Long
-        val epoch: Long
+        val speechDispatch: CodexSpeechAdmission.Dispatch
         synchronized(this) {
             active = client ?: return CodexDispatchAttemptResult.RejectedBeforeTransport
-            previousSpeechIntent = speechIntent
             baselineOrder = currentSnapshot?.timeline?.maxOfOrNull { it.order } ?: 0L
-            speechDispatchEpoch += 1
-            epoch = speechDispatchEpoch
-            pendingSpeechDispatch = PendingSpeechDispatch(epoch, previousSpeechIntent)
+            speechDispatch = speechAdmission.beginDispatch()
         }
         // Reserve foreground priority before the App Server frame can leave this process. Waiting
         // for the later client snapshot leaves a running restricted triage process competing with
@@ -1074,8 +1660,13 @@ class AndroidCodexSessionHost internal constructor(
                 effectiveInput,
                 selection,
                 clientUserMessageId,
+                expectedThreadId = expectedThreadId,
             )
         } catch (failure: Exception) {
+            val resumed = synchronized(this) {
+                if (speechAdmission.rejectDispatch(speechDispatch)) currentDeliveryLocked(emptyList()) else null
+            }
+            resumed?.let(::enqueueSnapshotDelivery)
             restoreCodexInteractiveActivityFromSnapshot()
             throw failure
         }
@@ -1083,26 +1674,23 @@ class AndroidCodexSessionHost internal constructor(
         if (dispatchAttempt !is CodexDispatchAttemptResult.Accepted) {
             restoreCodexInteractiveActivityFromSnapshot()
         }
+        val audible = isSpeechAudible()
+        val allowIntermediate = readAloudAllowsIntermediate()
+        var newSpeechTurn = false
         val completion = synchronized(this) {
-            if (epoch != speechDispatchEpoch) {
-                DispatchCompletion(accepted, null)
-            } else if (accepted == null || client !== active) {
-                speechIntent = previousSpeechIntent
-                pendingSpeechDispatch = null
-                DispatchCompletion(null, currentDeliveryLocked(emptyList()))
-            } else {
-                speechIntent = SpeechTurnIntent(
-                    readAloud = readResponseAloud,
-                    speakAfterOrderExclusive = baselineOrder,
-                )
-                pendingSpeechDispatch = null
-                DispatchCompletion(accepted, currentDeliveryLocked(emptyList()))
-            }
+            val result = speechAdmission.finishDispatch(speechDispatch,
+                accepted = accepted != null && client === active,
+                readAloud = readResponseAloud, baselineOrder = baselineOrder,
+                audible = audible && hasCodexSpeechAccess(), allowIntermediate = allowIntermediate)
+            newSpeechTurn = result == CodexSpeechAdmission.Completion.ACCEPTED
+            DispatchCompletion(accepted.takeIf { client === active },
+                if (result == CodexSpeechAdmission.Completion.SUPERSEDED) null
+                else currentDeliveryLocked(emptyList()))
         }
         if (completion.acceptedMessageId != null) {
             // Only an accepted new user turn supersedes old spoken output. A
             // locally rejected send leaves the prior queue untouched.
-            ttsCoordinator.stop()
+            if (newSpeechTurn) ttsCoordinator.stop()
             updateActiveWorkReason(HansActiveWorkReason.CODEX_ACTIVE, true)
         }
         completion.delivery?.let(::enqueueSnapshotDelivery)
@@ -1497,7 +2085,7 @@ class AndroidCodexSessionHost internal constructor(
             developerInstructions = DeveloperInstructionsProvider {
                 currentDeveloperInstructions()
             },
-            dynamicToolExecutor = toolContract,
+            dynamicToolExecutor = phoneToolFence.wrap(toolContract),
             protocolDiagnostics = { summary -> Log.w(PROTOCOL_DIAGNOSTIC_TAG, summary) },
             pluginInstallTransactions = pluginInstallTransactions,
             pluginUninstallTransactions = pluginUninstallTransactions,
@@ -1506,10 +2094,22 @@ class AndroidCodexSessionHost internal constructor(
             pluginSurfaceEvidenceStager = pluginSurfaceEvidenceStager,
         )
         val observer = CodexClientObserver { snapshot ->
+            var stopLegacySpeech = false
             val delivery: SnapshotDelivery? = synchronized(this) {
                 if (client !== newClient) {
                     null
                 } else {
+                    val previous = currentSnapshot
+                    if (previous != null && (previous.generation != snapshot.generation ||
+                        previous.session.currentThreadId != snapshot.session.currentThreadId ||
+                        previous.session.account.identity != snapshot.session.account.identity ||
+                        (previous.session.account.phase == AccountPhase.SIGNED_IN &&
+                            snapshot.session.account.phase != AccountPhase.SIGNED_IN))) {
+                        notificationReportOwnerRevision++
+                        nativeNotificationSpeechAdmission.revokeAll("session_changed")
+                        speechAdmission.revoke()
+                        stopLegacySpeech = true
+                    }
                     currentSnapshot = snapshot
                     SnapshotDelivery(
                         clientEpoch = clientEpoch,
@@ -1518,6 +2118,7 @@ class AndroidCodexSessionHost internal constructor(
                     )
                 }
             }
+            if (stopLegacySpeech) ttsCoordinator.stop()
             if (delivery != null) {
                 if (
                     liveVoiceContextRefreshGate.shouldRefresh(
@@ -1556,6 +2157,7 @@ class AndroidCodexSessionHost internal constructor(
             } catch (failure: Throwable) {
                 runCatching { newClient.removeObserver(observer) }
                 runCatching { newClient.stop() }
+                runCatching { newClient.closeRemotePhoneTools() }
                 throw failure
             }
         }
@@ -1565,12 +2167,12 @@ class AndroidCodexSessionHost internal constructor(
             runtime = connectedRuntime
             client = newClient
             clientObserver = observer
-            speechIntent = SpeechTurnIntent.SILENT
-            pendingSpeechDispatch = null
+            speechAdmission.revoke()
             old
         }
         previous?.let { (oldClient, oldObserver) ->
             runCatching { oldClient.removeObserver(oldObserver) }
+            oldClient.closeRemotePhoneTools()
         }
         if (stopPreviousGeneration) previous?.first?.let { oldClient ->
             runCatching { oldClient.stop() }
@@ -1609,10 +2211,18 @@ class AndroidCodexSessionHost internal constructor(
         }
     }
 
+    private fun onPhoneToolWorkQuiescent() {
+        // A logical turn may have ended before its cancelled platform action finished. Resume
+        // deferred contract work on that real completion event, without an idle timer/poll.
+        remoteControlMain.post { dynamicToolCoordinator.onActivityChanged() }
+    }
+
     private fun hasActiveDynamicToolContractWork(): Boolean = synchronized(this) {
         if (
-            dictationActive || liveVoiceActiveForDynamicTools ||
-            dynamicToolGenerationTransitionActive
+            phoneToolFence.hasActiveWork || dictationActive || liveVoiceActiveForDynamicTools ||
+            dynamicToolGenerationTransitionActive || codexSpeechState.holdsSpeechActiveWork() ||
+            notificationCodexSpeechState.holdsSpeechActiveWork() || !codexOutputReleaseConfirmed ||
+            !notificationOutputReleaseConfirmed
         ) {
             return@synchronized true
         }
@@ -1727,8 +2337,7 @@ class AndroidCodexSessionHost internal constructor(
             runtime = null
             client = null
             clientObserver = null
-            speechIntent = SpeechTurnIntent.SILENT
-            pendingSpeechDispatch = null
+            speechAdmission.revoke()
             val failed = currentSnapshot?.copy(
                 runtimePhase = ClientRuntimePhase.FAILED,
                 sessionPhase = ClientSessionPhase.FAILED,
@@ -1740,7 +2349,10 @@ class AndroidCodexSessionHost internal constructor(
                 delivery = failed?.let { SnapshotDelivery(clientEpoch, it, observers.toList()) },
             )
         }
-        result.previous?.let { (oldClient, oldObserver) -> oldClient.removeObserver(oldObserver) }
+        result.previous?.let { (oldClient, oldObserver) ->
+            oldClient.removeObserver(oldObserver)
+            oldClient.closeRemotePhoneTools()
+        }
         updateAutomationCorrelations(null)
         setNotificationCodexWorkActive(false)
         NotificationTriageIntegration.setInteractiveActivity(
@@ -1758,32 +2370,56 @@ class AndroidCodexSessionHost internal constructor(
     }
 
     private fun deliverSnapshot(delivery: SnapshotDelivery) {
-        val speech = synchronized(this) {
+        synchronized(this) {
             if (
                 clientEpoch != delivery.clientEpoch ||
                 currentSnapshot !== delivery.snapshot
             ) {
                 return
             }
-            if (pendingSpeechDispatch != null) null else speechIntent
         }
         updateActiveWorkReason(
             HansActiveWorkReason.CODEX_ACTIVE,
             delivery.snapshot.requiresCodexActiveWork(),
         )
         remoteControlMain.post { reconcileRemoteProtection() }
-        if (speech != null) {
-            val enabled =
-                speech.readAloud &&
-                    !synchronized(this) { dictationActive } &&
-                    speechCredentialStatus() == SpeechCredentialStatus.AVAILABLE &&
-                    isSpeechAudible()
-            timelineSpeechProjector.accept(
-                snapshot = delivery.snapshot,
-                enabled = enabled,
-                speakAfterOrderExclusive = speech.speakAfterOrderExclusive,
-            ).forEach(ttsCoordinator::submit)
+        val audible = isSpeechAudible()
+        val liveCapture = AndroidLiveVoiceRuntime.isCaptureRequestedOrActive()
+        val allowIntermediate = readAloudAllowsIntermediate()
+        var reportThreadChanged = false
+        synchronized(this) {
+            // Revalidate after Android policy queries. Projection consumes revisions, so it must
+            // share the admission lock with epoch initialization and its nonblocking submit posts.
+            if (clientEpoch != delivery.clientEpoch || currentSnapshot !== delivery.snapshot) return
+            val access = hasCodexSpeechAccess()
+            val nativeGate = nativeNotificationSpeechGateReason()
+            val visibleNativeFinalIds = delivery.snapshot.timeline.filter { item ->
+                item.role == ClientTimelineRole.HANS && item.agentPhase == ai.hans.standard.codex.AgentMessagePhase.FINAL_ANSWER &&
+                    item.complete && ai.hans.standard.setup.HansSetupOutputSanitizer.sanitizeAssistantText(item.text,
+                        item.turnId != null && item.turnId in delivery.snapshot.setupTurnIds,
+                        AndroidHansTextResolver(appContext)).isNotBlank()
+            }.mapTo(linkedSetOf(), ClientTimelineItem::id)
+            nativeNotificationSpeechAdmission.observe(delivery.snapshot.session.currentThreadId,
+                notificationReportOwnerRevision, delivery.snapshot.timeline,
+                delivery.snapshot.terminalTurns, nativeGate) { item -> item.id in visibleNativeFinalIds }
+            val reportOutputOutstanding = nativeGate == null &&
+                nativeNotificationSpeechAdmission.hasOutstandingSpeech(speechAdmission.epoch)
+            speechAdmission.project(
+                audible = access && audible && !liveCapture,
+                forceDisable = !access || !audible || liveCapture,
+                allowIntermediate = allowIntermediate,
+                additionalReadAloud = reportOutputOutstanding,
+            ) { speech, enabled ->
+                timelineSpeechProjector.accept(
+                    snapshot = delivery.snapshot,
+                    enabled = enabled,
+                    speakAfterOrderExclusive = speech.baselineOrder,
+                )
+            }
+            reportThreadChanged = notificationReportDisplayedThread != delivery.snapshot.session.currentThreadId
+            notificationReportDisplayedThread = delivery.snapshot.session.currentThreadId
         }
+        if (reportThreadChanged) publishNotificationReports()
         delivery.observers.forEach { target ->
             runCatching { target.onSnapshot(delivery.snapshot) }
         }
@@ -1840,12 +2476,7 @@ class AndroidCodexSessionHost internal constructor(
             is TtsPlaybackEvent.InputRejected,
             -> {
                 synchronized(this) {
-                    if (notificationSpeechState.inFlight == attempt) {
-                        notificationSpeechState.inFlight = null
-                    }
-                    // The durable item remains pending. A fresh attempt ID is used exactly once
-                    // after the complete foreground pipeline next returns to idle.
-                    notificationSpeechState.deferredAnnouncementIds += attempt.announcementId
+                    if (!notificationSpeechState.dropPlayback(attempt)) return
                 }
                 drainPendingNotificationSpeech()
             }
@@ -1900,12 +2531,12 @@ class AndroidCodexSessionHost internal constructor(
                     announcementId = candidate.id,
                     playbackId = "${candidate.id}:attempt:$attemptSequence",
                     gateEpoch = notificationSpeechState.gateEpoch,
+                    deliveryEpoch = attemptSequence,
                 ),
             ).also { notificationSpeechState.inFlight = it.attempt }
         }
 
-        val credentialAvailable =
-            speechCredentialStatus() == SpeechCredentialStatus.AVAILABLE
+        val credentialAvailable = hasCodexSpeechAccess()
         val notificationSpeechAudible = isNotificationSpeechAudible()
         if (!credentialAvailable || !notificationSpeechAudible) {
             if (!notificationSpeechAudible) {
@@ -1932,19 +2563,21 @@ class AndroidCodexSessionHost internal constructor(
                 }
                 return
             }
-            ttsCoordinator.submitGuarded(
+            notificationReadAloud.beginTurn(reservation.attempt.deliveryEpoch)
+            notificationReadAloud.configure(true, false, reservation.attempt.deliveryEpoch)
+            notificationReadAloud.submitGuarded(
                 TtsMessageRevision(
                     messageId = TtsMessageId(reservation.attempt.playbackId),
                     revision = 1,
                     text = AssistantOutputSanitizer.sanitize(reservation.announcement.summary),
                     kind = TtsMessageKind.FINAL_OUTPUT,
                     isFinal = true,
-                ),
+                ), reservation.attempt.deliveryEpoch,
             ) {
                 synchronized(this) {
                     notificationSpeechState.inFlight == reservation.attempt &&
                         reservation.attempt.gateEpoch == notificationSpeechState.gateEpoch &&
-                        notificationSpeechGateOpenLocked() &&
+                        notificationSpeechGateOpenLocked(includeNotificationLease = false) &&
                         isNotificationSpeechAudibleAtCommit()
                 }
             }
@@ -1952,7 +2585,7 @@ class AndroidCodexSessionHost internal constructor(
         }
     }
 
-    private fun notificationSpeechGateOpenLocked(): Boolean =
+    private fun notificationSpeechGateOpenLocked(includeNotificationLease: Boolean = true): Boolean =
         !dictationActive &&
             !notificationCodexWorkActive &&
             !notificationLiveVoiceActive &&
@@ -1960,9 +2593,12 @@ class AndroidCodexSessionHost internal constructor(
             !notificationRevocationInProgress &&
             !notificationAudibilitySuppression.blocksSpeech &&
             !notificationSpeechState.requiresPhysicalStop() &&
-            pendingSpeechDispatch == null &&
+            codexOutputReleaseConfirmed &&
+            (!includeNotificationLease || notificationOutputReleaseConfirmed) &&
+            !speechAdmission.dispatchPending &&
             currentSnapshot?.requiresCodexActiveWork() != true &&
             AndroidLiveVoiceRuntime.snapshot().phase in LIVE_VOICE_TERMINAL_PHASES &&
+            !codexSpeechState.holdsSpeechActiveWork() &&
             ttsState in setOf(TtsPlaybackState.Idle, TtsPlaybackState.Stopped)
 
     private fun blockNotificationSpeechForInteraction() {
@@ -1988,7 +2624,7 @@ class AndroidCodexSessionHost internal constructor(
             if (active) notificationSpeechState.advanceGate()
             active && notificationSpeechState.inFlight != null
         }
-        if (shouldStop) ttsCoordinator.stop()
+        if (shouldStop) { notificationReadAloud.stop(); ttsCoordinator.stop() }
         if (!active) resumeDeferredNotificationSpeech()
     }
 
@@ -1999,17 +2635,17 @@ class AndroidCodexSessionHost internal constructor(
             if (active) notificationSpeechState.advanceGate()
             active && notificationSpeechState.inFlight != null
         }
-        if (shouldStop) ttsCoordinator.stop()
+        if (shouldStop) { notificationReadAloud.stop(); ttsCoordinator.stop() }
         if (!active) resumeDeferredNotificationSpeech()
     }
 
     private fun beginNotificationRevocationAndAwaitStop(): Boolean {
         val shouldStop = synchronized(this) {
             notificationRevocationInProgress = true
-            notificationSpeechState.cancelAllForPrivacyPurge()
+            notificationSpeechState.cancelAllForPrivacyPurge(!notificationOutputReleaseConfirmed)
         }
         if (!shouldStop) return true
-        val stopped = ttsCoordinator.stopAndAwait(NOTIFICATION_PRIVACY_STOP_TIMEOUT_MILLIS)
+        val stopped = stopNotificationSpeechAndAwait(NOTIFICATION_PRIVACY_STOP_TIMEOUT_MILLIS)
         if (stopped) {
             synchronized(this) { notificationSpeechState.acknowledgePhysicalStop() }
         }
@@ -2032,6 +2668,7 @@ class AndroidCodexSessionHost internal constructor(
     }
 
     private fun handleNotificationAudioPolicyChanged() {
+        if (!isSpeechAudible()) codexReadAloud.stop()
         if (reconcileNotificationSpeechAudibility()) {
             if (synchronized(this) { notificationSpeechState.requiresPhysicalStop() }) {
                 notificationPhysicalStopRecovery.request()
@@ -2049,7 +2686,7 @@ class AndroidCodexSessionHost internal constructor(
             if (!notificationAudibilitySuppression.beginReconciliation()) {
                 return audible && !notificationAudibilitySuppression.blocksSpeech
             }
-            val shouldStop = notificationSpeechState.pauseForInaudiblePolicy()
+            val shouldStop = notificationSpeechState.pauseForInaudiblePolicy(!notificationOutputReleaseConfirmed)
             notificationAudioMonitorArmed = false
             notificationAudioPolicyHandler.removeCallbacks(notificationAudioMonitor)
             shouldStop
@@ -2061,6 +2698,11 @@ class AndroidCodexSessionHost internal constructor(
             val cutoff = synchronized(this) {
                 notificationAudibilitySuppression.nextCutoffOrFinish()
             } ?: return isNotificationSpeechAudible()
+            synchronized(this) {
+                nativeNotificationSilentThroughEpochMillis = maxOf(nativeNotificationSilentThroughEpochMillis, cutoff)
+                val suppressed = nativeNotificationSpeechAdmission.suppressThrough(cutoff)
+                if (suppressed.isNotEmpty()) codexReadAloud.cancelMessages(suppressed.mapTo(linkedSetOf(), ::TtsMessageId))
+            }
             try {
                 notificationAnnouncements.suppressSpeechThrough(cutoff)
             } catch (_: Exception) {
@@ -2072,7 +2714,7 @@ class AndroidCodexSessionHost internal constructor(
         }
     }
 
-    private fun tryDispatchPendingDictation(id: String): Boolean {
+    private fun tryDispatchPendingDictation(id: String, expectedThreadId: String? = null): Boolean {
         try {
             synchronized(dispatchLock) {
                 if (synchronized(this) { dictationActive }) return false
@@ -2092,6 +2734,7 @@ class AndroidCodexSessionHost internal constructor(
                         selection = null,
                         readResponseAloud = true,
                         clientUserMessageId = messageId,
+                        expectedThreadId = expectedThreadId,
                     )
                 }.getOrDefault(CodexDispatchAttemptResult.TransportOutcomeAmbiguous)
                 when (result) {
@@ -2167,10 +2810,30 @@ class AndroidCodexSessionHost internal constructor(
             // The following policy/drain callback closes that period before any new attempt.
             if (!audible) {
                 synchronized(this) {
+                    nativeNotificationSilentThroughEpochMillis = maxOf(nativeNotificationSilentThroughEpochMillis, System.currentTimeMillis())
+                    val suppressed = nativeNotificationSpeechAdmission.suppressThrough(nativeNotificationSilentThroughEpochMillis)
+                    if (suppressed.isNotEmpty()) codexReadAloud.cancelMessages(suppressed.mapTo(linkedSetOf(), ::TtsMessageId))
                     notificationAudibilitySuppression.observe(false, System.currentTimeMillis())
                 }
             }
         }
+
+    /** Exact local gates checked at admission, projection and just before output append. */
+    private fun nativeNotificationSpeechGateReason(): String? = when {
+        notificationPrivacyFence.isRequired() -> "privacy_purge_required"
+        !ai.hans.standard.phone.publicapi.ActiveNotificationReplyRegistry.processWide.isAvailable() -> "source_not_ready"
+        !hasCodexSpeechAccess() -> "no_chatgpt_speech_access"
+        AndroidLiveVoiceRuntime.isCaptureRequestedOrActive() -> "live_capture_active"
+        synchronized(this) { dictationActive } -> "dictation_active"
+        synchronized(this) { notificationLiveVoiceActive } -> "live_voice_active"
+        synchronized(this) { notificationRevocationInProgress } -> "privacy_revocation_pending"
+        appContext.getSystemService(android.app.KeyguardManager::class.java)?.isDeviceLocked != false -> "phone_locked"
+        !internetStatus().permitsExplicitRequest -> "network_not_ready"
+        !isSpeechAudible() -> "ringer_or_media_muted"
+        appContext.getSystemService(NotificationManager::class.java)?.currentInterruptionFilter !=
+            NotificationManager.INTERRUPTION_FILTER_ALL -> "do_not_disturb"
+        else -> null
+    }
 
     private fun updateActiveWorkReason(reason: HansActiveWorkReason, active: Boolean) {
         val result = HansActiveWorkOwner.setReason(appContext, reason, active)
@@ -2184,7 +2847,7 @@ class AndroidCodexSessionHost internal constructor(
     }
 
     private fun CodexClientSnapshot.requiresCodexActiveWork(): Boolean =
-        sessionPhase == ClientSessionPhase.BUSY ||
+        remotePhoneToolsActive || sessionPhase == ClientSessionPhase.BUSY ||
             pendingSelection != null ||
             pendingDynamicToolCalls > 0 ||
             outboundTimeline.any { it.status == OutboundMessageStatus.PENDING }
@@ -2204,6 +2867,15 @@ class AndroidCodexSessionHost internal constructor(
         }
         // Never query Android audio routing while holding the session-host monitor.
         toClose?.close()
+    }
+
+    private fun readAloudAllowsIntermediate(): Boolean = settingsStore.read().readAloudMode ==
+        ReadAloudMode.ALL_VISIBLE_ASSISTANT_MESSAGES
+
+    private fun updateCombinedSpeechActivity() {
+        val state = ttsPlaybackState()
+        updateSpeechRoutePlaybackLifetime(state)
+        updateActiveWorkReason(HansActiveWorkReason.SPEECH_ACTIVE, state.holdsSpeechActiveWork())
     }
 
     private fun TtsPlaybackState.holdsSpeechActiveWork(): Boolean = when (this) {
@@ -2231,7 +2903,7 @@ class AndroidCodexSessionHost internal constructor(
 
     private companion object {
         const val DEVELOPER_INSTRUCTIONS_ASSET = "hans/developer-instructions-standard.md"
-        const val LIVE_VOICE_INSTRUCTIONS_ASSET = "hans/live-voice-instructions.md"
+        const val LIVE_VOICE_INSTRUCTIONS_ASSET = "hans/codex-live-voice-instructions.md"
         const val PROTOCOL_DIAGNOSTIC_TAG = "HansProtocolFrame"
         const val NOTIFICATION_TTS_PREFIX = "notification:"
         const val NOTIFICATION_AUDIO_RECHECK_MILLIS = 350L
@@ -2274,20 +2946,6 @@ class AndroidCodexSessionHost internal constructor(
     private data class RuntimeLoss(
         val previous: Pair<CodexSessionClient, CodexClientObserver>?,
         val delivery: SnapshotDelivery?,
-    )
-
-    private data class SpeechTurnIntent(
-        val readAloud: Boolean,
-        val speakAfterOrderExclusive: Long,
-    ) {
-        companion object {
-            val SILENT = SpeechTurnIntent(false, Long.MAX_VALUE)
-        }
-    }
-
-    private data class PendingSpeechDispatch(
-        val epoch: Long,
-        val previous: SpeechTurnIntent,
     )
 
     private data class NotificationSpeechReservation(

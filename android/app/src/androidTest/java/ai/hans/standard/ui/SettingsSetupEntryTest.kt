@@ -18,7 +18,7 @@ class SettingsSetupEntryTest {
     @Test
     fun settingsExposesOneConversationStartOrResumeAction() {
         var starts = 0
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 SettingsScreen(
                     state = SettingsUiState(),
@@ -53,9 +53,9 @@ class SettingsSetupEntryTest {
     }
 
     @Test
-    fun cameraDictationSettingAlwaysDescribesThePhotoVideoChoiceAccurately() {
+    fun obsoleteCameraHoldSettingStaysHiddenEvenWhenLegacyPreferenceIsRetained() {
         val holdEnabled = mutableStateOf(true)
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 SettingsScreen(
                     state = SettingsUiState(cameraHoldToTalkEnabled = holdEnabled.value),
@@ -82,18 +82,14 @@ class SettingsSetupEntryTest {
 
         compose.onNodeWithTag("settings_group_input").performScrollTo().performClick()
 
-        compose.onNodeWithTag("camera_hold_to_talk_status")
-            .performScrollTo()
-            .assertTextEquals(
-                "Aktiv: kurz tippen öffnet die Auswahl für Foto oder Video. Gedrückt halten startet ein Diktat; Loslassen beendet und sendet. Nur im sichtbaren Hans Launcher verfügbar.",
-            )
+        compose.onNodeWithTag("camera_hold_to_talk_status").assertDoesNotExist()
+        compose.onNodeWithTag("camera_hold_to_talk_on").assertDoesNotExist()
+        compose.onNodeWithTag("camera_hold_to_talk_off").assertDoesNotExist()
+        compose.onNodeWithTag("dictation_trigger_hold").assertDoesNotExist()
+        compose.onNodeWithTag("dictation_trigger_toggle").assertDoesNotExist()
 
         compose.runOnIdle { holdEnabled.value = false }
         compose.waitForIdle()
-        compose.onNodeWithTag("camera_hold_to_talk_status")
-            .performScrollTo()
-            .assertTextEquals(
-                "Aus: Das Kamerasymbol öffnet die Auswahl für Foto oder Video; Halten löst kein Diktat aus.",
-            )
+        compose.onNodeWithTag("camera_hold_to_talk_status").assertDoesNotExist()
     }
 }

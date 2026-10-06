@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools" tools:locale="en">
+    <string name="voice_setup_short_task_hardware">To dictate, press your action key once and speak immediately. Press it again to stop recording. Hans transcribes the recording and sends the finished text to your current task.</string>
+    <string name="voice_setup_short_task_screen">To dictate, tap the microphone and speak immediately. Tap again to stop recording. Hans transcribes the recording and sends the finished text to your current task. The screen microphone appears only when no physical action key is assigned.</string>
+    <string name="voice_setup_phone">For a longer conversation, tap Hans. Say goodbye or ask Hans to hang up to end the call.</string>
+    <string name="voice_setup_optional_practice">You can try either voice feature whenever you want after setup. Practice is optional; setup has not tested a recording or task for you.</string>
+    <string name="voice_setup_optional_action_key">Would you like to assign a physical action key? This is optional.</string>
+    <string name="voice_setup_capture_action_key">Press the key you want to use for dictation once.</string>
+</resources>

@@ -57,6 +57,29 @@ class HansSettingsStoreInstrumentedTest {
     }
 
     @Test
+    fun legacyAndCurrentSavedModelsPreserveVoiceInputSpeedAndReadAloudPreferencesWithoutMigration() {
+        val preferences = context.getSharedPreferences("hans_settings_v1", Context.MODE_PRIVATE)
+        for (model in HansSettings.MODEL_ORDER) {
+            assertTrue(preferences.edit().clear().putInt("schema_version", 1).putString("model", model)
+                .putString("reasoning_effort", "high").putString("service_tier", HansSettings.FAST_SERVICE_TIER)
+                .putString("voice", "nova").putFloat("speech_rate", 1.5f)
+                .putString("read_aloud_mode", ReadAloudMode.FINAL_ONLY.wireValue)
+                .putString("dictation_key_trigger", ActionKeyTrigger.HOLD_TO_TALK.name)
+                .putBoolean("camera_hold_to_talk", true).commit())
+            val settings = SharedPreferencesHansSettingsStore(context).read()
+            assertEquals(model, settings.model)
+            assertEquals("high", settings.reasoningEffort)
+            assertEquals(HansSettings.FAST_SERVICE_TIER, settings.serviceTier)
+            assertEquals("nova", settings.voice)
+            assertEquals(1.5f, settings.speechRate)
+            assertEquals(ReadAloudMode.FINAL_ONLY, settings.readAloudMode)
+            assertEquals(ActionKeyTrigger.HOLD_TO_TALK, settings.dictationKeyTrigger)
+            assertTrue(settings.cameraHoldToTalkEnabled)
+            assertEquals(model, preferences.getString("model", null))
+        }
+    }
+
+    @Test
     fun missingUpgradeKeysKeepToggleAndCameraOnlyDefaults() {
         val preferences = context.getSharedPreferences("hans_settings_v1", Context.MODE_PRIVATE)
         preferences.edit()

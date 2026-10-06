@@ -41,7 +41,7 @@ class AndroidNativeMemoryHealthReader {
                 SQLiteDatabase.OPEN_READONLY or SQLiteDatabase.NO_LOCALIZED_COLLATORS,
                 DatabaseErrorHandler { corrupt.set(true) }).use { db ->
                 check(db.isReadOnly)
-                if (!schemaMatches(db)) return unsupported(NativeMemoryUnsupportedReason.SCHEMA)
+                if (!schemaMatches(db, request)) return unsupported(NativeMemoryUnsupportedReason.SCHEMA)
                 if (corrupt.get()) return unavailable(NativeMemoryUnavailableReason.CORRUPT)
                 for (table in listOf("stage1_outputs", "jobs")) {
                     db.rawQuery("SELECT COUNT(*) FROM (SELECT 1 FROM $table LIMIT 100001)", null).use { cursor ->
@@ -98,12 +98,14 @@ class AndroidNativeMemoryHealthReader {
         }
     }
 
-    private fun schemaMatches(db: SQLiteDatabase): Boolean {
-        val required = mapOf(
+    private fun schemaMatches(db: SQLiteDatabase, request: NativeMemoryHealthRequest): Boolean {
+        val checksums = NativeMemoryHealthContract.migrationChecksums(request)
+        val required = mutableMapOf(
             "stage1_outputs" to "thread_id:TEXT,source_updated_at:INTEGER,raw_memory:TEXT,rollout_summary:TEXT,rollout_slug:TEXT,generated_at:INTEGER,usage_count:INTEGER,last_usage:INTEGER,selected_for_phase2:INTEGER,selected_for_phase2_source_updated_at:INTEGER",
             "jobs" to "kind:TEXT,job_key:TEXT,status:TEXT,worker_id:TEXT,ownership_token:TEXT,started_at:INTEGER,finished_at:INTEGER,lease_until:INTEGER,retry_at:INTEGER,retry_remaining:INTEGER,last_error:TEXT,input_watermark:INTEGER,last_success_watermark:INTEGER",
             "_sqlx_migrations" to "version:BIGINT,description:TEXT,installed_on:TIMESTAMP,success:BOOLEAN,checksum:BLOB,execution_time:BIGINT",
         )
+        if (checksums.size == 2) required["consolidation_progress"] = "singleton:INTEGER,max_thread_count:INTEGER"
         for ((table, signature) in required) {
             db.rawQuery("SELECT type FROM sqlite_master WHERE name = ?", arrayOf(table)).use { cursor ->
                 if (!cursor.moveToFirst() || cursor.getString(0) != "table" || cursor.moveToNext()) return false
@@ -117,9 +119,12 @@ class AndroidNativeMemoryHealthReader {
             }
             if (actual.joinToString(",") != signature) return false
         }
-        db.rawQuery("SELECT version, success, hex(checksum) FROM _sqlx_migrations LIMIT 2", null).use { cursor ->
-            return cursor.moveToFirst() && integer(cursor, 0) == 1L && integer(cursor, 1) == 1L &&
-                cursor.getString(2).lowercase(java.util.Locale.ROOT) == NativeMemoryHealthContract.MIGRATION_SHA384 && !cursor.moveToNext()
+        db.rawQuery("SELECT version, success, hex(checksum) FROM _sqlx_migrations ORDER BY version LIMIT 3", null).use { cursor ->
+            for ((index, checksum) in checksums.withIndex()) {
+                if (!cursor.moveToNext() || integer(cursor, 0) != index + 1L || integer(cursor, 1) != 1L ||
+                    cursor.getString(2).lowercase(java.util.Locale.ROOT) != checksum) return false
+            }
+            return !cursor.moveToNext()
         }
     }
 

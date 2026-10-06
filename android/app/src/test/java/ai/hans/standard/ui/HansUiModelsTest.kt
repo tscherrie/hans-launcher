@@ -1,5 +1,8 @@
 package ai.hans.standard.ui
 
+import ai.hans.standard.localization.TestResourceTextResolver
+import java.util.Locale
+
 import ai.hans.standard.phone.keys.ActionKeyTrigger
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -8,6 +11,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class HansUiModelsTest {
+    private val localizationText by lazy { TestResourceTextResolver(Locale.GERMAN) }
+
     @Test
     fun composerCanSendOnlyNonBlankEnabledText() {
         assertFalse(ComposerUiState(text = "").canSend)
@@ -50,14 +55,16 @@ class HansUiModelsTest {
     @Test
     fun modelChoicesUseRuntimeIdsWithoutImplicitSelection() {
         assertEquals(
-            listOf("gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-6-astra"),
+            listOf("gpt-6-luna", "gpt-5.6-terra", "gpt-6.1-sol", "gpt-6-astra", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-6-sol"),
             ModelUiOption.HANS_MODELS.map { it.id },
         )
         assertEquals(
             ai.hans.standard.settings.HansSettings.MODEL_ORDER,
             ModelUiOption.HANS_MODELS.map { it.id },
         )
-        assertEquals("Astra", ModelUiOption.HANS_MODELS.last().label)
+        assertEquals("Astra 6", ModelUiOption.HANS_MODELS.single { it.id == "gpt-6-astra" }.label)
+        assertEquals(listOf("Luna 6", "Terra 5.6", "Sol 6.1", "Astra 6"), ModelUiOption.HANS_MODELS.take(4).map { it.label })
+        assertEquals(listOf("Luna 5.6", "Sol 5.6", "Sol 6"), ModelUiOption.HANS_MODELS.drop(4).map { it.label })
         assertNull(SettingsUiState().selectedModelId)
     }
 
@@ -72,10 +79,10 @@ class HansUiModelsTest {
 
     @Test
     fun speechRateUsesCompactGermanLabels() {
-        assertEquals("1,0×", formatSpeechRate(1f))
-        assertEquals("1,25×", formatSpeechRate(1.25f))
-        assertEquals("1,5×", formatSpeechRate(1.5f))
-        assertEquals("2,0×", formatSpeechRate(2f))
+        assertEquals("1,0×", formatSpeechRate(1f, locale = Locale.GERMANY))
+        assertEquals("1,25×", formatSpeechRate(1.25f, locale = Locale.GERMANY))
+        assertEquals("1,5×", formatSpeechRate(1.5f, locale = Locale.GERMANY))
+        assertEquals("2,0×", formatSpeechRate(2f, locale = Locale.GERMANY))
     }
 
     @Test

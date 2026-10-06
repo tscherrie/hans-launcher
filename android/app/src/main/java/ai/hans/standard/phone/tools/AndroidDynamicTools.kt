@@ -13,6 +13,8 @@ import ai.hans.standard.codex.MAX_DYNAMIC_TOOL_OUTPUT_TEXT_BYTES
 import ai.hans.standard.devicecontrol.tools.AndroidAccessibilityDynamicToolCatalog
 import ai.hans.standard.devicecontrol.tools.AndroidAccessibilityDynamicToolExecutor
 import ai.hans.standard.devicecontrol.tools.AccessibilitySpecialAccessProbe
+import ai.hans.standard.devicecontrol.tools.GenericUiStepsContract
+import ai.hans.standard.devicecontrol.tools.GenericUiStepsExecutor
 import ai.hans.standard.phone.capabilities.CapabilityBroker
 import ai.hans.standard.phone.capabilities.CapabilityCommand
 import ai.hans.standard.phone.capabilities.CapabilityConfirmation
@@ -217,6 +219,11 @@ class AndroidDynamicToolExecutor(
         specialAccess = accessibilitySpecialAccess,
         uiAvailability = accessibilityUiAvailability,
     )
+    private val uiStepsExecutor = GenericUiStepsExecutor(
+        backgroundExecutor = backgroundExecutor,
+        launch = ::executeSafely,
+        availability = accessibilityUiAvailability,
+    )
 
     override val specs: List<DynamicToolNamespaceSpec> =
         listOf(AndroidDynamicToolCatalog.namespace) + accessibilityExecutor.specs
@@ -233,6 +240,9 @@ class AndroidDynamicToolExecutor(
         cancellation: DynamicToolCancellation,
         completion: (DynamicToolExecutionResult) -> Unit,
     ): DynamicToolExecutionHandle {
+        if (call.namespace == AndroidAccessibilityDynamicToolCatalog.NAMESPACE &&
+            call.tool == GenericUiStepsContract.NAME
+        ) return uiStepsExecutor.executeCancellable(call, cancellation, completion)
         val gate = DynamicToolExecutionGate(cancellation, completion)
         val scheduled = gate.schedule(backgroundExecutor) {
             if (call.namespace == AndroidAccessibilityDynamicToolCatalog.NAMESPACE) {

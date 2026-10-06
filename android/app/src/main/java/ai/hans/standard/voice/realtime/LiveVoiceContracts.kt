@@ -16,6 +16,9 @@ enum class LiveVoicePhase {
     STOPPED,
 }
 
+/** Shared media, deliberately separate user-facing entry points. */
+enum class LiveVoiceEntryPoint { PHONE, DICTATION }
+
 data class LiveVoiceSnapshot(
     val phase: LiveVoicePhase = LiveVoicePhase.IDLE,
     val generation: Long = 0,
@@ -26,6 +29,9 @@ data class LiveVoiceSnapshot(
     val inputMuted: Boolean = false,
     /** Effective, per-call voice resolution; approximate/fallback identities remain explicit. */
     val voiceSelection: LiveVoiceVoiceSelection? = null,
+    val entryPoint: LiveVoiceEntryPoint = LiveVoiceEntryPoint.PHONE,
+    /** Event-driven first-input feedback, never a transcript or microphone-readiness claim. */
+    val awaitingFirstUserTranscript: Boolean = false,
 )
 
 data class LiveVoiceFailure(
@@ -95,6 +101,8 @@ data class LiveVoiceSessionContext(
     val contextIdentity: String = "",
     /** Active-call state update, without reintroducing the startup persona or welcome. */
     val refreshInstructions: String = instructions,
+    /** Trusted effective UI language; utterances may naturally switch language. */
+    val language: LiveVoiceLanguage = LiveVoiceLanguage.ENGLISH,
 ) {
     init {
         require(instructions.isNotBlank()) { "live_voice_instructions_blank" }
@@ -202,6 +210,11 @@ interface LiveVoiceObserver {
     fun onSnapshot(snapshot: LiveVoiceSnapshot) = Unit
     fun onUserTranscript(text: String, isFinal: Boolean) = Unit
     fun onHansTranscript(text: String, isFinal: Boolean) = Unit
+    /** Typed native transcripts preserve identity across revisions and observer replay. */
+    fun onTranscriptRevision(event: LiveVoiceTranscriptRevision) = when (event.author) {
+        LiveVoiceTranscriptAuthor.USER -> onUserTranscript(event.text, event.isFinal)
+        LiveVoiceTranscriptAuthor.HANS -> onHansTranscript(event.text, event.isFinal)
+    }
     /** First correlated output text, not proof that audio has reached the speaker. */
     fun onHansResponseReady(event: LiveVoiceResponseReady) = Unit
     fun onTaskProgress(callId: String, progress: LiveVoiceTaskProgress) = Unit
@@ -239,6 +252,9 @@ data class LiveVoiceAudioActivity(
 )
 
 interface LiveVoiceTransport {
+    /** Local physical-input backlog only; not a remote receipt or network-latency estimate. */
+    val inputDelayMillis: Long get() = 0L
+
     /** Live API startup uses a server-side session exchange; no API key enters this boundary. */
     fun connect(setup: LiveSessionSetup, listener: Listener) {
         throw UnsupportedOperationException("live_session_transport_required")
@@ -255,6 +271,18 @@ interface LiveVoiceTransport {
     fun sendUtf8(event: String): Boolean
 
     /**
+     * Optional recorder-owned, mono PCM16 input. True transfers a copy to a bounded FIFO and
+     * guarantees exactly one callback; false rejects the chunk without calling back. Success
+     * means the complete chunk crossed the local ADM callback, NOT remote receipt/consumption.
+     * No microphone is opened by this method. Implementations explicitly validate sample rate.
+     */
+    fun appendInputAudio(
+        pcm: ByteArray,
+        sampleRateHz: Int,
+        callback: (Result<Unit>) -> Unit,
+    ): Boolean = false
+
+    /**
      * Gates microphone capture while a context update is awaiting acknowledgement.
      * This is deliberately transport-local; it does not renegotiate the WebRTC connection.
      */
@@ -267,6 +295,14 @@ interface LiveVoiceTransport {
      */
     fun setUserInputMuted(muted: Boolean): Boolean = true
 
+    /**
+     * Permanently ends input for a completed task while keeping existing speaker output alive.
+     * Unlike user mute, queued input is discarded and no later unmute/readiness/context update
+     * may reopen capture. True acknowledges local input shutdown; false requires full teardown.
+     * Unsupported transports return false. This is not a telephone hang-up operation.
+     */
+    fun finishInputForOutputTail(): Boolean = false
+
     /** Explicit user interruption only; server VAD interruptions do not call this. */
     fun clearOutputAudio(): Boolean
 
@@ -275,10 +311,25 @@ interface LiveVoiceTransport {
 
     fun close()
 
+    /**
+     * Optional bounded physical-media teardown receipt. True means native disposal and owned
+     * output routing/focus cleanup finished successfully, not merely that closing was requested.
+     * False includes unsupported, timeout, interruption, or a cleanup failure. No replay/restart.
+     */
+    fun closeAndAwait(timeoutMillis: Long): Boolean = false
+
     interface Listener {
         fun onOpen()
+        /** First valid physical microphone frame; distinct from network/session readiness. */
+        fun onInputCaptureStarted() = Unit
         fun onEvent(event: String)
         fun onClosed(failure: LiveVoiceFailure?)
+        /**
+         * Positive physical-disposal receipt, separate from a connection-close notification.
+         * Fired at most once, including when cleanup finishes after closeAndAwait timed out.
+         * A failed or merely requested cleanup must never emit this receipt.
+         */
+        fun onMediaDisposed() = Unit
         fun onAudioActivity(activity: LiveVoiceAudioActivity) = Unit
     }
 }

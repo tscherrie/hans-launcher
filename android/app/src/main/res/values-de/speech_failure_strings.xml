@@ -1,0 +1,9 @@
+<resources>
+    <string name="speech_failure_api_credit">Sprache nicht verfügbar: Dein OpenAI-API-Guthaben oder Kontingent ist aufgebraucht. Prüfe dein API-Guthaben und lade es bei Bedarf auf. Ein ChatGPT-Abo enthält kein API-Guthaben.</string>
+    <string name="speech_failure_spending_limit">Sprache nicht verfügbar: Dein OpenAI-API-Ausgaben- oder Nutzungslimit ist erreicht. Prüfe deine API-Limits.</string>
+    <string name="speech_failure_open_billing">API-Guthaben öffnen</string>
+    <string name="speech_failure_project_limit">Sprache nicht verfügbar: Das Ausgabenlimit deines OpenAI-API-Projekts ist erreicht. Prüfe die Limits des Projekts, zu dem dein API-Schlüssel gehört.</string>
+    <string name="speech_failure_open_project">API-Projekteinstellungen öffnen</string>
+    <string name="speech_failure_open_limits">API-Limits öffnen</string>
+    <string name="speech_failure_dismiss">Schließen</string>
+</resources>

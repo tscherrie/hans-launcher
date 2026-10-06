@@ -10,6 +10,16 @@ import org.junit.Assert.fail
 import org.junit.Test
 
 class OpenAiLiveProtocolTest {
+    @Test
+    fun specificProjectLimitIsNotFlattenedIntoGenericQuota() {
+        val event = OpenAiLiveProtocol.parseServerEvent(
+            """{"type":"error","error":{"code":"project_spend_limit_exceeded","type":"insufficient_quota","message":"sk-secret"}}""",
+        ) as LiveServerEvent.Failure
+        assertEquals("live_project_spending_limit_reached", event.failure.code)
+        assertFalse(event.failure.retryable)
+        assertFalse(event.toString().contains("sk-secret"))
+    }
+
     private val setup = LiveSessionSetup(LiveVoiceSessionConfig(), "Du bist Hans.")
 
     @Test
@@ -57,6 +67,22 @@ class OpenAiLiveProtocolTest {
             "session.delegation.created", "session.input_transcript.delta", "session.output_transcript.delta")))
         assertFalse(types.any { it.startsWith("response.") })
         assertFalse(clients.toString().contains("session.start\""))
+    }
+
+    @Test
+    fun clientOwnsAllBackendWorkWithoutManagedResponsesOrNativeWebSearch() {
+        val session = JSONObject(OpenAiLiveProtocol.sessionCreate(setup, "offer"))
+            .getJSONObject("session")
+        // Live-managed web_search belongs to delegation.responses.tools. Client mode
+        // configures no such backend; adding Realtime tool_choice is not a disable flag.
+        val delegation = session.getJSONObject("delegation")
+        assertEquals(setOf("type"), delegation.keys().asSequence().toSet())
+        assertEquals("client", delegation.getString("type"))
+        assertEquals(setOf("model", "instructions", "delegation", "audio", "input", "store", "client"),
+            session.keys().asSequence().toSet())
+        assertFalse(session.toString().contains("web_search"))
+        assertFalse(session.has("tool_choice"))
+        assertFalse(session.has("thinking_sound"))
     }
 
     @Test

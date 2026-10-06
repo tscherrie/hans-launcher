@@ -91,6 +91,11 @@ class PythonDynamicCapabilityGateway(
         if (cancelled.get()) handle?.cancel()
 
         return object : PythonCapabilityHandle {
+            override fun onQuiescent(listener: () -> Unit): Boolean =
+                // Delegate is published only after executeCancellable returns. Do not substitute
+                // its logical result, cancellation disposition or an inner callback for this.
+                handle?.onQuiescent(listener) ?: false
+
             override fun cancel() {
                 if (cancelled.compareAndSet(false, true)) {
                     delegate.get()?.cancel()
@@ -174,6 +179,11 @@ class PythonDynamicCapabilityGateway(
     private fun inertHandle(cancelled: AtomicBoolean) = object : PythonCapabilityHandle {
         override fun cancel() {
             cancelled.set(true)
+        }
+
+        override fun onQuiescent(listener: () -> Unit): Boolean {
+            listener()
+            return true
         }
     }
 

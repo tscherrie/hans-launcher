@@ -1,8 +1,11 @@
-# Hans native Realtime voice
+# Hans native Codex Live voice
 
 The root-free edition uses native WebRTC for Realtime voice. Media is never
 proxied through the local Codex runtime: Android captures and plays the duplex
-audio stream, while the `oai-events` data channel carries bounded JSON events.
+audio stream. Codex App Server owns authenticated signaling, the sideband,
+transcripts and delegation to the existing main task. Android never extracts
+ChatGPT credentials. No separate API key or automatic API fallback is used for
+Live calls. API dictation and standalone read-aloud remain separate.
 
 ## Pinned WebRTC artifact
 
@@ -38,32 +41,34 @@ byte replacement fails before compilation. Repository-wide Gradle dependency
 verification can still be added at a later release gate; the checksum above is
 the human-auditable bootstrap value for that metadata.
 
-## OpenAI protocol
+## Pinned Codex 0.155.0 protocol
 
-The adapter follows the current official WebRTC flow:
+- `thread/realtime/start`: WebRTC offer, explicit `v3`, `gpt-live-1-codex`, audio.
+- Native ChatGPT authentication and remote SDP stay behind `CodexRealtimeGateway`.
+- Native `started` and WebRTC data-channel readiness must both precede capture.
+  The empty start reply is not connected-media proof.
+- Native StartOrSteer owns all delegation. Android only displays native
+  transcripts; it never dispatches those transcripts or peer delegation twice.
+- A local hangup closes Voice without canceling accepted Codex work. Spoken work
+  cancellation is delegated/steered; the existing composer stop button remains
+  the explicit `turn/interrupt` control. Ordinary barge-in affects speech.
+- Late events, account/runtime changes and ambiguous stop results cannot start
+  another call or repeat a task. Connection failure does not auto-retry.
 
-- mint a short-lived client secret with `POST /v1/realtime/client_secrets`;
-- post the local SDP offer to `POST /v1/realtime/calls` with that secret;
-- configure the session through the `oai-events` data channel;
-- let WebRTC carry audio and let server VAD manage interruption/truncation.
-
-Normal VAD interruption must not send a manual `conversation.item.truncate`.
-For WebRTC, the server knows the playout buffer and automatically truncates
-unheard assistant audio. `output_audio_buffer.clear` is reserved for an
-explicit user stop action.
+The current native protocol has no trusted per-turn Voice-versus-desktop origin.
+Live admission therefore requires a proven disabled desktop relay and no remote
+work. Remote enabling is blocked during Voice and remaining voice-origin work;
+consent and pairing are not changed automatically. Errors explain the conflict.
 
 ## Host integration hooks
 
-`LiveVoiceSession` is Activity-independent. To guarantee that audio continues
-while app control puts another application in front, the Android host still
-needs to own the session from its microphone foreground service and display the
-required persistent notification. That host wiring deliberately lives outside
-this package.
+`CodexLiveVoiceSession` is Activity-independent and is owned by
+`HansLiveVoiceForegroundService`. It reuses the Android WebRTC audio route,
+speaker gain, physical mute and foreground microphone permission checks.
+`CodexLiveSessionProvider` supplies signaling without an Android key lookup.
+`LiveApiVoiceSession` and older API adapters remain for isolated tests/legacy
+code; the production factory selects Codex only. The two Live catalogues and
+the TTS catalogue have separate stored preferences.
 
-The host also supplies:
-
-- bounded instructions produced by `LiveVoiceContextBuilder`;
-- an ephemeral credential provider (a backend in production, or the existing
-  Keystore key through `OpenAiRealtimeClientSecretProvider` for a local test);
-- a `LiveVoiceTaskExecutor` adapter for the chosen work runtime;
-- permission and lifecycle UX.
+Host unit tests and synthetic API31–36 tests do not prove account entitlement,
+audible duplex quality or actual phone actions. Those need a user-started call.

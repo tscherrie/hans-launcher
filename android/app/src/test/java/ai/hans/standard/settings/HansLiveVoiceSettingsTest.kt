@@ -8,6 +8,20 @@ import org.junit.Test
 
 class HansLiveVoiceSettingsTest {
     @Test
+    fun `Codex voice is independent of API Live and speech with no unsupported migration`() {
+        val settings = HansSettings(voice = "nova", liveVoice = "willow")
+        assertEquals("cove", settings.codexLiveVoice)
+        val expected = setOf("juniper", "maple", "spruce", "ember", "vale", "breeze", "arbor", "sol", "cove")
+        assertEquals(expected, HansSettings.SUPPORTED_CODEX_LIVE_VOICES)
+        expected.forEach { voice ->
+            val updated = settings.copy(codexLiveVoice = voice)
+            assertEquals("willow", updated.liveVoice)
+            assertEquals("nova", updated.voice)
+        }
+        assertThrows(IllegalArgumentException::class.java) { settings.copy(codexLiveVoice = "ripple") }
+    }
+
+    @Test
     fun `new settings use Ripple for Live while keeping Fable for speech`() {
         val settings = HansSettings()
 

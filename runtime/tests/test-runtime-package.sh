@@ -3,7 +3,8 @@ set -eu
 
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 runtime_dir=$(CDPATH='' cd -- "$script_dir/.." && pwd)
-fixture_download_dir=${HANS_RUNTIME_DOWNLOAD_DIR:-"$runtime_dir/build/downloads"}
+runtime_version=$(jq -er '.runtime.version' "$runtime_dir/runtime.lock.json")
+fixture_download_dir=${HANS_RUNTIME_DOWNLOAD_DIR:-"$runtime_dir/build/downloads/$runtime_version"}
 test_root=$(mktemp -d "${TMPDIR:-/tmp}/hans-runtime-test.XXXXXX")
 trap 'rm -rf -- "$test_root"' 0 HUP INT TERM
 
@@ -54,6 +55,18 @@ HANS_RUNTIME_OFFLINE=0 HANS_RUNTIME_DOWNLOAD_DIR="$test_root/explicit-online-dow
 HANS_RUNTIME_OFFLINE=1 HANS_RUNTIME_DOWNLOAD_DIR="$test_root/downloads" \
   "$packager" "$test_root/jniLibs/arm64-v8a"
 [ "$(wc -l < "$HANS_TEST_CURL_LOG" | tr -d ' ')" = 4 ]
+
+# A corrupt second component must not partially replace an existing pair.
+host_asset=$(jq -er '.codeModeHost.releaseAsset' "$runtime_dir/runtime.lock.json")
+printf X | dd of="$test_root/downloads/$host_asset" bs=1 seek=0 conv=notrunc 2>/dev/null
+mkdir -p "$test_root/preserved-pair"
+printf old-server > "$test_root/preserved-pair/libcodex_app_server.so"
+printf old-host > "$test_root/preserved-pair/libcodex_code_mode_host.so"
+expect_failure 'archive SHA-256 mismatch' env HANS_RUNTIME_OFFLINE=1 \
+  HANS_RUNTIME_DOWNLOAD_DIR="$test_root/downloads" "$packager" "$test_root/preserved-pair"
+[ "$(cat "$test_root/preserved-pair/libcodex_app_server.so")" = old-server ]
+[ "$(cat "$test_root/preserved-pair/libcodex_code_mode_host.so")" = old-host ]
+cp "$test_root/origin/$host_asset" "$test_root/downloads/$host_asset"
 
 asset=$(jq -er '.runtime.releaseAsset' "$runtime_dir/runtime.lock.json")
 # Fixed-length corruption reaches the unchanged SHA check, not just the size check.

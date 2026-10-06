@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="conversation_recovery_offer">Stattdessen neues Gespräch starten</string>
+    <string name="conversation_recovery_title">Neues Gespräch starten?</string>
+    <string name="conversation_recovery_explanation">Hans beginnt mit einem leeren Kontext. Kein bisheriges Gespräch wird gelöscht; sein gespeicherter Verweis bleibt erhalten. Der bisherige Verlauf wird nicht in das neue Gespräch übernommen. Deine Anmeldung bleibt gespeichert.</string>
+    <string name="conversation_recovery_confirm">Neues Gespräch starten</string>
+    <string name="recovery_new_conversation_unavailable">Ein neues Gespräch konnte gerade nicht gestartet werden. Warte kurz und versuche es erneut.</string>
+</resources>

@@ -1,0 +1,21 @@
+<resources>
+    <string name="agent_channel_title">Agentennachrichten</string>
+    <string name="agent_channel_disclosure">Nur dein bestätigter WhatsApp-Selbstchat darf Agentenaufträge senden. Beginne Aufträge mit [Codex:]. Hans antwortet mit [Hans:]. Verknüpfte WhatsApp-Geräte gelten als vertrauenswürdig; andere Chats und Messenger sind ausgeschlossen.</string>
+    <string name="agent_channel_enabled">Selbstchat freigegeben</string>
+    <string name="agent_channel_disabled">Nicht eingerichtet</string>
+    <string name="agent_channel_unavailable">Kanal nicht verfügbar. Es werden keine Aufträge ausgeführt.</string>
+    <string name="agent_channel_pending">Wartende Aufträge: %1$d</string>
+    <string name="agent_channel_uncertain">Unbestätigte Übergaben: %1$d. Sie werden nicht automatisch wiederholt.</string>
+    <string name="agent_channel_configure">WhatsApp-Selbstchat bestätigen</string>
+    <string name="agent_channel_disable">Kanal ausschalten</string>
+    <string name="agent_channel_choose">Wähle deinen tatsächlichen Selbstchat. Der Name allein beweist die Identität nicht. Nur kürzlich empfangene WhatsApp-Gespräche mit nutzbaren Android-Identitätsdaten sind auswählbar.</string>
+    <string name="agent_channel_no_candidates">Kein geeignetes Gespräch empfangen. Sende von einem verknüpften Gerät eine kurze [Codex:]-Nachricht in deinen WhatsApp-Selbstchat, lasse WhatsApp auf diesem Telefon im Hintergrund und versuche es erneut. Wenn WhatsApp keine Benachrichtigung sendet, kann dieser Kanal den Auftrag nicht empfangen.</string>
+    <string name="agent_channel_confirm_title">Diesen Selbstchat freigeben?</string>
+    <string name="agent_channel_confirm_body">Bestätige, dass „%1$s“ dein eigener WhatsApp-Selbstchat und kein anderer Kontakt ist. Aufträge mit [Codex:] können in Hans mit seinen bestehenden Berechtigungen ausgeführt werden. Alle mit diesem WhatsApp-Konto verknüpften Geräte gelten als vertrauenswürdig. Die Bestätigung führt keine früheren Nachrichten aus.</string>
+    <string name="agent_channel_confirm">Selbstchat freigeben</string>
+    <string name="agent_channel_cancel">Abbrechen</string>
+    <string name="agent_channel_close">Schließen</string>
+    <string name="agent_channel_confirm_failed">Das Gespräch konnte nicht bestätigt werden. Empfange eine neue Selbstchat-Benachrichtigung und versuche es erneut.</string>
+    <string name="agent_channel_unknown_title">WhatsApp-Gespräch</string>
+    <string name="agent_channel_lookup_required">Agentennachricht unvollständig. Bitte im Selbstchat erneut als kurzen, vollständigen Text senden. Die Vorschau wurde nicht ausgeführt.</string>
+</resources>

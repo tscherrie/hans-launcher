@@ -1,5 +1,7 @@
 package ai.hans.standard.ui
 
+import ai.hans.standard.R
+import ai.hans.standard.localization.HansTextResolver
 import ai.hans.standard.BuildConfig
 import ai.hans.standard.codex.AccountPhase
 import ai.hans.standard.codex.ReasoningEffort
@@ -8,7 +10,9 @@ import ai.hans.standard.integration.ClientRuntimePhase
 import ai.hans.standard.integration.ClientSessionPhase
 import ai.hans.standard.integration.ClientTimelineRole
 import ai.hans.standard.integration.ClientTimelineStatus
+import ai.hans.standard.integration.ClientWorkInterruptPhase
 import ai.hans.standard.integration.CodexClientSnapshot
+import ai.hans.standard.integration.ExplicitConversationRecoveryPolicy
 import ai.hans.standard.integration.resolveDispatchSelection
 import ai.hans.standard.integration.supportedReasoningEfforts
 import ai.hans.standard.phone.capabilities.LaunchProfileType
@@ -47,6 +51,8 @@ data class HansLocalUiState(
     val internet: InternetSnapshot = InternetSnapshot(),
     /** Stable local/transport notice; independent of Android's validation heuristic. */
     val connectionFailureMessage: String = "",
+    val speechFailure: ai.hans.standard.voice.feedback.SpeechServiceFailureSnapshot =
+        ai.hans.standard.voice.feedback.SpeechServiceFailureSnapshot(),
     val pendingDictations: List<PendingDictation> = emptyList(),
     val pendingDictationStorageUnavailable: Boolean = false,
     val apps: List<AppUiModel> = emptyList(),
@@ -63,7 +69,9 @@ data class HansLocalUiState(
     val appsErrorMessage: String = "",
     val speechCredentialStatus: SpeechCredentialUiStatus = SpeechCredentialUiStatus.MISSING,
     val dictationStatus: DictationUiStatus? = null,
+    val dictationInputMuted: Boolean = false,
     val dictationPreview: String = "",
+    val dictationAwaitingFirstTranscript: Boolean = false,
     val liveVoiceStatus: LiveVoiceUiStatus? = null,
     /** Runtime-confirmed local WebRTC capture mute state. */
     val liveVoiceInputMuted: Boolean = false,
@@ -73,7 +81,12 @@ data class HansLocalUiState(
     val liveVoiceMessages: List<ChatMessageUiModel> = emptyList(),
     /** Validated local notification summaries; never part of the Codex thread history. */
     val notificationMessages: List<ChatMessageUiModel> = emptyList(),
+    /** Explicit main-Hans push notices, durably stored separately from native FINAL output. */
+    val notificationReportMessages: List<ChatMessageUiModel> = emptyList(),
+    val notificationReportThreadId: String? = null,
     val actionKeyConfigured: Boolean = false,
+    /** Assignment is distinct from effective vendor/permission availability. */
+    val actionKeyAssigned: Boolean = false,
     val modelToggleKeyConfigured: Boolean = false,
     val actionKeyCapturing: Boolean = false,
     val capturingModelToggleKey: Boolean = false,
@@ -112,13 +125,14 @@ object HansClientUiProjector {
         client: CodexClientSnapshot?,
         local: HansLocalUiState,
         settings: HansSettings,
+        text: HansTextResolver,
     ): HansUiState {
         if (client == null) {
             return HansUiState(
                 destination = HansDestination.AUTH_GATE,
                 authGate = AuthGateUiState(
                     stage = AuthGateStage.CHECKING,
-                    internetNotice = local.internet.status.notice,
+                    internetNotice = local.internet.status.notice(text),
                 ),
                 chat = ChatUiState(
                     composer = ComposerUiState(
@@ -129,18 +143,22 @@ object HansClientUiProjector {
                         },
                     ),
                     runtimeStatus = RuntimeUiStatus.CONNECTING,
-                    internetNotice = local.internet.status.notice,
+                    internetNotice = local.internet.status.notice(text),
                     connectionFailureMessage = local.connectionFailureMessage,
+                    speechFailure = projectSpeechFailure(local.speechFailure, text),
                     pendingDictations = local.pendingDictations,
                     dictationStatus = local.dictationStatus,
+                    dictationInputMuted = local.dictationInputMuted,
                     dictationPreview = local.dictationPreview,
+                    dictationAwaitingFirstTranscript = local.dictationAwaitingFirstTranscript,
                     liveVoiceStatus = local.liveVoiceStatus,
                     liveVoiceInputMuted = local.liveVoiceInputMuted,
                     liveVoiceVoiceSelection = local.liveVoiceVoiceSelection,
                     speechAudioRoute = local.speechAudioRoute,
-                    cameraHoldToTalkEnabled = settings.cameraHoldToTalkEnabled,
+                    actionKeyConfigured = local.actionKeyAssigned,
+                    cameraHoldToTalkEnabled = false,
                 ),
-                settings = settingsState(null, local, settings),
+                settings = settingsState(null, local, settings, text),
             )
         }
 
@@ -172,14 +190,19 @@ object HansClientUiProjector {
                     -> ChatMessageAuthor.SYSTEM
                 }
                 val projectedText = when {
-                    item.text.isNotBlank() && item.status == ClientTimelineStatus.FAILED ->
-                        "${item.text}\nNicht gesendet."
+                    item.status == ClientTimelineStatus.FAILED &&
+                        item.role == ClientTimelineRole.TOOL ->
+                        listOf(item.text, text.text(R.string.presentation_action_failed))
+                            .filter(String::isNotBlank).joinToString("\n")
+                    item.text.isNotBlank() && item.status == ClientTimelineStatus.FAILED &&
+                        item.role == ClientTimelineRole.USER ->
+                        "${item.text}\n${text.text(R.string.presentation_not_sent)}"
                     item.text.isNotBlank() -> item.text
-                    item.role == ClientTimelineRole.TOOL -> "Telefonaktion läuft"
+                    item.role == ClientTimelineRole.TOOL -> text.text(R.string.presentation_phone_action_running)
                     else -> ""
                 }
                 val setupTurn = item.turnId != null && item.turnId in client.setupTurnIds
-                val text = when {
+                val renderedText = when {
                     // A conversational setup must never expose the implementation transcript.
                     // Codex can legitimately inspect the bundled setup skill or call shell and
                     // dynamic tools before composing its next question. Those receipts remain in
@@ -191,21 +214,39 @@ object HansClientUiProjector {
                     item.role == ClientTimelineRole.HANS ->
                         // Keep Markdown destinations until the rich-text projection. Removing
                         // them here would make the visible link label impossible to activate.
-                        HansSetupOutputSanitizer.sanitizeAssistantText(projectedText, setupTurn)
+                        HansSetupOutputSanitizer.sanitizeAssistantText(projectedText, setupTurn, text)
                     else -> projectedText
                 }
                 ChatMessageUiModel(
                     id = item.id,
                     author = author,
-                    text = text,
+                    text = renderedText,
                     revision = item.revision,
                     complete = item.complete,
                 )
             }
             .filter { it.text.isNotBlank() }
+        val nativeFinalThreadId = client.session.currentThreadId
+        val visibleNativeHansIds = clientTimeline.filter { it.author == ChatMessageAuthor.HANS }
+            .mapTo(linkedSetOf(), ChatMessageUiModel::id)
+        val visibleFinalWorkScopes = client.timeline.filter {
+            it.role == ClientTimelineRole.HANS && it.agentPhase == ai.hans.standard.codex.AgentMessagePhase.FINAL_ANSWER &&
+                it.complete && it.id in visibleNativeHansIds && it.turnId != null && nativeFinalThreadId != null
+        }.mapTo(linkedSetOf()) {
+            ai.hans.standard.voice.realtime.CodexVoiceWorkScope(
+                checkNotNull(nativeFinalThreadId), checkNotNull(it.turnId))
+        }
+        val visibleVoiceMessages = local.liveVoiceMessages.filterNot { message ->
+            // Dictation's confirmed delegated work has one final presentation owner. Speech
+            // is companion status, not a second final card; no text/utterance equivalence is
+            // assumed. PHONE and completed pre-binding/voice-only speech have no such scope.
+            message.author == ChatMessageAuthor.HANS &&
+                message.liveVoiceTranscript?.dictationWorkScope in visibleFinalWorkScopes
+        }
         val timeline = mergeAnchoredLocalMessages(
             clientMessages = clientTimeline,
-            localMessages = local.liveVoiceMessages + local.notificationMessages,
+            localMessages = visibleVoiceMessages + local.notificationMessages +
+                local.notificationReportMessages.takeIf { local.notificationReportThreadId == client.session.currentThreadId }.orEmpty(),
         )
 
         val dictationOwnsInput = local.dictationStatus.blocksComposerInput()
@@ -223,8 +264,8 @@ object HansClientUiProjector {
 
         return HansUiState(
             destination = destination,
-            authGate = authState(client, local.supportingMessage).copy(
-                internetNotice = internetWorkNotice(local.internet.status, hasActiveWork = false),
+            authGate = authState(client, local.supportingMessage, text).copy(
+                internetNotice = internetWorkNotice(local.internet.status, hasActiveWork = false, text = text),
             ),
             chat = ChatUiState(
                 messages = timeline,
@@ -237,24 +278,35 @@ object HansClientUiProjector {
                 ),
                 runtimeStatus = runtimeStatus(client),
                 isWorking = isWorking,
-                internetNotice = internetWorkNotice(local.internet.status, isWorking),
+                workInterrupt = WorkInterruptUiState(
+                    visible = client.workInterrupt.phase != ClientWorkInterruptPhase.IDLE,
+                    enabled = client.workInterrupt.phase == ClientWorkInterruptPhase.AVAILABLE,
+                    pending = client.workInterrupt.phase == ClientWorkInterruptPhase.PENDING,
+                    revision = client.workInterrupt.revision,
+                ),
+                internetNotice = internetWorkNotice(local.internet.status, isWorking, text),
+                speechFailure = projectSpeechFailure(local.speechFailure, text),
                 connectionFailureMessage = listOfNotNull(
                     local.connectionFailureMessage.takeIf(String::isNotBlank),
-                    client.problem?.code?.userMessage(),
-                    "Der Speicher für ungesendete Sprachtexte kann nicht gelesen werden. Er wurde nicht überschrieben; bitte nicht erneut aufnehmen, bis das behoben ist."
+                    client.problem?.code?.userMessage(text),
+                    text.text(R.string.presentation_pending_dictation_storage_unavailable)
                         .takeIf { local.pendingDictationStorageUnavailable },
                 ).distinct().joinToString("\n"),
                 pendingDictations = local.pendingDictations.withoutVisibleInFlightReceipts(client.outboundTimeline),
                 dictationStatus = local.dictationStatus,
+                dictationInputMuted = local.dictationInputMuted,
                 dictationPreview = local.dictationPreview,
+                dictationAwaitingFirstTranscript = local.dictationAwaitingFirstTranscript,
                 liveVoiceStatus = local.liveVoiceStatus,
                 liveVoiceInputMuted = local.liveVoiceInputMuted,
                 liveVoiceVoiceSelection = local.liveVoiceVoiceSelection,
                 speechAudioRoute = local.speechAudioRoute,
-                cameraHoldToTalkEnabled = settings.cameraHoldToTalkEnabled,
+                actionKeyConfigured = local.actionKeyAssigned,
+                cameraHoldToTalkEnabled = false,
                 timelineRevision = client.timeline.sumOf { it.revision + 1L } +
                     local.liveVoiceMessages.sumOf { it.revision + 1L } +
                     local.notificationMessages.sumOf { it.revision + 1L } +
+                    local.notificationReportMessages.sumOf { it.revision + 1L } +
                     local.revision,
             ),
             apps = AppsUiState(
@@ -270,8 +322,9 @@ object HansClientUiProjector {
                 selectedList = local.selectedPluginList,
                 locallySelectedHandle = local.selectedPluginHandle,
                 remoteMcpPolicyReviewPending = local.remoteMcpPolicyReviewPending,
+                text = text,
             ),
-            settings = settingsState(client, local, settings).copy(
+            settings = settingsState(client, local, settings, text).copy(
                 privateSpace = local.privateSpace,
             ),
             workbench = local.workbench,
@@ -312,6 +365,7 @@ object HansClientUiProjector {
         selectedList: PluginListKind,
         locallySelectedHandle: PluginHandle?,
         remoteMcpPolicyReviewPending: Boolean,
+        text: HansTextResolver,
     ): PluginsUiState {
         val operations = client.plugins.operations
         val pendingTarget = operations
@@ -362,19 +416,19 @@ object HansClientUiProjector {
         val detailOperationError = when {
             uninstallOperation?.status == PluginOperationStatus.SUCCESS &&
                 uninstallCatalogProof?.status == PluginOperationStatus.SUCCESS ->
-                "Die Deinstallation wurde vom Plugin-Katalog nicht bestätigt."
+                text.text(R.string.presentation_plugin_uninstall_unconfirmed)
             uninstallOperation?.status == PluginOperationStatus.SUCCESS &&
                 uninstallCatalogProof?.status == PluginOperationStatus.FAILURE ->
-                "Der Plugin-Katalog konnte die Deinstallation nicht bestätigen."
+                text.text(R.string.presentation_plugin_uninstall_catalog_failed)
             latestDetailOperation?.status == PluginOperationStatus.FAILURE -> when (
                 latestDetailOperation.kind
             ) {
                 PluginOperationKind.READ_PLUGIN ->
-                    "Plugin-Details konnten nicht aktualisiert werden."
+                    text.text(R.string.presentation_plugin_refresh_failed)
                 PluginOperationKind.CONFIGURE_SKILL ->
-                    "Die Skill-Änderung wurde nicht bestätigt."
+                    text.text(R.string.presentation_skill_change_unconfirmed)
                 PluginOperationKind.UNINSTALL_PLUGIN ->
-                    "Die Deinstallation wurde nicht bestätigt."
+                    text.text(R.string.presentation_plugin_uninstall_failed)
                 else -> ""
             }
             else -> ""
@@ -395,22 +449,24 @@ object HansClientUiProjector {
                 )
         val marketplaceMessage = when {
             marketplaceOperation?.status == PluginOperationStatus.FAILURE ->
-                "Die Marketplace-Aktualisierung wurde nicht bestätigt."
+                text.text(R.string.presentation_marketplace_refresh_unconfirmed)
             marketplaceOperation?.status == PluginOperationStatus.SUCCESS &&
                 marketplaceCatalogProof?.status == PluginOperationStatus.FAILURE ->
-                "Der Plugin-Katalog konnte nach der Marketplace-Aktualisierung nicht geladen werden."
+                text.text(R.string.presentation_marketplace_catalog_failed)
             client.plugins.marketplaceUpgradeIssueCount > 0 ->
-                "Die letzte Aktualisierung meldete ${client.plugins.marketplaceUpgradeIssueCount} Probleme."
+                text.quantity(R.plurals.presentation_marketplace_upgrade_issues,
+                    client.plugins.marketplaceUpgradeIssueCount, client.plugins.marketplaceUpgradeIssueCount)
             client.plugins.marketplaceLoadIssueCount > 0 ->
-                "${client.plugins.marketplaceLoadIssueCount} Marketplaces konnten nicht geladen werden."
+                text.quantity(R.plurals.presentation_marketplace_load_issues,
+                    client.plugins.marketplaceLoadIssueCount, client.plugins.marketplaceLoadIssueCount)
             else -> ""
         }
         return PluginsUiState(
             selectedList = selectedList,
-            installed = installedCards.map(::pluginUiModel),
+            installed = installedCards.map { pluginUiModel(it, text) },
             available = client.plugins.plugins
                 .filter { !it.installed && it.installable }
-                .map(::pluginUiModel),
+                .map { pluginUiModel(it, text) },
             operationPluginId = pendingTarget,
             pluginReadPending = operations.any {
                 it.kind == PluginOperationKind.READ_PLUGIN &&
@@ -466,7 +522,7 @@ object HansClientUiProjector {
                     PluginOperationStatus.SUCCESS,
                 )
             ) {
-                "Die Plugin-Details konnten nicht geladen werden."
+                text.text(R.string.presentation_plugin_details_failed)
             } else {
                 ""
             },
@@ -477,9 +533,9 @@ object HansClientUiProjector {
                     pluginId = action.pluginId,
                     serverId = action.serverId,
                     kind = action.kind,
-                    title = action.title,
-                    message = action.message,
-                    actionLabel = action.actionLabel,
+                    title = text.text(action.titleResource),
+                    message = text.text(action.messageResource),
+                    actionLabel = text.text(action.actionLabelResource),
                     policyReview = action.policyReview,
                 )
             },
@@ -487,22 +543,22 @@ object HansClientUiProjector {
         )
     }
 
-    private fun pluginUiModel(plugin: PluginCard): PluginUiModel = PluginUiModel(
+    private fun pluginUiModel(plugin: PluginCard, text: HansTextResolver): PluginUiModel = PluginUiModel(
         id = plugin.handle.value,
         name = plugin.displayName?.takeIf(String::isNotBlank) ?: plugin.name,
         description = plugin.shortDescription.orEmpty(),
         statusLabel = when {
-            plugin.installed && plugin.enabled -> "Installiert und aktiv"
-            plugin.installed -> "Installiert, aber deaktiviert"
+            plugin.installed && plugin.enabled -> text.text(R.string.presentation_plugin_installed_active)
+            plugin.installed -> text.text(R.string.presentation_plugin_installed_disabled)
             plugin.availability == PluginAvailability.DISABLED_BY_ADMIN -> when (
                 plugin.disabledReason
             ) {
-                PluginDisabledReason.PLAN_NOT_ELIGIBLE -> "Im aktuellen Tarif nicht verfügbar"
-                PluginDisabledReason.REQUIRED_APP_UNAVAILABLE -> "Benötigte App nicht verfügbar"
-                else -> "Nicht verfügbar"
+                PluginDisabledReason.PLAN_NOT_ELIGIBLE -> text.text(R.string.presentation_plugin_plan_unavailable)
+                PluginDisabledReason.REQUIRED_APP_UNAVAILABLE -> text.text(R.string.presentation_plugin_app_unavailable)
+                else -> text.text(R.string.presentation_plugin_unavailable)
             }
-            plugin.installable -> "Kann installiert werden"
-            else -> "Nicht installierbar"
+            plugin.installable -> text.text(R.string.presentation_plugin_installable)
+            else -> text.text(R.string.presentation_plugin_not_installable)
         },
         actionEnabled = plugin.installed || plugin.installable,
     )
@@ -510,6 +566,7 @@ object HansClientUiProjector {
     private fun authState(
         client: CodexClientSnapshot,
         supportingMessage: String,
+        text: HansTextResolver,
     ): AuthGateUiState {
         val deviceCode = client.deviceCodeLogin
         val sessionRecovery = AuthGateRecoveryPolicy.isAuthenticatedRecovery(client)
@@ -528,18 +585,19 @@ object HansClientUiProjector {
             verificationUri = deviceCode?.verificationUrl.orEmpty(),
             errorMessage = when {
                 sessionRecovery && client.problem?.code == ClientProblemCode.THREAD_RECOVERY ->
-                    "Du bist angemeldet. Versuche, das Gespräch erneut zu öffnen."
-                else -> client.problem?.code?.userMessage().orEmpty()
+                    text.text(R.string.presentation_auth_reopen_conversation)
+                else -> client.problem?.code?.userMessage(text).orEmpty()
             },
             errorTitle = when {
-                !sessionRecovery -> "Anmeldung nicht abgeschlossen"
+                !sessionRecovery -> text.text(R.string.presentation_auth_incomplete)
                 client.problem?.code != ClientProblemCode.THREAD_RECOVERY ->
-                    "Hans konnte nicht verbunden werden"
-                client.session.currentThreadId == null -> "Gespräch konnte nicht gestartet werden"
-                else -> "Gespräch konnte nicht wiederhergestellt werden"
+                    text.text(R.string.presentation_auth_connection_failed)
+                client.session.currentThreadId == null -> text.text(R.string.presentation_auth_thread_start_failed)
+                else -> text.text(R.string.presentation_auth_thread_restore_failed)
             },
             sessionRecovery = sessionRecovery,
             supportingMessage = supportingMessage,
+            canStartNewConversation = ExplicitConversationRecoveryPolicy.canOffer(client),
         )
     }
 
@@ -556,6 +614,7 @@ object HansClientUiProjector {
         client: CodexClientSnapshot?,
         local: HansLocalUiState,
         settings: HansSettings,
+        text: HansTextResolver,
     ): SettingsUiState {
         val advertised = client?.models.orEmpty()
         val selectableAdvertisedIds = advertised
@@ -606,20 +665,21 @@ object HansClientUiProjector {
             (resolved != null && confirmed != null && resolved != confirmed)
         val pendingNotice = when {
             client?.pendingSettingsSelection != null && resolved != null ->
-                "${modelLabel(resolved.model)} · ${effortLabel(resolved.effort.wireValue)}" +
-                    (if (resolved.serviceTier == HansSettings.FAST_SERVICE_TIER) " · Fast" else "") +
-                    " wird bestätigt …"
+                text.text(R.string.presentation_selection_confirming,
+                    modelLabel(resolved.model), effortLabel(resolved.effort.wireValue, text),
+                    if (resolved.serviceTier == HansSettings.FAST_SERVICE_TIER) " · Fast" else "")
             client?.problem?.code == ClientProblemCode.SELECTION_UPDATE ->
-                client.problem.code.userMessage()
+                client.problem.code.userMessage(text)
             hasPlannedSelection && resolved != null -> {
                 val speed = if (resolved.serviceTier == HansSettings.FAST_SERVICE_TIER) {
                     " · Fast"
                 } else {
                     ""
                 }
-                "${modelLabel(resolved.model)} · ${effortLabel(resolved.effort.wireValue)}$speed wird mit deiner nächsten Nachricht angewendet."
+                text.text(R.string.presentation_selection_next_message,
+                    modelLabel(resolved.model), effortLabel(resolved.effort.wireValue, text), speed)
             }
-            client?.problem != null -> client.problem.code.userMessage()
+            client?.problem != null -> client.problem.code.userMessage(text)
             else -> ""
         }
         return SettingsUiState(
@@ -641,27 +701,31 @@ object HansClientUiProjector {
                 VoiceUiOption(voice, voice.replaceFirstChar { it.uppercase() })
             },
             selectedVoiceId = settings.voice,
-            liveVoices = HansSettings.SUPPORTED_LIVE_VOICES.map { voice ->
+            liveVoices = HansSettings.SUPPORTED_CODEX_LIVE_VOICES.map { voice ->
                 VoiceUiOption(voice, voice)
             },
-            selectedLiveVoiceId = settings.liveVoice,
+            selectedLiveVoiceId = settings.codexLiveVoice,
             activeLiveVoiceId = local.liveVoiceVoiceSelection
                 ?.takeIf { local.liveVoiceStatus?.isActive == true }
                 ?.effectiveRealtimeVoice,
+            voiceSessionActive = local.liveVoiceStatus?.isActive == true ||
+                local.dictationStatus in setOf(DictationUiStatus.PREPARING,
+                    DictationUiStatus.LISTENING, DictationUiStatus.FINALIZING),
             speechRate = settings.speechRate,
             readAloudMode = when (settings.readAloudMode) {
                 ReadAloudMode.FINAL_ONLY -> ReadAloudUiMode.FINAL_ONLY
                 ReadAloudMode.ALL_VISIBLE_ASSISTANT_MESSAGES -> ReadAloudUiMode.ALL_MESSAGES
             },
             speechCredentialStatus = local.speechCredentialStatus,
-            cameraHoldToTalkEnabled = settings.cameraHoldToTalkEnabled,
+            cameraHoldToTalkEnabled = false,
             actionKey = ActionKeyUiState(
                 configured = local.actionKeyConfigured,
+                assigned = local.actionKeyAssigned,
                 modelToggleConfigured = local.modelToggleKeyConfigured,
                 capturing = local.actionKeyCapturing,
                 capturingModelToggle = local.capturingModelToggleKey,
                 notice = local.actionKeyNotice,
-                dictationTrigger = settings.dictationKeyTrigger,
+                dictationTrigger = ai.hans.standard.phone.keys.ActionKeyTrigger.PRESS,
                 mp01VendorConflict = local.mp01VendorActionConflict,
             ),
             capabilityAccess = local.capabilityAccess,
@@ -673,6 +737,8 @@ object HansClientUiProjector {
             remoteWorker = local.remoteWorker,
             remoteControl = client?.remoteControl ?: ai.hans.standard.remotecontrol.RemoteControlSnapshot(),
             remoteControlThreadId = client?.session?.currentThreadId,
+            remoteControlProjectPath = client?.remoteControlProjectPath,
+            remotePhoneToolsAvailable = client?.remotePhoneToolsAvailable == true,
             remoteControlThreadName = client?.session?.threads?.firstOrNull {
                 it.threadId == client.session.currentThreadId
             }?.name,
@@ -684,22 +750,24 @@ object HansClientUiProjector {
         )
     }
 
-    private fun ClientProblemCode.userMessage(): String = when (this) {
-        ClientProblemCode.AUTHENTICATION -> "Die ChatGPT-Anmeldung muss erneuert werden."
-        ClientProblemCode.MODEL_CATALOG -> "Die verfügbaren Codex-Modelle konnten nicht geladen werden."
+    private fun ClientProblemCode.userMessage(text: HansTextResolver): String = when (this) {
+        ClientProblemCode.AUTHENTICATION -> text.text(R.string.presentation_problem_auth)
+        ClientProblemCode.MODEL_CATALOG -> text.text(R.string.presentation_problem_models)
         ClientProblemCode.SELECTION_UPDATE ->
-            "Die Auswahl konnte nicht bestätigt werden. Bitte erneut auswählen."
-        ClientProblemCode.THREAD_RECOVERY -> "Das Gespräch konnte noch nicht wiederhergestellt werden."
-        ClientProblemCode.DISPATCH_REJECTED -> "Die Nachricht konnte noch nicht gesendet werden."
+            text.text(R.string.presentation_problem_selection)
+        ClientProblemCode.THREAD_RECOVERY -> text.text(R.string.presentation_problem_thread_recovery)
+        ClientProblemCode.DISPATCH_REJECTED -> text.text(R.string.presentation_problem_dispatch_rejected)
+        ClientProblemCode.INTERRUPT_REJECTED ->
+            text.text(R.string.presentation_problem_interrupt_rejected)
         ClientProblemCode.DISPATCH_AMBIGUOUS ->
-            "Die Verbindung brach beim Senden ab. Hans sendet die Nachricht nicht automatisch erneut."
-        ClientProblemCode.LOCAL_PERSISTENCE -> "Der lokale Hans-Speicher ist nicht verfügbar."
+            text.text(R.string.presentation_problem_dispatch_ambiguous)
+        ClientProblemCode.LOCAL_PERSISTENCE -> text.text(R.string.presentation_problem_storage)
         ClientProblemCode.PROTOCOL_VERSION,
         ClientProblemCode.TRANSPORT_ORDER,
         ClientProblemCode.TRANSPORT_REJECTED,
         ClientProblemCode.RUNTIME_FAILED,
         ClientProblemCode.MALFORMED_SERVER_FRAME,
-        -> "Die Codex-Runtime ist gerade nicht verfügbar."
+        -> text.text(R.string.presentation_problem_runtime)
     }
 
     private fun DictationUiStatus?.blocksComposerInput(): Boolean = this in setOf(
@@ -712,9 +780,9 @@ object HansClientUiProjector {
         ?.label
         ?: model
 
-    private fun effortLabel(effort: String): String = ReasoningEffortUiOption.entries
+    private fun effortLabel(effort: String, text: HansTextResolver): String = ReasoningEffortUiOption.entries
         .firstOrNull { it.id == effort }
-        ?.label
+        ?.let { text.text(it.labelResource) }
         ?: effort
 }
 

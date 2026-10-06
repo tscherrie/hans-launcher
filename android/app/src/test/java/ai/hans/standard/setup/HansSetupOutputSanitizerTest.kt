@@ -1,5 +1,7 @@
 package ai.hans.standard.setup
 
+import ai.hans.standard.localization.TestResourceTextResolver
+
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -12,7 +14,7 @@ class HansSetupOutputSanitizerTest {
             "Der aktuelle Schritt ist `intro` und wartet noch auf deine Entscheidung. " +
                 "Soll ich die Hans-Einrichtung jetzt starten?",
             setupActive = true,
-        )
+        resolver = TestResourceTextResolver(java.util.Locale.GERMAN))
 
         assertEquals(
             "Die Einrichtung ist bereit. Soll ich die Hans-Einrichtung jetzt starten?",
@@ -27,7 +29,7 @@ class HansSetupOutputSanitizerTest {
 
         assertEquals(
             original,
-            HansSetupOutputSanitizer.sanitizeAssistantText(original, setupActive = false),
+            HansSetupOutputSanitizer.sanitizeAssistantText(original, setupActive = false, resolver = TestResourceTextResolver(java.util.Locale.GERMAN)),
         )
     }
 
@@ -37,7 +39,7 @@ class HansSetupOutputSanitizerTest {
 
         assertEquals(
             original,
-            HansSetupOutputSanitizer.sanitizeAssistantText(original, setupActive = true),
+            HansSetupOutputSanitizer.sanitizeAssistantText(original, setupActive = true, resolver = TestResourceTextResolver(java.util.Locale.GERMAN)),
         )
     }
 
@@ -48,7 +50,7 @@ class HansSetupOutputSanitizerTest {
             HansSetupOutputSanitizer.sanitizeAssistantText(
                 "Bitte bestätige jetzt auf dem Hans-Bildschirm den Start der Einrichtung.",
                 setupActive = true,
-            ),
+            resolver = TestResourceTextResolver(java.util.Locale.GERMAN)),
         )
     }
 
@@ -60,7 +62,7 @@ class HansSetupOutputSanitizerTest {
             "verified":false}]}
         """.trimIndent()
 
-        val output = HansSetupOutputSanitizer.sanitizeAssistantText(raw, setupActive = true)
+        val output = HansSetupOutputSanitizer.sanitizeAssistantText(raw, setupActive = true, resolver = TestResourceTextResolver(java.util.Locale.GERMAN))
 
         assertEquals(
             "Ich habe den Einrichtungsstand intern geprüft. " +
@@ -83,7 +85,7 @@ class HansSetupOutputSanitizerTest {
         val raw = "hans_profile.confirm confirmationNonce=ABCD_1234567890. " +
             "Soll ich diese Zusammenfassung so speichern?"
 
-        val output = HansSetupOutputSanitizer.sanitizeAssistantText(raw, setupActive = true)
+        val output = HansSetupOutputSanitizer.sanitizeAssistantText(raw, setupActive = true, resolver = TestResourceTextResolver(java.util.Locale.GERMAN))
 
         assertEquals(
             "Ich habe den Einrichtungsstand intern geprüft. " +
@@ -101,7 +103,7 @@ class HansSetupOutputSanitizerTest {
             "Ich prüfe mit hans_setup.get_setup_state den Schritt microphone_access. " +
                 "Darf ich die Mikrofoneinstellung öffnen?",
             setupActive = true,
-        )
+        resolver = TestResourceTextResolver(java.util.Locale.GERMAN))
 
         assertEquals(
             "Ich prüfe intern den Mikrofonzugriff. " +
@@ -117,7 +119,7 @@ class HansSetupOutputSanitizerTest {
         val output = HansSetupOutputSanitizer.sanitizeAssistantText(
             "Der Mikrofontest ist `verified`. Möchtest du weitermachen?",
             setupActive = true,
-        )
+        resolver = TestResourceTextResolver(java.util.Locale.GERMAN))
 
         assertEquals(
             "Der Mikrofontest ist bestätigt. Möchtest du weitermachen?",
@@ -132,7 +134,7 @@ class HansSetupOutputSanitizerTest {
         val output = HansSetupOutputSanitizer.sanitizeAssistantText(
             "status=ok, verified=false, detailCode=listener_pending",
             setupActive = true,
-        )
+        resolver = TestResourceTextResolver(java.util.Locale.GERMAN))
 
         assertEquals(
             "Ich habe den Einrichtungsstand intern geprüft. " +
@@ -149,7 +151,7 @@ class HansSetupOutputSanitizerTest {
         val output = HansSetupOutputSanitizer.sanitizeAssistantText(
             "Ich nutze jetzt `confirm`. Soll ich dein Profil speichern?",
             setupActive = true,
-        )
+        resolver = TestResourceTextResolver(java.util.Locale.GERMAN))
 
         assertEquals(
             "Ich nutze jetzt die interne Einrichtungsprüfung. Soll ich dein Profil speichern?",
@@ -163,7 +165,7 @@ class HansSetupOutputSanitizerTest {
         val output = HansSetupOutputSanitizer.sanitizeAssistantText(
             "profile_setup_step_required. Soll ich zuerst die technische Einrichtung fortsetzen?",
             setupActive = true,
-        )
+        resolver = TestResourceTextResolver(java.util.Locale.GERMAN))
 
         assertEquals(
             "Ich habe den Einrichtungsstand intern geprüft. " +

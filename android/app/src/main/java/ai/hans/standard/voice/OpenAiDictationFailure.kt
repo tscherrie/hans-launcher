@@ -6,6 +6,8 @@ fun openAiDictationFailure(code: String?): RecordingFailure = when (code) {
     "realtime_stt_authentication_failed" -> RecordingFailure.OPENAI_AUTHENTICATION_FAILED
     "realtime_stt_permission_denied" -> RecordingFailure.OPENAI_PERMISSION_DENIED
     "realtime_stt_quota_exhausted" -> RecordingFailure.OPENAI_QUOTA_EXHAUSTED
+    "realtime_stt_spending_limit_reached" -> RecordingFailure.OPENAI_SPENDING_LIMIT_REACHED
+    "realtime_stt_project_spending_limit_reached" -> RecordingFailure.OPENAI_PROJECT_SPENDING_LIMIT_REACHED
     "realtime_stt_rate_limited" -> RecordingFailure.OPENAI_RATE_LIMITED
     "realtime_stt_network_unavailable",
     "realtime_stt_network_timeout",

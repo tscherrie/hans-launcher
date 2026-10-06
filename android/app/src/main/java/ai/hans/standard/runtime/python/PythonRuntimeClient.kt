@@ -81,27 +81,10 @@ class PythonRuntimeClient(
         streamListener: PythonStreamListener,
         callback: PythonResultCallback,
     ): PythonExecutionHandle {
-        val completed = AtomicBoolean(false)
-        val capabilityLock = Any()
-        val activeCapabilities = mutableMapOf<Long, PythonCapabilityHandle>()
-
-        fun cancelCapabilities() {
-            val handles = synchronized(capabilityLock) {
-                activeCapabilities.values.toList().also { activeCapabilities.clear() }
-            }
-            handles.forEach { runCatching(it::cancel) }
-        }
+        val children = PythonCapabilityExecutionScope(callbackExecutor, callback::onResult)
         val operationId = operationIds.next()
         val finish: (PythonExecutionResult) -> Unit = { result ->
-            if (completed.compareAndSet(false, true)) {
-                cancelCapabilities()
-                if (runCatching {
-                        callbackExecutor.execute { callback.onResult(result) }
-                    }.isFailure
-                ) {
-                    runCatching { callback.onResult(result) }
-                }
-            }
+            children.finish(result, workerPhysicallyFinished = true)
         }
         val runtimeCallback = object : IPythonRuntimeCallback.Stub() {
             override fun onState(callbackOperationId: Long, stateJson: String) = Unit
@@ -148,12 +131,17 @@ class PythonRuntimeClient(
             ) {
                 if (callbackOperationId != operationId || requestId != request.requestId) return
                 val capabilityRequest = PythonCapabilityRequest(requestId, sequence, requestJson)
-                val capabilityCompleted = AtomicBoolean(false)
+                // Reserve BEFORE entering another executor. A concurrent worker result or stop
+                // must see in-dispatch children even before their handles are returned.
+                val child = children.begin(sequence)
+                if (child == null) {
+                    runCatching { runtime.completeCapability(sessionNonce, requestId, sequence,
+                        PythonRuntimeContract.capabilityFailure(capabilityRequest, "capability_dispatch_closed")) }
+                    return
+                }
                 try {
                     val handle = capabilityGateway.execute(capabilityRequest) { response ->
-                        capabilityCompleted.set(true)
-                        synchronized(capabilityLock) { activeCapabilities.remove(sequence) }
-                        if (!completed.get()) {
+                        if (child.responded.compareAndSet(false, true) && children.acceptsResponses()) {
                             runCatching {
                                 runtime.completeCapability(
                                     sessionNonce,
@@ -164,18 +152,9 @@ class PythonRuntimeClient(
                             }
                         }
                     }
-                    val cancelImmediately = synchronized(capabilityLock) {
-                        if (completed.get() || capabilityCompleted.get()) {
-                            true
-                        } else if (activeCapabilities.containsKey(sequence)) {
-                            true
-                        } else {
-                            activeCapabilities[sequence] = handle
-                            false
-                        }
-                    }
-                    if (cancelImmediately) handle.cancel()
+                    children.publish(child, handle)
                 } catch (_: Exception) {
+                    children.dispatchFailed(child)
                     runCatching {
                         runtime.completeCapability(
                             sessionNonce,
@@ -190,9 +169,23 @@ class PythonRuntimeClient(
                 }
             }
         }
+        var dispatchAttempted = false
+        val cancellation = LocalPythonExecutionHandle {
+            children.cancelChildren()
+            !children.isWorkerFinished() && runtime.cancel(sessionNonce, request.requestId)
+        }
+        val physicalHandle = object : PythonExecutionHandle, PythonWorkerTerminationAware {
+            override fun cancel(): Boolean = cancellation.cancel()
+            override fun onQuiescent(listener: () -> Unit): Boolean = children.onQuiescent(listener)
+            override fun workerTerminated() {
+                children.finish(PythonExecutionResult(request.requestId, PythonExecutionStatus.PROCESS_DIED,
+                    errorCode = "python_process_died"), workerPhysicallyFinished = true)
+            }
+        }
         return try {
             val encoded = PythonRuntimeContract.encodeRequest(request, nowElapsedRealtimeMillis())
             descriptorBroker.openExecution(sessionNonce, request).use { lease ->
+                dispatchAttempted = true
                 runtime.execute(
                     operationId,
                     sessionNonce,
@@ -205,20 +198,20 @@ class PythonRuntimeClient(
                     capabilityCallback,
                 )
             }
-            LocalPythonExecutionHandle {
-                cancelCapabilities()
-                !completed.get() && runtime.cancel(sessionNonce, request.requestId)
-            }
+            physicalHandle
         } catch (error: Exception) {
-            finish(
+            children.finish(
                 PythonExecutionResult(
                     requestId = request.requestId,
                     status = PythonExecutionStatus.DEPENDENCY_MISSING,
                     errorCode = "python_environment_unavailable",
                     errorMessage = error.message,
                 ),
+                // A thrown Binder invocation might already have started Python. Only known
+                // pre-dispatch failure or confirmed Binder death proves the worker stopped.
+                workerPhysicallyFinished = !dispatchAttempted || runCatching { !runtime.asBinder().isBinderAlive }.getOrDefault(false),
             )
-            LocalPythonExecutionHandle { false }
+            physicalHandle
         }
     }
 
@@ -253,6 +246,95 @@ class PythonRuntimeClient(
 
     private companion object {
         val operationIds = OperationIds()
+    }
+}
+
+/** Joins real child receipts; unknown support remains pending and can never become a timeout proof. */
+internal class PythonCapabilityExecutionScope(
+    private val callbackExecutor: Executor,
+    private val deliver: (PythonExecutionResult) -> Unit,
+) {
+    internal class Child(val sequence: Long) {
+        val responded = AtomicBoolean(false)
+        var handle: PythonCapabilityHandle? = null
+        var unknown = false
+    }
+
+    private val lock = Any()
+    private val children = linkedMapOf<Long, Child>()
+    private val seen = mutableSetOf<Long>()
+    private val receipt = PythonQuiescenceReceipt()
+    private var closed = false
+    private var workerFinished = false
+    private var result: PythonExecutionResult? = null
+    private var deliveryClaimed = false
+
+    val hasUnknownChildren: Boolean get() = synchronized(lock) { children.values.any { it.unknown } }
+    fun onQuiescent(listener: () -> Unit): Boolean = receipt.onQuiescent(listener)
+    fun acceptsResponses(): Boolean = synchronized(lock) { !closed }
+    fun isWorkerFinished(): Boolean = synchronized(lock) { workerFinished }
+
+    fun begin(sequence: Long): Child? = synchronized(lock) {
+        if (closed || sequence < 0 || children.size >= 64 || seen.size >= 4_096 || !seen.add(sequence)) null
+        else Child(sequence).also { children[sequence] = it }
+    }
+
+    fun publish(child: Child, handle: PythonCapabilityHandle) {
+        synchronized(lock) {
+            if (children[child.sequence] !== child) return
+            child.handle = handle
+        }
+        val supported = runCatching {
+            handle.onQuiescent {
+                synchronized(lock) { if (children[child.sequence] === child) children.remove(child.sequence) }
+                drain()
+            }
+        }.getOrDefault(false)
+        val cancel = synchronized(lock) {
+            if (children[child.sequence] !== child) false else {
+                child.unknown = !supported
+                closed
+            }
+        }
+        if (cancel) runCatching(handle::cancel)
+    }
+
+    fun dispatchFailed(child: Child) = synchronized(lock) {
+        if (children[child.sequence] === child) child.unknown = true
+    }
+
+    fun cancelChildren() {
+        val handles = synchronized(lock) {
+            closed = true
+            children.values.mapNotNull { it.handle }
+        }
+        handles.forEach { runCatching(it::cancel) }
+    }
+
+    fun finish(value: PythonExecutionResult, workerPhysicallyFinished: Boolean) {
+        synchronized(lock) {
+            closed = true
+            if (result == null) result = value
+            if (workerPhysicallyFinished) workerFinished = true
+        }
+        cancelChildren()
+        drain()
+    }
+
+    private fun drain() {
+        val value = synchronized(lock) {
+            if (deliveryClaimed || !workerFinished || children.isNotEmpty()) return
+            val available = result ?: return
+            deliveryClaimed = true
+            available
+        }
+        val delivered = AtomicBoolean(false)
+        val task = Runnable {
+            if (delivered.compareAndSet(false, true)) {
+                try { deliver(value) } finally { receipt.complete() }
+            }
+        }
+        if (runCatching { callbackExecutor.execute(task) }.isFailure) runCatching { task.run() }
     }
 }
 

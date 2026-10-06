@@ -197,6 +197,15 @@ class OpenAiStreamingTtsProviderTest {
     }
 
     @Test
+    fun ttsProjectSpendCapKeepsSpecificCodeDespiteGenericQuotaType() {
+        val body = """{"error":{"code":"project_spend_limit_exceeded","type":"insufficient_quota","message":"sk-secret"}}"""
+        val listener = RecordingListener()
+        val connection = FakeConnection(429, ByteArrayInputStream(ByteArray(0)), ByteArrayInputStream(body.toByteArray()))
+        provider(connection).use { it.start(request(), listener) }
+        assertEquals(TtsProviderFailure("project_spending_limit_reached", false), listener.failure)
+    }
+
+    @Test
     fun missingThrowingOrHeaderInjectionTokenFailsBeforeNetwork() {
         listOf<BearerTokenSource>(
             BearerTokenSource { null },

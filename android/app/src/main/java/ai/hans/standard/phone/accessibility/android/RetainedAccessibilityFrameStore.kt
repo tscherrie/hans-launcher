@@ -170,6 +170,12 @@ internal class RetainedAccessibilityFrameStore(
         currentFrame = null
     }
 
+    /** A different Codex turn must obtain fresh command and post-action receipts. */
+    fun clearRetainedEvidence() = synchronized(lock) {
+        commandFrames.clear()
+        receiptFrames.clear()
+    }
+
     /** Service rebind/disconnect boundary: no correlation survives it. */
     fun clearAll() = synchronized(lock) {
         currentFrame = null

@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="voice_settings_task_title">Diktat</string>
+    <string name="voice_settings_task_help">Aktionstaste kurz drücken und sofort sprechen. Ohne eingerichtete Taste stattdessen auf das Mikrofon tippen. Erneut drücken beendet die Aufnahme. Hans transkribiert sie und sendet den fertigen Text an deine aktuelle Aufgabe, auch während Codex arbeitet.</string>
+    <string name="voice_settings_task_idle">Die Aufnahme endet nach spätestens zwei Minuten. Für Diktate wird keine Live-Sprachverbindung aufgebaut.</string>
+    <string name="voice_settings_call_title">Telefonat</string>
+    <string name="voice_settings_call_help">Oben auf Hans tippen, um länger miteinander zu sprechen. Mit einer Verabschiedung oder „Auflegen“ beenden.</string>
+    <string name="voice_settings_account_help">Nutzt deine ChatGPT-Anmeldung und deren Kontolimits. Kein API-Schlüssel nötig.</string>
+    <string name="voice_settings_voice_title">Stimme</string>
+    <string name="voice_settings_selected_voice">Hans’ Stimme: %1$s</string>
+    <string name="voice_settings_choose_voice">Hans’ Stimme auswählen</string>
+    <string name="voice_settings_voice_scope">Gilt ab der nächsten Sitzung.</string>
+    <string name="voice_settings_voice_usage">Dieselbe Stimme wird für Telefonate und das Vorlesen von Text verwendet. Diktate transkribieren nur deine Aufnahme.</string>
+    <string name="voice_settings_usage_title">Mit Hans sprechen</string>
+    <string name="voice_settings_task_overview">Diktat: Taste, sonst Mikrofon. Erneut drücken beendet und sendet.</string>
+    <string name="voice_settings_call_overview">Telefonat: Hans antippen. Mit Verabschiedung beenden.</string>
+    <string name="voice_settings_how_it_works">So funktioniert’s</string>
+    <string name="voice_settings_current_voice">Aktuelle Sprachsitzung: %1$s</string>
+    <string name="voice_settings_done">Fertig</string>
+    <string name="voice_settings_text_replies_title">Textantworten vorlesen</string>
+    <string name="voice_settings_text_replies_help">Liest fertige Textantworten mit derselben Stimme vor. Antworten während eines Telefonats bleiben davon unberührt.</string>
+    <string name="voice_settings_key_capture">Drücke die gewünschte Taste einmal kurz.</string>
+    <string name="voice_settings_key_ready">Kurz drücken startet die Aufnahme; erneut drücken beendet und sendet. Das Mikrofon auf dem Bildschirm wird ausgeblendet.</string>
+    <string name="voice_settings_key_unassigned">Wähle eine physische Taste für Diktate. Bis dahin nutzt du das Mikrofon unten rechts.</string>
+    <string name="voice_settings_key_blocked">Gespeichert, aber für Hans noch nicht verfügbar. Löse die bestehende Belegung unten oder wähle eine andere Taste.</string>
+    <string name="voice_settings_key_unavailable">Taste gespeichert, aber momentan nicht verfügbar. Prüfe die Bedienungshilfe unter Berechtigungen. Hier kannst du die Taste ändern oder entfernen.</string>
+    <string name="voice_settings_more">Mehr erfahren</string>
+    <string name="voice_settings_less">Weniger anzeigen</string>
+    <string name="voice_settings_mp01_press">Kurz drücken, nicht halten: Langes Drücken gehört dem MP01-System. Eine kurze E-Ink-Auffrischung ist normal.</string>
+</resources>

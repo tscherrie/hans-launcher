@@ -53,6 +53,34 @@ class NotificationPrivacyPersistenceTest {
     }
 
     @Test
+    fun nativeHookActivationUsesCommittedInboxSequenceAndDoesNotConsumeFirstNewCapture() {
+        val store = notificationStore()
+        val hookFile = "notification-hook-inbox-migration-${System.nanoTime()}.json"
+        try {
+            assertEquals(0L, store.maxExistingSequence())
+            val old = store.accept(signalForKey("com.example.chat", "old", "old stored push", 9_000L))
+                as NotificationWriteResult.Stored
+            val ledger = ai.hans.standard.notifications.hooks.NotificationEventLedger(
+                ai.hans.standard.notifications.hooks.AtomicFileNotificationEventStorage(context, hookFile))
+            assertEquals(old.sequence, store.maxExistingSequence())
+            assertTrue(ledger.activateAfter(store.maxExistingSequence()))
+            store.pendingTriageOutbox().forEach { assertTrue(ledger.accept(it)); assertTrue(store.acknowledgeTriageOutbox(it.sequence)) }
+            assertTrue(ledger.pending().isEmpty())
+            val fresh = store.accept(signalForKey("com.example.chat", "fresh", "new push", 9_100L))
+                as NotificationWriteResult.Stored
+            assertTrue(fresh.sequence > old.sequence)
+            assertTrue(ledger.activateAfter(store.maxExistingSequence())) // Must never advance established watermark.
+            store.pendingTriageOutbox().forEach { assertTrue(ledger.accept(it)); assertTrue(store.acknowledgeTriageOutbox(it.sequence)) }
+            assertEquals(listOf(fresh.sequence), ledger.pending().map { it.sequence })
+            assertEquals(fresh.sequence, store.maxExistingSequence())
+        } finally {
+            store.close()
+            android.util.AtomicFile(context.noBackupFilesDir.resolve(hookFile)).delete()
+            android.util.AtomicFile(context.noBackupFilesDir.resolve("$hookFile.initialized")).delete()
+        }
+    }
+
+    @Test
     fun privacyPurgeFenceFailsClosedAndSurvivesReopen() {
         val missing = AtomicNotificationPrivacyPurgeFence(context, purgeFenceFileName)
         assertTrue(missing.isRequired())
@@ -773,6 +801,85 @@ class NotificationPrivacyPersistenceTest {
         assertTrue(reconcileStore.queryPage(limit = 10).events.isEmpty())
         reconcileStore.close()
         privacyStore.close()
+    }
+
+    @Test
+    fun retentionAndTransientRecoveryPreserveAgentBindingButExplicitAllDataClearRevokesIt() {
+        val channel = enrolledAgentChannel()
+        val binding = channel.status().binding
+        var agentPurgeCalls = 0
+        assertTrue(purgeFence.markClean())
+        NotificationInboxStore(
+            context = context, retentionLimit = 1, databaseName = databaseName,
+            privacyRepository = repository(), triageDataPurger = triagePurger,
+            privacyPurgeFence = purgeFence, factPrivacy = factPrivacy, clock = { 10_002L },
+            clearAgentChannelPrivateData = { agentPurgeCalls++; channel.clearPrivateData() },
+        ).use { store ->
+            store.accept(signal("example.app", "one", 10_000L))
+            store.accept(signal("example.app", "two", 10_001L))
+            assertTrue(triagePurger.clearCalls > 0)
+            assertEquals(binding, channel.status().binding)
+            assertEquals(0, agentPurgeCalls)
+            assertTrue(store.clearHistory().triageQueueCleared)
+            assertEquals(binding, channel.status().binding)
+            assertEquals(0, agentPurgeCalls)
+            assertTrue(store.clearAllNotificationData().privacyMutationAcknowledged)
+            assertEquals(null, channel.status().binding)
+            assertTrue(agentPurgeCalls > 0)
+        }
+    }
+
+    @Test
+    fun unrelatedPackageExclusionPreservesAgentBindingButWhatsAppExclusionRevokesIt() {
+        val channel = enrolledAgentChannel()
+        val binding = channel.status().binding
+        NotificationInboxStore(
+            context = context, databaseName = databaseName, privacyRepository = repository(),
+            triageDataPurger = triagePurger, privacyPurgeFence = purgeFence, factPrivacy = factPrivacy,
+            clock = { 10_000L }, clearAgentChannelPrivateData = channel::clearPrivateData,
+        ).use { store ->
+            store.excludePackage("example.app")
+            assertEquals(binding, channel.status().binding)
+            store.excludePackage("com.whatsapp")
+            assertEquals(null, channel.status().binding)
+            assertTrue(channel.listEnrollmentCandidates().isEmpty())
+        }
+    }
+
+    @Test
+    fun agentPrivacyFailureRemainsDurablyPendingUntilRecoveryPurgesBinding() {
+        val channel = enrolledAgentChannel()
+        var allowAgentPurge = false
+        NotificationInboxStore(
+            context = context, databaseName = databaseName, privacyRepository = repository(),
+            triageDataPurger = triagePurger, privacyPurgeFence = purgeFence, factPrivacy = factPrivacy,
+            clock = { 10_000L }, clearAgentChannelPrivateData = { allowAgentPurge && channel.clearPrivateData() },
+        ).use { store ->
+            assertThrows(IllegalStateException::class.java) { store.clearAllNotificationData() }
+            assertTrue(purgeFence.isRequired())
+            assertTrue(factPrivacy.pending().isNotEmpty())
+            assertTrue(channel.status().binding != null)
+            allowAgentPurge = true
+            assertTrue(store.recoverFactPrivacyMutations())
+            assertEquals(null, channel.status().binding)
+            assertTrue(factPrivacy.pending().isEmpty())
+            assertFalse(purgeFence.isRequired())
+        }
+    }
+
+    private fun enrolledAgentChannel(): ai.hans.standard.notifications.agentchannel.WhatsAppAgentChannel {
+        val storage = object : ai.hans.standard.notifications.agentchannel.AgentChannelStorage {
+            var state = ai.hans.standard.notifications.agentchannel.AgentChannelState()
+            override fun read() = state
+            override fun write(state: ai.hans.standard.notifications.agentchannel.AgentChannelState) { this.state = state }
+        }
+        val channel = ai.hans.standard.notifications.agentchannel.WhatsAppAgentChannel(storage) { 10_000L }
+        channel.observe(ai.hans.standard.notifications.agentchannel.WhatsAppNotificationSource(
+            "com.whatsapp", 0, 12345, "test-key", "self-chat", null, false, false,
+            listOf(ai.hans.standard.notifications.agentchannel.WhatsAppNotificationMessage("hello", 9_999L, null, false)),
+        ))
+        assertTrue(channel.confirmSelfChat(channel.listEnrollmentCandidates().single().id))
+        return channel
     }
 
     private fun repository() = NotificationPrivacyRepository(

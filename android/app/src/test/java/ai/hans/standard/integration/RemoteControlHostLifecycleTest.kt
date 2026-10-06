@@ -16,6 +16,17 @@ import org.junit.Test
 
 /** Executes the actual host gate against the actual RPC coordinator, with deterministic clocks. */
 class RemoteControlHostLifecycleTest {
+    @Test fun withdrawnProductPolicyRejectsBeforeForegroundAcquisitionOrEnable() {
+        val f = Fixture(desktopRemoteAccessEnabled = false)
+        f.ready()
+        assertFalse(f.requestEnable())
+        assertEquals(0, f.acquisitions)
+        assertFalse(f.gate.ownsProtection)
+        f.promote()
+        assertFalse(f.requests.any { it.method == "remoteControl/enable" })
+        assertEquals(0, f.restarts)
+    }
+
     @Test fun consentWaitsForMatchingRealPromotionAndThenForEnableAcknowledgement() {
         val f = Fixture()
         f.ready()
@@ -252,7 +263,7 @@ class RemoteControlHostLifecycleTest {
         assertFalse(f.core.snapshot.isDisabledConfirmed)
     }
 
-    private class Fixture {
+    private class Fixture(private val desktopRemoteAccessEnabled: Boolean = true) {
         var now = 1_800_000_000_000L
         var identity = Any()
         var acceptWrites = true
@@ -267,6 +278,7 @@ class RemoteControlHostLifecycleTest {
         val core = RemoteControlCoordinator(sendRequest = { requests += it; acceptWrites },
             newRequestId = { "host_test_${++requestSequence}" }, nowMillis = { now })
         val gate = RemoteControlHostLifecycle(
+            desktopRemoteAccessEnabled = desktopRemoteAccessEnabled,
             runtime = { RemoteControlHostRuntime(identity, core.snapshot) },
             enable = { _: Any -> core.enableFromLocalUserConsent() },
             disable = { _: Any -> core.disableFromLocalUserAction() },

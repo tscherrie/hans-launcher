@@ -23,6 +23,7 @@ internal class RemoteControlHostLifecycle<T : Any>(
     private val restart: (T) -> Unit,
     private val releaseForeground: () -> Unit,
     private val schedulePromotionDeadline: (Long, () -> Unit) -> (() -> Unit),
+    private val desktopRemoteAccessEnabled: Boolean = ai.hans.standard.remotecontrol.DesktopRemoteAccessPolicy.enabled,
 ) {
     private var owner: T? = null
     private var generation: Long? = null
@@ -40,6 +41,7 @@ internal class RemoteControlHostLifecycle<T : Any>(
 
     /** [acquire] runs synchronously on the local visible Activity's consent stack. */
     fun requestEnable(acquire: () -> HansActiveWorkUpdate): Boolean {
+        if (!desktopRemoteAccessEnabled) return false
         val current = runtime() ?: return false
         if (!current.remote.runtimeReady || current.remote.capability != RemoteControlCapability.SUPPORTED ||
             current.remote.generation == null) return false

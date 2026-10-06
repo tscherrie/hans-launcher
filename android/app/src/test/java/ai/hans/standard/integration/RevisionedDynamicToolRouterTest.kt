@@ -267,6 +267,25 @@ class RevisionedDynamicToolRouterTest {
     }
 
     @Test
+    fun cancelledRevisionLeaseForwardsOnlyActualDelegateQuiescence() {
+        val delegate = CancellationSuppressingExecutor("old")
+        val router = RevisionedDynamicToolRouter(snapshot(
+            DynamicToolContributor(delegate, DynamicToolPlacement.BACKGROUND_ALLOWED),
+        ))
+        val lease = router.acquire()
+        val handle = lease.executeCancellable(call("old"), DynamicToolCancellation.NONE) {
+            error("Cancelled calls must not emit model output")
+        }
+        var quiescent = false
+        assertTrue(handle.onQuiescent { quiescent = true })
+        handle.cancel()
+        lease.close()
+        assertFalse(quiescent)
+        checkNotNull(delegate.quiescentListener).invoke()
+        assertTrue(quiescent)
+    }
+
+    @Test
     fun contributorCapacityFailsBeforeCompositeConstruction() {
         val contributors = (0..256).map { index ->
             contributor(
@@ -421,6 +440,7 @@ class RevisionedDynamicToolRouterTest {
 
     private class CancellationSuppressingExecutor(namespace: String) : DynamicToolExecutor {
         override val specs = FakeExecutor(namespace).specs
+        var quiescentListener: (() -> Unit)? = null
 
         override fun execute(
             call: DynamicToolCallParams,
@@ -432,6 +452,11 @@ class RevisionedDynamicToolRouterTest {
             cancellation: DynamicToolCancellation,
             completion: (DynamicToolExecutionResult) -> Unit,
         ): DynamicToolExecutionHandle = object : DynamicToolExecutionHandle {
+            override fun onQuiescent(listener: () -> Unit): Boolean {
+                quiescentListener = listener
+                return true
+            }
+
             override fun cancel() =
                 DynamicToolCancellationDisposition.EXTERNAL_EFFECT_MAY_HAVE_STARTED
         }

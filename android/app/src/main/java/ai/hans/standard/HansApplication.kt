@@ -1,5 +1,7 @@
 package ai.hans.standard
 
+import ai.hans.standard.localization.AndroidHansTextResolver
+
 import android.app.Application
 import android.app.NotificationManager
 import android.content.Context
@@ -242,6 +244,7 @@ open class HansApplication : Application() {
             java.util.concurrent.Executor { command ->
                 check(handler.post(command)) { "haptic_dispatch_unavailable" }
             },
+            text = AndroidHansTextResolver(this),
         )
     }
     private var responseReadySessionObserver: CodexClientObserver? = null
@@ -1125,6 +1128,22 @@ open class HansApplication : Application() {
         ValidatedNotificationAnnouncementCenter(this)
     }
 
+    internal val whatsAppAgentChannel by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        ai.hans.standard.integration.AndroidWhatsAppAgentChannelCoordinator(
+            this,
+            ai.hans.standard.notifications.agentchannel.WhatsAppAgentChannel(
+                ai.hans.standard.notifications.agentchannel.AtomicFileAgentChannelStorage(this),
+            ),
+        )
+    }
+
+    private val notificationEventsDelegate = lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        ai.hans.standard.notifications.hooks.AndroidNotificationEventCoordinator(this)
+    }
+    internal val notificationEvents get() = notificationEventsDelegate.value
+    internal fun passiveNotificationEventStatus() =
+        if (notificationEventsDelegate.isInitialized()) notificationEventsDelegate.value.status() else null
+
     /** Set only after the interactive host has already been constructed; reading never boots it. */
     private val initializedNotificationSuggestionController =
         AtomicReference<ValidatedNotificationSuggestionController?>(null)
@@ -1195,6 +1214,8 @@ open class HansApplication : Application() {
             )
             installMigrationReadinessObservers(host)
             installResponseReadyObservers(host)
+            whatsAppAgentChannel.attach(host)
+            notificationEvents.attach(host)
             host.start()
         }
     }

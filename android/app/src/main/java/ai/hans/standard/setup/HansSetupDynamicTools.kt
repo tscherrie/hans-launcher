@@ -23,7 +23,6 @@ object HansSetupDynamicToolCatalog {
         "yes",
         "ja",
         "hardware_toggle",
-        "hardware_hold",
         "no_hardware_key",
         "enabled",
         "disabled",
@@ -52,7 +51,7 @@ object HansSetupDynamicToolCatalog {
                     "and copy a token from its allowedChoices field; do not invent a token.",
                 objectSchema(
                     JSONObject()
-                        .put("step", enumSchema(HansSetupStep.entries.map(::wireStep)))
+                        .put("step", enumSchema(HANS_SETUP_ORDER.map(::wireStep)))
                         .put("choice", enumSchema(SETUP_CHOICE_TOKENS))
                         .put(
                             "capability",
@@ -81,7 +80,7 @@ object HansSetupDynamicToolCatalog {
             function("read_key_capture", "Read the current hardware-key capture result.", emptySchema()),
             function(
                 "begin_live_test",
-                "Arm the current key, camera, notification, Accessibility, or voice live test.",
+                "Arm the current camera, notification, or Accessibility live test. Voice practice is optional normal use.",
                 stepSchema(),
             ),
             function(
@@ -117,7 +116,7 @@ object HansSetupDynamicToolCatalog {
 
     private fun stepSchema() = objectSchema(
         JSONObject()
-            .put("step", enumSchema(HansSetupStep.entries.map(::wireStep)))
+            .put("step", enumSchema(HANS_SETUP_ORDER.map(::wireStep)))
             .put(
                 "capability",
                 enumSchema(HansSetupOptionalCapability.entries.map(::wireCapability)),
@@ -153,10 +152,9 @@ class HansSetupDynamicToolExecutor(
 
     /** Event/turn-driven repair probe. Explicit skips and disabled choices are never reopened. */
     fun refreshFreshEvidence(): HansSetupDocument {
-        val configuredChoice = probe.configuredInputChoice()?.takeUnless { choice ->
-            choice == HansSetupInputChoice.HARDWARE_HOLD && !probe.hardwareHoldCompatible()
+        val configuredChoice = probe.configuredInputChoice()?.let { choice ->
+            if (choice == HansSetupInputChoice.HARDWARE_HOLD) HansSetupInputChoice.HARDWARE_TOGGLE else choice
         }
-        val configuredCameraHold = probe.configuredCameraHoldEnabled()
         val freshAccess = linkedMapOf<HansSetupStep, HansSetupProbeResult>()
         val verifiedAccess = linkedMapOf<HansSetupStep, String>()
         ADOPTABLE_ACCESS_STEPS.forEach { step ->
@@ -176,25 +174,18 @@ class HansSetupDynamicToolExecutor(
         }
         var state = repository.reconcileExistingConfiguration(
             inputChoice = configuredChoice,
-            cameraHoldEnabled = configuredCameraHold,
+            cameraHoldEnabled = repository.read().cameraHoldEnabled == true,
             verifiedAccess = verifiedAccess,
             verifiedOptionalCapabilities = verifiedOptional,
         )
         REVOCABLE_STEPS.forEach { step ->
             if (
-                state.record(step).status == HansSetupStepStatus.VERIFIED &&
-                (step != HansSetupStep.CAMERA_HOLD_CHOICE || state.cameraHoldEnabled == true)
+                state.record(step).status == HansSetupStepStatus.VERIFIED
             ) {
                 val fresh = when (step) {
                     HansSetupStep.HARDWARE_MAPPING -> configuredChoice?.let {
                         HansSetupProbeResult(true, "hardware_mapping_present")
                     } ?: freshProbe(step, state)
-                    HansSetupStep.CAMERA_HOLD_CHOICE ->
-                        if (configuredCameraHold) {
-                            HansSetupProbeResult(true, "camera_hold_effective")
-                        } else {
-                            freshProbe(step, state)
-                        }
                     else -> freshAccess[step] ?: freshProbe(step, state)
                 }
                 if (!fresh.verified && !fresh.transient) {
@@ -506,22 +497,9 @@ class HansSetupDynamicToolExecutor(
         require(state.currentStep == HansSetupStep.HARDWARE_MAPPING) { "setup_step_not_current" }
         val choice = state.inputChoice ?: error("setup_input_choice_missing")
         require(choice != HansSetupInputChoice.NO_HARDWARE_KEY) { "setup_hardware_key_skipped" }
-        if (choice == HansSetupInputChoice.HARDWARE_HOLD && !probe.hardwareHoldCompatible()) {
-            val token = repository.beginOperation(HansSetupStep.HARDWARE_MAPPING)
-            completion(
-                ok(
-                    repository.acceptKeyCapture(
-                        token,
-                        false,
-                        true,
-                        "stock_mp01_hold_blocked",
-                    ),
-                ),
-            )
-            return
-        }
         val token = repository.beginOperation(HansSetupStep.HARDWARE_MAPPING)
-        requestUi(SetupUiCommand.BeginKeyCapture(token, choice), completion) { accepted ->
+        // A historical hold choice is readable progress, not a gesture to re-enable.
+        requestUi(SetupUiCommand.BeginKeyCapture(token, HansSetupInputChoice.HARDWARE_TOGGLE), completion) { accepted ->
             if (accepted == null) repository.markOperationAwaiting(token, "key_capture_ui_rejected")
             else repository.read()
         }
@@ -604,15 +582,7 @@ class HansSetupDynamicToolExecutor(
         step: HansSetupStep,
         state: HansSetupDocument,
         operationNonce: String? = null,
-    ): HansSetupProbeResult = if (
-        step == HansSetupStep.HARDWARE_MAPPING &&
-        state.inputChoice == HansSetupInputChoice.HARDWARE_HOLD &&
-        !probe.hardwareHoldCompatible()
-    ) {
-        HansSetupProbeResult(false, "stock_mp01_hold_blocked", blocked = true)
-    } else {
-        probe.probe(step, operationNonce)
-    }
+    ): HansSetupProbeResult = probe.probe(step, operationNonce)
 
     private fun requestUi(
         command: SetupUiCommand,
@@ -675,6 +645,10 @@ class HansSetupDynamicToolExecutor(
             .put("allowedChoices", JSONArray(allowedChoices(currentStep, currentRecord.status)))
             .put("complete", complete)
             .also { projection ->
+                if (currentStep in setOf(HansSetupStep.INPUT_CHOICE, HansSetupStep.HARDWARE_MAPPING,
+                        HansSetupStep.REVIEW, HansSetupStep.COMPLETE)) {
+                    projection.put("voiceUsageInstructions", JSONArray(probe.voiceUsageInstructions()))
+                }
                 if (
                     currentStep in setOf(
                         HansSetupStep.INPUT_CHOICE,
@@ -748,6 +722,7 @@ class HansSetupDynamicToolExecutor(
                     currentStep == HansSetupStep.COMPLETE
                 ) {
                     projection.put("technicalSummary", safeTechnicalSummary())
+
                 }
                 if (
                     currentStep == HansSetupStep.REVIEW &&
@@ -771,29 +746,14 @@ class HansSetupDynamicToolExecutor(
                     "mappingProof",
                     safeProof(record(HansSetupStep.HARDWARE_MAPPING).status),
                 )
-                .put(
-                    "dictationProof",
-                    safeProof(record(HansSetupStep.HARDWARE_LIVE_TEST).status),
-                ),
+                .put("voiceControl", "press_to_start_press_to_mute_or_unmute"),
         )
         .put(
             "camera",
             JSONObject()
                 .put(
-                    "holdChoice",
-                    when (cameraHoldEnabled) {
-                        true -> "enabled"
-                        false -> "disabled"
-                        null -> "not_configured"
-                    },
-                )
-                .put(
                     "captureProof",
                     safeProof(record(HansSetupStep.CAMERA_CAPTURE_TEST).status),
-                )
-                .put(
-                    "holdDictationProof",
-                    safeProof(record(HansSetupStep.CAMERA_HOLD_LIVE_TEST).status),
                 ),
         )
         .put(
@@ -835,18 +795,10 @@ class HansSetupDynamicToolExecutor(
         .put(
             "speech",
             JSONObject()
-                .put(
-                    "choice",
-                    safeChoice(record(HansSetupStep.SPEECH_CREDENTIAL_CONSENT).status),
-                )
-                .put(
-                    "credentialProof",
-                    safeProof(record(HansSetupStep.SPEECH_CREDENTIAL_ACCESS).status),
-                )
-                .put(
-                    "voiceDictationProof",
-                    safeProof(record(HansSetupStep.VOICE_DICTATION_TEST).status),
-                ),
+                .put("access", "chatgpt_login")
+                .put("practice", "optional_user_initiated_not_verified")
+                .put("shortTask", "press_speak_press_to_mute_automatic_close")
+                .put("phone", "tap_hans_longer_conversation_goodbye_ends"),
         )
         .put(
             "model",
@@ -903,10 +855,10 @@ class HansSetupDynamicToolExecutor(
     private fun allowedChoices(
         step: HansSetupStep,
         status: HansSetupStepStatus,
-    ): List<String> = when (step) {
+    ): List<String> = if (step in HANS_SETUP_RETIRED_STEPS) emptyList() else when (step) {
         HansSetupStep.INTRO -> listOf("begin", "defer")
         HansSetupStep.INPUT_CHOICE ->
-            listOf("hardware_toggle", "hardware_hold", "no_hardware_key", "defer")
+            listOf("hardware_toggle", "no_hardware_key", "defer")
         HansSetupStep.CAMERA_HOLD_CHOICE -> listOf("enabled", "disabled", "defer")
         in CONSENT_STEPS -> listOf("enable", "not_now", "defer")
         HansSetupStep.MODEL_REASONING -> listOf("use_current", "not_now", "defer")
@@ -964,7 +916,7 @@ class HansSetupDynamicToolExecutor(
 
     private fun requiredStep(args: JSONObject): HansSetupStep = parseStep(
         JsonContract.requiredString(args, "step", 64),
-    )
+    ).also { require(it !in HANS_SETUP_RETIRED_STEPS) { "setup_step_retired" } }
 
     private fun requiredCapability(args: JSONObject): HansSetupOptionalCapability =
         parseCapability(JsonContract.requiredString(args, "capability", 64))
@@ -1009,7 +961,6 @@ class HansSetupDynamicToolExecutor(
             HansSetupStep.ACCESSIBILITY_ACCESS,
             HansSetupStep.HOME_ROLE,
             HansSetupStep.MICROPHONE_ACCESS,
-            HansSetupStep.SPEECH_CREDENTIAL_ACCESS,
             HansSetupStep.OPTIONAL_CAPABILITIES,
         )
         val FRESH_PROBE_STEPS = setOf(
@@ -1019,7 +970,6 @@ class HansSetupDynamicToolExecutor(
             HansSetupStep.ACCESSIBILITY_ACCESS,
             HansSetupStep.HOME_ROLE,
             HansSetupStep.MICROPHONE_ACCESS,
-            HansSetupStep.SPEECH_CREDENTIAL_ACCESS,
         )
         val ADOPTABLE_ACCESS_STEPS = listOf(
             HansSetupStep.MICROPHONE_ACCESS,
@@ -1027,7 +977,6 @@ class HansSetupDynamicToolExecutor(
             HansSetupStep.NOTIFICATION_ACCESS,
             HansSetupStep.ACCESSIBILITY_ACCESS,
             HansSetupStep.HOME_ROLE,
-            HansSetupStep.SPEECH_CREDENTIAL_ACCESS,
         )
         val FRESH_LIVE_TEST_STEPS = setOf(
             HansSetupStep.NOTIFICATION_LIVE_TEST,
@@ -1035,13 +984,11 @@ class HansSetupDynamicToolExecutor(
         )
         val REVOCABLE_STEPS = listOf(
             HansSetupStep.HARDWARE_MAPPING,
-            HansSetupStep.CAMERA_HOLD_CHOICE,
             HansSetupStep.APP_NOTIFICATIONS_ACCESS,
             HansSetupStep.NOTIFICATION_ACCESS,
             HansSetupStep.ACCESSIBILITY_ACCESS,
             HansSetupStep.HOME_ROLE,
             HansSetupStep.MICROPHONE_ACCESS,
-            HansSetupStep.SPEECH_CREDENTIAL_ACCESS,
         )
         val SIDE_EFFECT_TOOLS = setOf(
             "record_choice",
@@ -1061,12 +1008,12 @@ class HansSetupDynamicToolExecutor(
             HansSetupStep.NOTIFICATION_LISTENER_CONSENT,
             HansSetupStep.ACCESSIBILITY_CONSENT,
             HansSetupStep.HOME_ROLE_CONSENT,
-            HansSetupStep.SPEECH_CREDENTIAL_CONSENT,
         )
         val PRE_EFFECT_VALIDATION_ERRORS = setOf(
             "invalid_setup_arguments",
             "invalid_setup_choice",
             "invalid_setup_step",
+            "setup_step_retired",
             "invalid_setup_capability",
             "setup_step_not_current",
             "setup_capability_not_current",
@@ -1092,7 +1039,7 @@ class HansSetupDynamicToolExecutor(
                 "microphone",
                 HansSetupStep.MICROPHONE_CONSENT,
                 HansSetupStep.MICROPHONE_ACCESS,
-                HansSetupStep.VOICE_DICTATION_TEST,
+                null,
             ),
             PermissionSummaryStep(
                 "app_notifications",

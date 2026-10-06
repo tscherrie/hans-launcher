@@ -87,6 +87,45 @@ class LiveApiContextRefreshInstrumentedTest {
     }
 
     @Test
+    fun firstTaskProgressDoesNotDependOnMonotonicClockOrigin() {
+        for (origin in listOf(0L, -TimeUnit.SECONDS.toNanos(100), 1_000_000L)) {
+            val clock = AtomicLong(origin)
+            val provider = BoundedLiveVoiceInstructionsProvider(
+                baseInstructionsProvider = { STARTUP_PERSONA },
+                snapshotProvider = { null },
+                capabilitySummaryProvider = { "Synthetic fixture: no Android capability is granted." },
+            )
+            Fixture(provider, nanoTime = clock::get).use { fixture ->
+                fixture.start()
+                fixture.accept("clock-origin-task")
+                val before = fixture.transport.appends().size
+                fixture.tasks.progress("clock-origin-task", "First confirmed synthetic progress.")
+                fixture.barrier()
+                assertEquals("First progress is immediately available at origin $origin",
+                    before + 1, fixture.transport.appends().size)
+                val first = fixture.transport.appends().last()
+                assertEquals("session.thinking.append", first.getString("type"))
+                assertEquals("clock-origin-task", first.getString("delegation_id"))
+                assertEquals("First confirmed synthetic progress.", first.getString("content"))
+
+                fixture.tasks.progress("clock-origin-task", "Repeated progress at the same clock.")
+                fixture.barrier()
+                assertEquals("The first-progress exception must not disable throttling",
+                    before + 1, fixture.transport.appends().size)
+                clock.addAndGet(TimeUnit.SECONDS.toNanos(20))
+                fixture.tasks.progress("clock-origin-task", "Next confirmed synthetic progress.")
+                fixture.barrier()
+                assertEquals("Next progress is available at the actual interval boundary",
+                    before + 2, fixture.transport.appends().size)
+                assertEquals("Next confirmed synthetic progress.",
+                    fixture.transport.appends().last().getString("content"))
+                assertEquals(1, fixture.tasks.requests.size)
+                assertTrue(fixture.failures.isEmpty())
+            }
+        }
+    }
+
+    @Test
     fun changingContextStormKeepsLatestQuietUpdateAndPrioritizesResultWithoutBlockingDelegation() {
         val facts = AtomicReference("Synthetic initial facts.")
         val provider = BoundedLiveVoiceInstructionsProvider(
@@ -95,7 +134,7 @@ class LiveApiContextRefreshInstrumentedTest {
             capabilitySummaryProvider = facts::get,
             confirmedProfileSummaryProvider = { "Fictional local test profile." },
         )
-        Fixture(provider).use { fixture ->
+        Fixture(provider, nanoTime = { 0L }).use { fixture ->
             fixture.start()
             fixture.accept("completed-before-context-drains")
             val transport = fixture.transport
@@ -183,7 +222,10 @@ class LiveApiContextRefreshInstrumentedTest {
         }
     }
 
-    private class Fixture(provider: LiveVoiceInstructionsProvider) : AutoCloseable {
+    private class Fixture(
+        provider: LiveVoiceInstructionsProvider,
+        nanoTime: () -> Long = System::nanoTime,
+    ) : AutoCloseable {
         private val scheduler = Executors.newSingleThreadScheduledExecutor()
         val transport = FakeTransport()
         val tasks = FakeExecutor()
@@ -201,6 +243,7 @@ class LiveApiContextRefreshInstrumentedTest {
             },
             config = LiveVoiceSessionConfig(maximumReconnectAttempts = 0, configureTimeoutMillis = 1_000),
             scheduler = scheduler,
+            nanoTime = nanoTime,
         )
 
         fun start() {

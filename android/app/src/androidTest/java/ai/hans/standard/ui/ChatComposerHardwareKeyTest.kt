@@ -37,6 +37,7 @@ import androidx.compose.ui.test.performTextInputSelection
 import androidx.compose.ui.test.pressKey
 import androidx.compose.ui.test.requestFocus
 import androidx.compose.ui.test.performSemanticsAction
+import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.AnnotatedString
 import kotlinx.coroutines.awaitCancellation
@@ -424,7 +425,7 @@ class ChatComposerHardwareKeyTest {
     @Test
     fun activeToggleDictationLocksTypingWithoutAnExtraBanner() {
         val draft = mutableStateOf("Entwurf bleibt")
-        val status = mutableStateOf(DictationUiStatus.LISTENING)
+        val status = mutableStateOf<DictationUiStatus?>(DictationUiStatus.LISTENING)
         val preview = mutableStateOf("")
         val sent = mutableListOf<String>()
         compose.setContent {
@@ -460,7 +461,8 @@ class ChatComposerHardwareKeyTest {
                 status.value = phase
                 preview.value = partial
             }
-            compose.onNodeWithTag("composer").assertIsNotEnabled().assertTextEquals("Entwurf bleibt")
+            compose.onNodeWithTag("composer").assertDoesNotExist()
+            compose.onNodeWithTag("voice_task_composer").assertExists()
             compose.onNodeWithTag("dictation_composer_lock").assertDoesNotExist()
             compose.onNodeWithText("Aufnahme läuft – Eingabe bleibt bis zum Senden gesperrt").assertDoesNotExist()
             compose.onNodeWithTag("chat_screen").requestFocus()
@@ -469,24 +471,24 @@ class ChatComposerHardwareKeyTest {
                 pressKey(Key.Enter)
             }
             compose.waitForIdle()
-            compose.onNodeWithTag("composer").assertIsNotEnabled().assertTextEquals("Entwurf bleibt")
+            compose.onNodeWithTag("composer").assertDoesNotExist()
             compose.runOnIdle {
                 assertEquals("Entwurf bleibt", draft.value)
                 assertTrue(sent.isEmpty())
             }
         }
 
-        compose.runOnIdle { draft.value = "" }
-        compose.onNodeWithTag("composer").assertIsNotEnabled()
-            .assert(SemanticsMatcher.expectValue(SemanticsProperties.EditableText, AnnotatedString("")))
-        compose.onNodeWithText("Aufnahme läuft").assertExists()
+        compose.runOnIdle { status.value = null }
+        compose.onNodeWithTag("composer").assertTextEquals("Entwurf bleibt")
         compose.onNodeWithTag("dictation_composer_lock").assertDoesNotExist()
     }
 
     @Test
-    fun enabledCameraHoldFallbackKeepsShortTapAsOnlyMediaAction() {
+    fun legacyCameraHoldPreferenceCannotStartDictationByHoldingTheCamera() {
         var cameraLaunches = 0
-        compose.setContent {
+        var gestureCalls = 0
+        var dictationStarts = 0
+        compose.setGermanContent {
             MaterialTheme {
                 ChatScreen(
                     state = ChatUiState(cameraHoldToTalkEnabled = true),
@@ -499,24 +501,31 @@ class ChatComposerHardwareKeyTest {
                         onOpenPlugins = {},
                         onOpenSettings = {},
                         onToggleLiveVoice = {},
+                        onToggleDictation = { dictationStarts++ },
+                        onCameraGestureDown = { gestureCalls++; null },
+                        onCameraGestureLongPress = { _, _ -> gestureCalls++ },
+                        onCameraGestureUp = { _, _ -> gestureCalls++ },
+                        onCameraGestureCancel = { _, _ -> gestureCalls++ },
                     ),
                 )
             }
         }
 
         compose.onNodeWithTag("choose_media")
-            .assertContentDescriptionEquals(
-                "Foto oder Video aufnehmen. Gedrückt halten für Diktat, loslassen zum Senden.",
-            )
-            .performSemanticsAction(SemanticsActions.OnClick)
-        compose.runOnIdle { assertEquals(1, cameraLaunches) }
+            .assertContentDescriptionEquals("Foto oder Video aufnehmen")
+            .performTouchInput { down(center); advanceEventTime(1_200); up() }
+        compose.runOnIdle {
+            assertEquals(1, cameraLaunches)
+            assertEquals(0, gestureCalls)
+            assertEquals(0, dictationStarts)
+        }
         compose.onNodeWithTag("choose_existing_media").assertDoesNotExist()
     }
 
     @Test
     fun cameraButtonWithoutDictationFallbackAdvertisesThePhotoVideoChoice() {
         var cameraChoices = 0
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 ChatScreen(
                     state = ChatUiState(cameraHoldToTalkEnabled = false),

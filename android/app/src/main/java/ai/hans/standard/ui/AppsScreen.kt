@@ -1,5 +1,11 @@
 package ai.hans.standard.ui
 
+import ai.hans.standard.R
+import ai.hans.standard.localization.HansTextResolver
+import ai.hans.standard.localization.AndroidHansTextResolver
+import ai.hans.standard.localization.rememberHansTextResolver
+import androidx.compose.ui.res.stringResource
+
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
@@ -50,11 +56,12 @@ fun AppsScreen(
     callbacks: AppsUiCallbacks,
     modifier: Modifier = Modifier,
 ) {
+    val uiText = rememberHansTextResolver()
     BackHandler(onBack = callbacks.onBack)
     val searchFocusRequester = remember { FocusRequester() }
     val cursorBlinkEnabled = LocalCursorBlinkEnabled.current
     val normalizedQuery = state.query.trim()
-    val sections = appUiSections(state)
+    val sections = appUiSections(state, uiText)
 
     // Every navigation entry is a fresh lookup. This effect belongs to the lifetime of
     // this destination, so catalogue/query recompositions while the user stays here do
@@ -81,13 +88,13 @@ fun AppsScreen(
                 .testTag("app_search")
                 .semantics { appsSearchCursorBlinkEnabled = cursorBlinkEnabled }
                 .focusRequester(searchFocusRequester),
-            placeholder = { Text("App suchen") },
+            placeholder = { Text(stringResource(R.string.ui_search_apps_495d8e)) },
             singleLine = true,
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
         )
 
         when {
-            state.loading -> AppDrawerNotice("Apps werden geladen …")
+            state.loading -> AppDrawerNotice(uiText.text(R.string.ui_loading_apps_46769a))
             state.errorMessage.isNotBlank() -> {
                 Column(modifier = Modifier.padding(horizontal = 18.dp, vertical = 20.dp)) {
                     Text(
@@ -97,13 +104,13 @@ fun AppsScreen(
                     )
                     Spacer(Modifier.height(8.dp))
                     TextButton(onClick = callbacks.onRefresh) {
-                        Text("Erneut laden")
+                        Text(stringResource(R.string.ui_reload_1b8b90))
                     }
                 }
             }
             sections.none { it.locked || it.apps.isNotEmpty() } -> AppDrawerNotice(
-                if (normalizedQuery.isEmpty()) "Keine startbaren Apps gefunden."
-                else "Keine passende App gefunden.",
+                if (normalizedQuery.isEmpty()) uiText.text(R.string.ui_no_launchable_apps_found_176170)
+                else uiText.text(R.string.ui_no_matching_apps_found_f63e53),
             )
             else -> LazyColumn(
                 modifier = Modifier
@@ -137,9 +144,9 @@ fun AppsScreen(
                         item(key = "profile_locked_${section.profileId}") {
                             Text(
                                 text = if (section.type == LaunchProfileType.PRIVATE) {
-                                    "Privater Bereich gesperrt."
+                                    uiText.text(R.string.ui_private_space_is_locked_e2aa4a)
                                 } else {
-                                    "${section.title} gesperrt."
+                                    uiText.text(R.string.ui_value_is_locked_f9cc40, section.title)
                                 },
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -154,7 +161,7 @@ fun AppsScreen(
                     ) {
                         item(key = "profile_empty_${section.profileId}") {
                             Text(
-                                text = "Keine Apps im privaten Bereich.",
+                                text = stringResource(R.string.ui_no_apps_in_private_space_b91016),
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(horizontal = 20.dp, vertical = 15.dp)
@@ -209,7 +216,7 @@ internal data class AppUiSection(
 )
 
 /** Pure fail-closed projection: locked or unknown profiles never reach search or rendering. */
-internal fun appUiSections(state: AppsUiState): List<AppUiSection> {
+internal fun appUiSections(state: AppsUiState, uiText: HansTextResolver): List<AppUiSection> {
     val query = state.query.trim()
     val profiles = state.profiles
         .distinctBy(AppProfileUiModel::profileId)
@@ -250,11 +257,11 @@ internal fun appUiSections(state: AppsUiState): List<AppUiSection> {
             profileId = profile.profileId,
             type = profile.type,
             title = when (profile.type) {
-                LaunchProfileType.PERSONAL -> "Persönlich"
-                LaunchProfileType.PRIVATE -> "Privater Bereich"
-                LaunchProfileType.WORK -> "Arbeitsprofil"
-                LaunchProfileType.CLONE -> "Klonprofil"
-                LaunchProfileType.OTHER -> "Weiteres Profil"
+                LaunchProfileType.PERSONAL -> uiText.text(R.string.ui_personal_9da981)
+                LaunchProfileType.PRIVATE -> uiText.text(R.string.ui_private_space_94f1f6)
+                LaunchProfileType.WORK -> uiText.text(R.string.ui_work_profile_80a95b)
+                LaunchProfileType.CLONE -> uiText.text(R.string.ui_clone_profile_cbbff9)
+                LaunchProfileType.OTHER -> uiText.text(R.string.ui_other_profile_1dc15b)
             },
             locked = profile.locked,
             apps = apps,
@@ -267,6 +274,7 @@ private fun PrivateSpaceActions(
     state: PrivateSpaceUiState,
     callbacks: AppsUiCallbacks,
 ) {
+    val uiText = rememberHansTextResolver()
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -278,7 +286,7 @@ private fun PrivateSpaceActions(
             enabled = !state.operationInProgress,
             modifier = Modifier.testTag("hide_private_space"),
         ) {
-            Text("Ausblenden")
+            Text(stringResource(R.string.ui_hide_042fae))
         }
         if (profileId != null) {
             TextButton(
@@ -290,7 +298,7 @@ private fun PrivateSpaceActions(
                     if (state.locked) "unlock_private_space" else "lock_private_space",
                 ),
             ) {
-                Text(if (state.locked) "Entsperren" else "Sperren")
+                Text(if (state.locked) uiText.text(R.string.ui_unlock_06f32a) else uiText.text(R.string.ui_lock_862ff2))
             }
         }
         if (state.settingsAvailable) {
@@ -299,13 +307,13 @@ private fun PrivateSpaceActions(
                 enabled = !state.operationInProgress,
                 modifier = Modifier.testTag("open_private_space_settings"),
             ) {
-                Text("Verwalten")
+                Text(stringResource(R.string.ui_manage_9e2096))
             }
         }
     }
     if (state.operationInProgress) {
         Text(
-            text = "Privater Bereich wird aktualisiert …",
+            text = stringResource(R.string.ui_updating_private_space_9e0e01),
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             style = MaterialTheme.typography.bodyMedium,
             modifier = Modifier.testTag("private_space_operation_pending"),
@@ -322,6 +330,7 @@ private fun PrivateSpaceActions(
 
 @Composable
 private fun AppDrawerNotice(text: String) {
+    val uiText = rememberHansTextResolver()
     Text(
         text = text,
         modifier = Modifier.padding(horizontal = 20.dp, vertical = 24.dp),

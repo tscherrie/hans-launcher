@@ -64,23 +64,24 @@ class HansBackupCoordinator(
         val warnings = buildList {
             if (imported.retargetedThreadBoundAutomationIds.isNotEmpty()) {
                 add(
-                    "${imported.retargetedThreadBoundAutomationIds.size} threadgebundene Automation(en) starten nach dem Import bewusst in einem neuen Thread.",
+                    HansBackupPreviewWarning(HansBackupWarningKind.RETARGETED_AUTOMATIONS,
+                        imported.retargetedThreadBoundAutomationIds.size),
                 )
             }
             if (imported.plugins.isNotEmpty() || imported.skills.isNotEmpty()) {
                 add(
-                    "Plugin- und Skill-Auswahlen werden als portable Referenzen vorgemerkt. Der aktuelle Codex-Katalog und neue Connector-Anmeldungen bleiben maßgeblich.",
+                    HansBackupPreviewWarning(HansBackupWarningKind.PORTABLE_REFERENCES),
                 )
             }
             val missingPlugins = imported.plugins.count { it.pluginId !in currentPlugins }
             if (missingPlugins > 0) {
                 add(
-                    "$missingPlugins Plugin-Referenz(en) sind im aktuellen Katalog nicht installiert und bleiben bis zur Katalog-Abstimmung vorgemerkt.",
+                    HansBackupPreviewWarning(HansBackupWarningKind.MISSING_PLUGINS, missingPlugins),
                 )
             }
             val changedSkills = imported.skills.count { currentSkills[it.name] != it }
             if (changedSkills > 0) {
-                add("$changedSkills Skill-Auswahl(en) unterscheiden sich vom aktuellen Katalog.")
+                add(HansBackupPreviewWarning(HansBackupWarningKind.CHANGED_SKILLS, changedSkills))
             }
             if (
                 imported.settings.model != current.settings.model ||
@@ -88,7 +89,7 @@ class HansBackupCoordinator(
                 imported.settings.serviceTier != current.settings.serviceTier
             ) {
                 add(
-                    "Modell, Denkaufwand und Fast-Modus werden vorgemerkt und erst nach Bestätigung durch den Codex App Server wirksam.",
+                    HansBackupPreviewWarning(HansBackupWarningKind.SELECTION_STAGED),
                 )
             }
         }.take(HansBackupLimits.MAX_PREVIEW_WARNINGS)

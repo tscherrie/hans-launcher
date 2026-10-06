@@ -27,6 +27,27 @@ internal class AppServerSessionSupervisor(
     private val releaseProcessLease: () -> Unit,
     private val processStarter: (ProcessBuilder) -> Process = { it.start() },
 ) {
+    /** Passive persisted evidence only. Does not start Codex or issue any App Server request. */
+    fun readNativeToolHistory(appDataRoot: File): String {
+        fun unavailable(status: ai.hans.standard.diagnostics.NativeToolHistoryStatus) =
+            ai.hans.standard.diagnostics.NativeToolHistoryResult(status).encode()
+        val session = active
+        if (session == null || closed.get() || !session.ready || session.stopRequested) {
+            return unavailable(ai.hans.standard.diagnostics.NativeToolHistoryStatus.RUNTIME_UNAVAILABLE)
+        }
+        if (ai.hans.standard.BuildConfig.CODEX_RUNTIME_VERSION != "0.155.0" ||
+            ai.hans.standard.BuildConfig.CODEX_RUNTIME_SHA256 !=
+            "a18a82fbfcecec13f320545f4b8e0c542247e16918fdbc61f3f8f7e4d121306d") {
+            return unavailable(ai.hans.standard.diagnostics.NativeToolHistoryStatus.UNSUPPORTED_RUNTIME)
+        }
+        val sqliteHome = session.effectiveSqliteHome
+            ?: return unavailable(ai.hans.standard.diagnostics.NativeToolHistoryStatus.CONFIGURATION_UNRESOLVED)
+        val result = ai.hans.standard.diagnostics.AndroidNativeToolHistoryReader().read(
+            appDataRoot, File(session.expectedCodexHome), sqliteHome)
+        return if (active === session && !closed.get() && session.ready && !session.stopRequested) result.encode()
+        else unavailable(ai.hans.standard.diagnostics.NativeToolHistoryStatus.RUNTIME_UNAVAILABLE)
+    }
+
     /** Binder worker only; no supervisor lock is held across SQLite IO. */
     fun readNativeMemoryHealth(expectedGeneration: Long, appOwnedRoot: File): String {
         val unavailable = ai.hans.standard.diagnostics.memory.NativeMemoryHealthResult.Unavailable(

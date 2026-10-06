@@ -86,6 +86,7 @@ internal class RemoteMcpDynamicToolExecutor(
             gate.complete(failureResult(call, "mcp_executor_rejected"))
         }
         return object : DynamicToolExecutionHandle {
+            override fun onQuiescent(listener: () -> Unit): Boolean = gate.onQuiescent(listener)
             override fun cancel(): DynamicToolCancellationDisposition {
                 session.cancel(invocation)
                 return gate.cancel()

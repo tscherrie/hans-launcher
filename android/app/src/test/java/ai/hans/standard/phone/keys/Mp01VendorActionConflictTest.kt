@@ -13,6 +13,33 @@ import org.junit.Test
 
 class Mp01VendorActionConflictTest {
     @Test
+    fun upgradedHoldUsesTheSamePressFingerprintForDisplayConfirmationAndDispatch() {
+        val oldMapping = mapping(keyCode = Mp01VendorActionConflictResolver.LEGACY_REFRESH_KEY_CODE,
+            trigger = ActionKeyTrigger.HOLD_TO_TALK)
+        val stored = ActionKeyMappingSet.of(listOf(oldMapping))
+        val evidence = legacyEvidence()
+        val display = checkNotNull(Mp01VendorActionConflictResolver.gate(
+            stored.forTaskVoiceControls(), evidence, null,
+        ).conflict)
+        val confirmation = checkNotNull(Mp01VendorActionConflictResolver.resolve(
+            stored.forTaskVoiceControls(), evidence, null,
+        ))
+        assertTrue(confirmation.userConfirmationAllowed)
+        assertEquals(Mp01ActionMappingSetFingerprint.of(display.mappings),
+            Mp01ActionMappingSetFingerprint.of(confirmation.mappings))
+        val acknowledged = Mp01VendorActionOverrideConfirmation(
+            Mp01ActionMappingSetFingerprint.of(confirmation.mappings),
+            checkNotNull(Mp01VendorStateFingerprint.of(evidence)),
+        )
+        val gate = Mp01VendorActionConflictResolver.gate(
+            stored.forTaskVoiceControls(), evidence, acknowledged,
+        )
+        assertEquals(listOf(oldMapping.copy(trigger = ActionKeyTrigger.PRESS)),
+            gate.effectiveMappings.mappings)
+        assertEquals(listOf(oldMapping), stored.mappings)
+    }
+
+    @Test
     fun stockShortPressToggleCoexistsButHoldToTalkIsPermanentlyBlocked() {
         val toggle = mapping(
             keyCode = Mp01VendorActionConflictResolver.STOCK_AREFRESH_KEY_CODE,

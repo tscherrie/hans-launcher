@@ -85,6 +85,21 @@ sealed interface CodexInput {
 }
 
 object AppServerRequests {
+    /**
+     * In pinned 0.155, reading a loaded paginated thread with turns awaits persist_thread.
+     * The caller must hold first-turn admission until this empty fresh-thread receipt arrives.
+     * Never use this full-history compatibility path to bootstrap an existing thread.
+     */
+    fun materializeFreshThread(id: RequestId, threadId: String): EncodedRequest {
+        requireOpaqueId(threadId, "Thread id")
+        return encode(
+            id = id,
+            method = AppServerMethod.THREAD_READ,
+            params = JSONObject().put("threadId", threadId).put("includeTurns", true),
+            context = RequestContext.ThreadMaterialize(threadId),
+        )
+    }
+
     fun initialize(
         id: RequestId,
         clientName: String = "hans-android",
@@ -197,6 +212,7 @@ object AppServerRequests {
         baseInstructions: String? = null,
         ephemeral: Boolean = false,
         dynamicTools: List<DynamicToolNamespaceSpec> = emptyList(),
+        disablePhoneToolsMcp: Boolean = false,
     ): EncodedRequest {
         developerInstructions?.let {
             JsonContract.requireUtf8Bound(
@@ -218,7 +234,8 @@ object AppServerRequests {
             // ThreadStartParams has no top-level effort field. Set the supported config
             // override so thread/start already acknowledges the selected effort instead of
             // inheriting the process default and rejecting non-default automation runs.
-            .put("config", JSONObject().put("model_reasoning_effort", options.effort.wireValue))
+            .put("config", JSONObject().put("model_reasoning_effort", options.effort.wireValue)
+                .apply { if (disablePhoneToolsMcp) put("mcp_servers.hans_phone.enabled", false) })
             .put("ephemeral", ephemeral)
             .put("serviceTier", options.serviceTier)
             .putIfNotNull("approvalPolicy", options.approvalPolicy?.wireValue)
@@ -244,6 +261,7 @@ object AppServerRequests {
         threadId: String,
         excludeTurns: Boolean = true,
         developerInstructions: String? = null,
+        disablePhoneToolsMcp: Boolean = false,
     ): EncodedRequest {
         requireOpaqueId(threadId, "Thread id")
         val initialTurnsLimit = ProtocolLimits.RECENT_HISTORY_TURN_LIMIT
@@ -260,6 +278,7 @@ object AppServerRequests {
             params = JSONObject()
                 .put("threadId", threadId)
                 .put("excludeTurns", excludeTurns)
+                .apply { if (disablePhoneToolsMcp) put("config", JSONObject().put("mcp_servers.hans_phone.enabled", false)) }
                 .put(
                     "initialTurnsPage",
                     JSONObject()
@@ -353,6 +372,35 @@ object AppServerRequests {
             params = params,
             context = RequestContext.TurnStart(threadId, options),
         )
+    }
+
+    /** External notification data enters at tool authority, never as a user-message steer. */
+    internal fun notificationToolOutputTurnStart(
+        id: RequestId,
+        threadId: String,
+        output: String,
+    ): EncodedRequest {
+        requireOpaqueId(threadId, "Thread id")
+        JsonContract.requireUtf8Bound(output, 64 * 1024, "Notification output")
+        require(output.isNotBlank())
+        return encode(id, AppServerMethod.TURN_START,
+            JSONObject().put("threadId", threadId).put("input", JSONArray()).put("toolOutput",
+                JSONObject().put("name", "push_event").put("namespace", "hans_notifications")
+                    .put("output", output)),
+            context = RequestContext.NotificationToolOutputTurn(threadId))
+    }
+
+    /** One bounded passive persisted-history page; no model execution or UI hydration. */
+    internal fun notificationExternalHistory(
+        id: RequestId,
+        threadId: String,
+        decoder: ExtensionResultDecoder,
+    ): EncodedRequest {
+        requireOpaqueId(threadId, "Thread id")
+        return encode(id, AppServerMethod.THREAD_TURNS_LIST,
+            JSONObject().put("threadId", threadId).put("limit", 8)
+                .put("sortDirection", "desc").put("itemsView", "full"),
+            extensionResultDecoder = decoder)
     }
 
     internal fun turnSteer(

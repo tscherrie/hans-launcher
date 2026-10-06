@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Declare explicit English support; the complete English copy is in values/. -->
+    <string name="hans_resolved_ui_language">en</string>
+</resources>

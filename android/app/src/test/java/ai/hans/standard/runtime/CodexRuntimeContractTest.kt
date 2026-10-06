@@ -44,6 +44,7 @@ class CodexRuntimeContractTest {
                 "ANDROID_DATA",
                 "ANDROID_ROOT",
                 "CODEX_HOME",
+                "CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED",
                 "HOME",
                 "HTTPS_PROXY",
                 "HTTP_PROXY",
@@ -57,6 +58,7 @@ class CodexRuntimeContractTest {
             environment.keys,
         )
         assertEquals(directories.homeDirectory.path, environment.getValue("HOME"))
+        assertEquals("1", environment.getValue("CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED"))
         assertEquals(directories.codexHomeDirectory.path, environment.getValue("CODEX_HOME"))
         assertEquals(directories.temporaryDirectory.path, environment.getValue("TMPDIR"))
         assertEquals(environment.getValue("HTTP_PROXY"), environment.getValue("HTTPS_PROXY"))

@@ -1,5 +1,8 @@
 package ai.hans.standard.setup
 
+import ai.hans.standard.R
+import ai.hans.standard.localization.HansTextResolver
+
 /**
  * Last-line defence for assistant text produced while the conversational Hans setup is active.
  *
@@ -13,10 +16,10 @@ object HansSetupOutputSanitizer {
      * Sanitizes assistant-authored text only when the caller has correlated it to an active setup
      * turn. Ordinary assistant text is returned byte-for-byte unchanged.
      */
-    fun sanitizeAssistantText(text: String, setupActive: Boolean): String {
+    fun sanitizeAssistantText(text: String, setupActive: Boolean, resolver: HansTextResolver): String {
         if (!setupActive || text.isBlank()) return text
 
-        val naturalized = naturalizeKnownPhrases(text)
+        val naturalized = naturalizeKnownPhrases(text, resolver)
         if (!containsInternalSetupValue(naturalized)) return naturalized
 
         // A partial redaction of a state/tool JSON dump can still disclose adjacent fields or
@@ -24,56 +27,56 @@ object HansSetupOutputSanitizer {
         // retain only a bounded, demonstrably safe trailing question when one exists.
         val safeQuestion = trailingSafeQuestion(naturalized)
         return buildString {
-            append("Ich habe den Einrichtungsstand intern geprüft.")
+            append(resolver.text(R.string.integration_setup_checked))
             if (safeQuestion != null) {
                 append(' ')
                 append(safeQuestion)
             } else {
-                append(" Möchtest du mit der Einrichtung fortfahren?")
+                append(resolver.text(R.string.integration_setup_continue))
             }
         }
     }
 
-    private fun naturalizeKnownPhrases(text: String): String {
+    private fun naturalizeKnownPhrases(text: String, resolver: HansTextResolver): String {
         var output = text
 
         INTRO_SCREEN_CONFIRMATION.replace(
             output,
-            "Möchtest du die Einrichtung jetzt starten?",
+            resolver.text(R.string.integration_setup_begin),
         ).also { output = it }
 
         CURRENT_STEP_SENTENCE.replace(output) { match ->
             val step = match.groups[1]?.value?.lowercase()
             if (step == "intro") {
-                "Die Einrichtung ist bereit."
+                resolver.text(R.string.integration_setup_ready)
             } else {
-                val label = STEP_LABELS[step]
-                if (label == null) "Als Nächstes folgt ein weiterer Einrichtungsschritt."
-                else "Als Nächstes geht es um $label."
+                val label = stepLabels(resolver)[step]
+                if (label == null) resolver.text(R.string.integration_setup_next)
+                else resolver.text(R.string.integration_setup_next_label, label)
             }
         }.also { output = it }
 
-        TOOL_WITH_PREPOSITION.replace(output, "intern").also { output = it }
-        QUALIFIED_TOOL.replace(output, "die interne Einrichtungsprüfung").also { output = it }
-        UNQUALIFIED_TOOL.replace(output, "die interne Einrichtungsprüfung").also { output = it }
-        QUOTED_AMBIGUOUS_TOOL.replace(output, "die interne Einrichtungsprüfung")
+        TOOL_WITH_PREPOSITION.replace(output, resolver.text(R.string.integration_setup_internal)).also { output = it }
+        QUALIFIED_TOOL.replace(output, resolver.text(R.string.integration_setup_internal_check)).also { output = it }
+        UNQUALIFIED_TOOL.replace(output, resolver.text(R.string.integration_setup_internal_check)).also { output = it }
+        QUOTED_AMBIGUOUS_TOOL.replace(output, resolver.text(R.string.integration_setup_internal_check))
             .also { output = it }
 
         // Naturalize the well-known enum values when the model mentions one in prose. Structured
         // key/value output is still rejected by containsInternalSetupValue below.
         STEP_CONTEXT.replace(output) { match ->
-            STEP_LABELS[match.groups[1]?.value?.lowercase()]
-                ?: "der nächste Einrichtungsschritt"
+            stepLabels(resolver)[match.groups[1]?.value?.lowercase()]
+                ?: resolver.text(R.string.integration_setup_next_step)
         }.also { output = it }
         STEP_TOKEN.replace(output) { match ->
-            STEP_LABELS[match.value.lowercase()] ?: "der nächste Einrichtungsschritt"
+            stepLabels(resolver)[match.value.lowercase()] ?: resolver.text(R.string.integration_setup_next_step)
         }.also { output = it }
         QUOTED_SIMPLE_STEP.replace(output) { match ->
-            STEP_LABELS[match.groups[1]?.value?.lowercase()]
-                ?: "der nächste Einrichtungsschritt"
+            stepLabels(resolver)[match.groups[1]?.value?.lowercase()]
+                ?: resolver.text(R.string.integration_setup_next_step)
         }.also { output = it }
         STATUS_TOKEN.replace(output) { match ->
-            STATUS_LABELS[match.groups[1]?.value?.lowercase()] ?: "in Prüfung"
+            statusLabels(resolver)[match.groups[1]?.value?.lowercase()] ?: resolver.text(R.string.integration_setup_checking)
         }.also { output = it }
 
         return output
@@ -101,33 +104,33 @@ object HansSetupOutputSanitizer {
         return question.takeIf { it.none(Char::isISOControl) }
     }
 
-    private val STEP_LABELS = mapOf(
-        "intro" to "den Start der Einrichtung",
-        "input_choice" to "deine bevorzugte Spracheingabe",
-        "hardware_mapping" to "die Belegung deiner Hardwaretaste",
-        "hardware_live_test" to "den Funktionstest deiner Hardwaretaste",
-        "camera_hold_choice" to "die optionale Haltegeste am Kameraknopf",
-        "camera_hold_live_test" to "den Test von Kamera und Haltegeste",
-        "notification_access" to "den Benachrichtigungszugriff",
-        "notification_live_test" to "den Benachrichtigungstest",
-        "accessibility_access" to "die Bedienungshilfe für die App-Steuerung",
-        "accessibility_live_test" to "den Test der App-Steuerung",
-        "home_role" to "Hans als Startbildschirm",
-        "microphone_access" to "den Mikrofonzugriff",
-        "voice_dictation_test" to "den Sprachtest",
-        "model_reasoning" to "Modell und Denkaufwand",
-        "personal_profile" to "unser Kennenlerngespräch",
-        "review" to "die gemeinsame Abschlussprüfung",
-        "complete" to "den Abschluss der Einrichtung",
+    private fun stepLabels(resolver: HansTextResolver) = mapOf(
+        "intro" to resolver.text(R.string.integration_setup_intro),
+        "input_choice" to resolver.text(R.string.integration_setup_input),
+        "hardware_mapping" to resolver.text(R.string.integration_setup_mapping),
+        "hardware_live_test" to resolver.text(R.string.integration_setup_hardware_test),
+        "camera_hold_choice" to resolver.text(R.string.integration_setup_hold_choice),
+        "camera_hold_live_test" to resolver.text(R.string.integration_setup_camera_test),
+        "notification_access" to resolver.text(R.string.integration_setup_notification_access),
+        "notification_live_test" to resolver.text(R.string.integration_setup_notification_test),
+        "accessibility_access" to resolver.text(R.string.integration_setup_accessibility),
+        "accessibility_live_test" to resolver.text(R.string.integration_setup_accessibility_test),
+        "home_role" to resolver.text(R.string.integration_setup_home),
+        "microphone_access" to resolver.text(R.string.integration_setup_microphone),
+        "voice_dictation_test" to resolver.text(R.string.integration_setup_voice_test),
+        "model_reasoning" to resolver.text(R.string.integration_setup_model),
+        "personal_profile" to resolver.text(R.string.integration_setup_profile),
+        "review" to resolver.text(R.string.integration_setup_review),
+        "complete" to resolver.text(R.string.integration_setup_complete),
     )
 
-    private val STATUS_LABELS = mapOf(
-        "awaiting_user" to "auf deine Entscheidung wartend",
-        "settings_opened" to "mit geöffneter Android-Einstellung",
-        "verifying" to "in Prüfung",
-        "verified" to "bestätigt",
-        "skipped" to "auf deinen Wunsch übersprungen",
-        "blocked" to "noch nicht möglich",
+    private fun statusLabels(resolver: HansTextResolver) = mapOf(
+        "awaiting_user" to resolver.text(R.string.integration_setup_awaiting),
+        "settings_opened" to resolver.text(R.string.integration_setup_settings_opened),
+        "verifying" to resolver.text(R.string.integration_setup_checking),
+        "verified" to resolver.text(R.string.integration_setup_verified),
+        "skipped" to resolver.text(R.string.integration_setup_skipped),
+        "blocked" to resolver.text(R.string.integration_setup_blocked),
     )
 
     private val CURRENT_STEP_SENTENCE = Regex(

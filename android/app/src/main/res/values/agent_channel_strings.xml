@@ -1,0 +1,21 @@
+<resources xmlns:tools="http://schemas.android.com/tools" tools:locale="en">
+    <string name="agent_channel_title">Agent messages</string>
+    <string name="agent_channel_disclosure">Only your confirmed WhatsApp self-chat can send agent requests. Start requests with [Codex:]. Hans replies with [Hans:]. Linked WhatsApp devices are trusted; no other chat or messenger is allowed.</string>
+    <string name="agent_channel_enabled">Self-chat allowed</string>
+    <string name="agent_channel_disabled">Not set up</string>
+    <string name="agent_channel_unavailable">Channel unavailable. No requests will run.</string>
+    <string name="agent_channel_pending">Waiting requests: %1$d</string>
+    <string name="agent_channel_uncertain">Unconfirmed handoffs: %1$d. They will not be repeated automatically.</string>
+    <string name="agent_channel_configure">Confirm WhatsApp self-chat</string>
+    <string name="agent_channel_disable">Disable channel</string>
+    <string name="agent_channel_choose">Choose your actual self-chat. Names alone do not prove identity. Only a recent WhatsApp conversation with usable Android identity metadata can be selected.</string>
+    <string name="agent_channel_no_candidates">No eligible conversation received. Send a short [Codex:] message to your own WhatsApp self-chat from a linked device, keep WhatsApp in the background on this phone, then try again. If WhatsApp sends no notification, this channel cannot receive the request.</string>
+    <string name="agent_channel_confirm_title">Allow this self-chat?</string>
+    <string name="agent_channel_confirm_body">Confirm that “%1$s” is your own WhatsApp self-chat, not another contact. Requests starting with [Codex:] can run in Hans using its existing permissions. All devices linked to this WhatsApp account are trusted. Confirming does not run earlier messages.</string>
+    <string name="agent_channel_confirm">Allow self-chat</string>
+    <string name="agent_channel_cancel">Cancel</string>
+    <string name="agent_channel_close">Close</string>
+    <string name="agent_channel_confirm_failed">The conversation could not be confirmed. Receive a fresh self-chat notification and try again.</string>
+    <string name="agent_channel_unknown_title">WhatsApp conversation</string>
+    <string name="agent_channel_lookup_required">Incomplete agent message. Send it again as a short, complete text in your self-chat. Its preview has not been executed.</string>
+</resources>

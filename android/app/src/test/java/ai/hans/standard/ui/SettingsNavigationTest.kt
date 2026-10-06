@@ -1,37 +1,74 @@
 package ai.hans.standard.ui
 
+import ai.hans.standard.localization.TestResourceTextResolver
+import java.util.Locale
+
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Test
 
 class SettingsNavigationTest {
+    private val localizationText by lazy { TestResourceTextResolver(Locale.GERMAN) }
+
     @Test
-    fun incomingDesktopControlHasItsOwnGroupSeparateFromOutgoingAdvancedWork() {
+    fun sixTaskOrientedGroupsKeepTheirStableIdsAndHideLegacyEntries() {
         assertEquals(
             listOf(
-                "permissions" to "Berechtigungen",
                 "runtime" to "Modell & Antworten",
-                "speech" to "Stimme & Vorlesen",
-                "input" to "Tasten & Bedienung",
-                "personal" to "Einrichtung & Gedächtnis",
-                "remote_control" to "Fernzugriff durch ChatGPT Desktop",
-                "advanced_work" to "Erweiterte Arbeit",
-                "maintenance" to "Zugänge & Sicherung",
+                "speech" to "Sprache & Diktat",
+                "input" to "Tasten & Anzeige",
+                "personal" to "Hans & Gedächtnis",
+                "permissions" to "Berechtigungen & Datenschutz",
+                "maintenance" to "System & Erweitert",
             ),
-            SettingsGroup.entries.map { it.id to it.title },
+            SettingsGroup.availableGroups.map { it.id to localizationText.text(it.titleResource) },
         )
+        assertFalse(SettingsGroup.REMOTE_CONTROL.available)
+        assertFalse(SettingsGroup.ADVANCED_WORK.available)
     }
 
     @Test
     fun openingEachGroupHasItsOwnTitleAndReturnsToTheUnchangedOverview() {
         val overview = SettingsNavigation()
-        SettingsGroup.entries.forEach { group ->
+        SettingsGroup.availableGroups.forEach { group ->
             val opened = overview.open(group)
             assertEquals(group, opened.group)
-            assertEquals(group.title, opened.title)
+            assertEquals(group.titleResource, opened.titleResource)
             assertEquals(overview, opened.backToGroups())
             assertNull(overview.group)
-            assertEquals("Menü", overview.title)
+            assertEquals("Menü", localizationText.text(overview.titleResource))
+        }
+    }
+
+    @Test
+    fun disabledDesktopDestinationCannotBeOpenedOrRestored() {
+        val requested = SettingsNavigation().open(SettingsGroup.REMOTE_CONTROL)
+        val restored = SettingsNavigation(SettingsGroup.REMOTE_CONTROL)
+        listOf(requested, restored).forEach { navigation ->
+            assertNull(navigation.group)
+            assertEquals("Menü", localizationText.text(navigation.titleResource))
+            assertEquals(SettingsNavigation(), navigation.backToGroups())
+        }
+        assertEquals(SettingsGroup.MAINTENANCE,
+            SettingsNavigation().open(SettingsGroup.ADVANCED_WORK).group)
+    }
+
+    @Test
+    fun restoredAdvancedWorkRedirectsToSystemWithoutRevivingTheOldGroup() {
+        val restored = SettingsNavigation(SettingsGroup.ADVANCED_WORK)
+        assertEquals(SettingsGroup.MAINTENANCE, restored.group)
+        assertEquals("System & Erweitert", localizationText.text(restored.titleResource))
+        assertEquals(SettingsNavigation(), restored.backToGroups())
+    }
+
+    @Test
+    fun defaultEnglishAndUnsupportedLocaleKeepTheSameSixCategoryOrder() {
+        listOf(Locale.ENGLISH, Locale.FRENCH).forEach { locale ->
+            val text = TestResourceTextResolver(locale)
+            assertEquals(listOf("Model & responses", "Voice & dictation", "Keys & display",
+                "Hans & memory", "Permissions & privacy", "System & advanced"),
+                SettingsGroup.availableGroups.map { text.text(it.titleResource) })
         }
     }
 
@@ -51,6 +88,6 @@ class SettingsNavigationTest {
         val reopenedSession = SettingsNavigation()
         assertEquals(SettingsGroup.MAINTENANCE, earlierSession.group)
         assertNull(reopenedSession.group)
-        assertEquals("Menü", reopenedSession.title)
+        assertEquals("Menü", localizationText.text(reopenedSession.titleResource))
     }
 }

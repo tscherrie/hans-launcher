@@ -1,17 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <string name="hans_accessibility_service_label">Hans App-Steuerung</string>
-    <string name="hans_accessibility_service_description">Ermöglicht Hans nach deiner ausdrücklichen Aktivierung, sichtbare Android-Oberflächen semantisch zu lesen, bei nicht erkennbaren Bedienelementen einzelne Bildschirmbilder an Codex zur Auswertung zu senden und bestätigte Bedienaktionen auszuführen. Hans legt die Bilder nicht als Datei ab; geschützte Fenster werden nicht erfasst.</string>
-    <string name="accessibility_sensitive_confirmation_title">Sensible Telefonaktion erlauben?</string>
-    <string name="accessibility_sensitive_confirmation_click">Hans möchte in %1$s (%2$s) ein Bedienelement antippen.</string>
-    <string name="accessibility_sensitive_confirmation_set_text">Hans möchte in %1$s (%2$s) Text in ein Eingabefeld eintragen.</string>
-    <string name="accessibility_sensitive_confirmation_scroll">Hans möchte in %1$s (%2$s) den sichtbaren Inhalt bewegen.</string>
-    <string name="accessibility_sensitive_confirmation_global">Hans möchte während der Bedienung von %1$s (%2$s) eine Android-Navigationstaste verwenden.</string>
-    <string name="accessibility_sensitive_confirmation_gesture">Hans möchte in %1$s (%2$s) eine bestätigte Bildschirmgeste ausführen.</string>
-    <string name="accessibility_sensitive_confirmation_risk_external_communication">Diese Aktion kann Inhalte an andere Personen oder Dienste senden oder veröffentlichen.</string>
-    <string name="accessibility_sensitive_confirmation_risk_destructive">Diese Aktion kann Daten entfernen oder eine Bestellung, Zahlung oder ein Abonnement auslösen.</string>
-    <string name="accessibility_sensitive_confirmation_risk_credential">Diese Aktion betrifft Zugangsdaten, Berechtigungen oder eine andere besonders geschützte Oberfläche.</string>
-    <string name="accessibility_sensitive_confirmation_once">Dieser Zugriff gilt nur für diese eine Aktion.</string>
-    <string name="accessibility_sensitive_confirmation_deny">Ablehnen</string>
-    <string name="accessibility_sensitive_confirmation_allow_once">Einmal erlauben</string>
+<resources xmlns:tools="http://schemas.android.com/tools" tools:locale="en">
+    <string name="hans_accessibility_service_label">Hans app control</string>
+    <string name="hans_accessibility_service_description">After you explicitly enable it, Hans can read visible Android interfaces semantically, send individual screenshots to Codex for analysis when controls cannot be identified, and perform confirmed actions. Hans does not save these images as files; protected windows are not captured.</string>
+    <string name="accessibility_sensitive_confirmation_title">Allow a sensitive phone action?</string>
+    <string name="accessibility_sensitive_confirmation_click">Hans wants to tap a control in %1$s (%2$s).</string>
+    <string name="accessibility_sensitive_confirmation_set_text">Hans wants to enter text into a field in %1$s (%2$s).</string>
+    <string name="accessibility_sensitive_confirmation_scroll">Hans wants to scroll the visible content in %1$s (%2$s).</string>
+    <string name="accessibility_sensitive_confirmation_global">While using %1$s (%2$s), Hans wants to use an Android navigation button.</string>
+    <string name="accessibility_sensitive_confirmation_gesture">Hans wants to perform a confirmed screen gesture in %1$s (%2$s).</string>
+    <string name="accessibility_sensitive_confirmation_risk_external_communication">This action may send or publish content to other people or services.</string>
+    <string name="accessibility_sensitive_confirmation_risk_destructive">This action may remove data or place an order, make a payment or start a subscription.</string>
+    <string name="accessibility_sensitive_confirmation_risk_credential">This action involves credentials, permissions or another specially protected interface.</string>
+    <string name="accessibility_sensitive_confirmation_once">This permission applies to this one action only.</string>
+    <string name="accessibility_sensitive_confirmation_deny">Deny</string>
+    <string name="accessibility_sensitive_confirmation_allow_once">Allow once</string>
 </resources>

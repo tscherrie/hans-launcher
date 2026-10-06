@@ -29,7 +29,7 @@ class SettingsPersistentAndroidConsentTest {
         )
         var requested = 0
         val revoked = mutableListOf<PersistentAndroidConsentDescriptor>()
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 SettingsScreen(
                     state = SettingsUiState(
@@ -68,7 +68,7 @@ class SettingsPersistentAndroidConsentTest {
         val everyday = PersistentAndroidConsentDescriptor.category(PersistentAndroidConsentScope.OPEN_APP)
         val revoked = mutableListOf<PersistentAndroidConsentDescriptor>()
         var active by mutableStateOf(true)
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 SettingsScreen(
                     state = SettingsUiState(
@@ -103,7 +103,7 @@ class SettingsPersistentAndroidConsentTest {
             PersistentAndroidConsentScope.INSTALLED_APPS_READ,
         )
         val revoked = mutableListOf<PersistentAndroidConsentDescriptor>()
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 SettingsScreen(
                     state = SettingsUiState(
@@ -135,7 +135,7 @@ class SettingsPersistentAndroidConsentTest {
     fun everydayBundleCanBeExplicitlyEnabledAndActiveStateIsVisible() {
         var requested = 0
         var active by mutableStateOf(false)
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 SettingsScreen(
                     state = SettingsUiState(everydayAccessBundleActive = active),
@@ -167,7 +167,7 @@ class SettingsPersistentAndroidConsentTest {
     @Test
     fun linkMetadataIsSeparateDefaultOffOptInWithNetworkDisclosure() {
         var requested = 0
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 SettingsScreen(
                     state = SettingsUiState(),

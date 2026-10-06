@@ -39,6 +39,7 @@ data class NotificationSnapshot(
     val ongoing: Boolean,
     val clearable: Boolean,
     val actions: List<NotificationActionMetadata>,
+    val agentChannelSource: ai.hans.standard.notifications.agentchannel.WhatsAppNotificationSource? = null,
 )
 
 sealed interface NotificationSignal {

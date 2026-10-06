@@ -6,12 +6,9 @@ import android.content.Context
 import android.content.ContextWrapper
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.ui.semantics.SemanticsProperties
-import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
-import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasTestTag
@@ -21,7 +18,6 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
-import androidx.compose.ui.text.AnnotatedString
 import androidx.test.platform.app.InstrumentationRegistry
 import java.io.File
 import java.util.UUID
@@ -39,14 +35,15 @@ class DictationLatencyUiTest {
     fun livePreviewUsesTheUserMessageCardWithoutExtraLabelsOrDispatch() {
         val composerEdits = mutableListOf<String>()
         val sent = mutableListOf<String>()
-        compose.setContent {
+        val state = mutableStateOf(ChatUiState(
+            composer = ComposerUiState(text = "Vorhandener Tippentwurf", enabled = false),
+            dictationStatus = DictationUiStatus.LISTENING,
+            dictationPreview = "Vorläufig erkannter Sprachtext",
+        ))
+        compose.setGermanContent {
             MaterialTheme {
                 ChatScreen(
-                    state = ChatUiState(
-                        composer = ComposerUiState(text = "Vorhandener Tippentwurf", enabled = false),
-                        dictationStatus = DictationUiStatus.LISTENING,
-                        dictationPreview = "Vorläufig erkannter Sprachtext",
-                    ),
+                    state = state.value,
                     callbacks = chatCallbacks(onEdit = composerEdits::add, onSend = sent::add),
                 )
             }
@@ -64,18 +61,15 @@ class DictationLatencyUiTest {
         compose.onNodeWithText("Vorläufig · noch nicht gesendet").assertDoesNotExist()
         compose.onNodeWithTag("dictation_status_listening").assertDoesNotExist()
         compose.onNodeWithTag("dictation_composer_lock").assertDoesNotExist()
-        compose.onNodeWithTag("composer")
-            .assertIsNotEnabled()
-            .assert(
-                SemanticsMatcher.expectValue(
-                    SemanticsProperties.EditableText,
-                    AnnotatedString("Vorhandener Tippentwurf"),
-                ),
-            )
+        compose.onNodeWithTag("composer").assertDoesNotExist()
+        compose.onNodeWithTag("voice_task_composer").assertIsDisplayed()
         compose.runOnIdle {
             assertTrue(composerEdits.isEmpty())
             assertTrue(sent.isEmpty())
+            state.value = state.value.copy(dictationStatus = null,
+                composer = state.value.composer.copy(enabled = true))
         }
+        compose.onNodeWithTag("composer").assertTextEquals("Vorhandener Tippentwurf")
     }
 
     @Test
@@ -88,7 +82,7 @@ class DictationLatencyUiTest {
             ),
         )
         val sent = mutableListOf<String>()
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme { ChatScreen(state.value, chatCallbacks(onSend = sent::add)) }
         }
         compose.onNodeWithTag("dictation_preview").performScrollTo()
@@ -126,9 +120,9 @@ class DictationLatencyUiTest {
     }
 
     @Test
-    fun blankLivePreviewKeepsTheExistingStatusWithoutASeparateLockBanner() {
+    fun blankLivePreviewUsesTheCompactVoicePanelWithoutASeparateLockBanner() {
         val state = mutableStateOf(ChatUiState(composer = ComposerUiState(enabled = false)))
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme { ChatScreen(state.value, chatCallbacks()) }
         }
         listOf(DictationUiStatus.LISTENING, DictationUiStatus.FINALIZING).forEach { phase ->
@@ -136,15 +130,15 @@ class DictationLatencyUiTest {
                 compose.runOnIdle {
                     state.value = state.value.copy(dictationStatus = phase, dictationPreview = preview)
                 }
-                compose.onNodeWithTag("dictation_status_${phase.name.lowercase()}")
-                    .performScrollTo()
-                    .assertIsDisplayed()
-                    .assertTextEquals(phase.label)
+                compose.onNodeWithTag("dictation_status_${phase.name.lowercase()}").assertDoesNotExist()
+                compose.onNodeWithTag("voice_task_status").assertIsDisplayed()
+                    .assertTextEquals(if (phase == DictationUiStatus.LISTENING) "Ich höre zu"
+                        else "Wird transkribiert …")
                 compose.onNodeWithTag("dictation_preview").assertDoesNotExist()
                 compose.onNodeWithTag("message_dictation-preview").assertDoesNotExist()
                 compose.onNodeWithTag("dictation_composer_lock").assertDoesNotExist()
                 compose.onNodeWithText("Vorläufig · noch nicht gesendet").assertDoesNotExist()
-                compose.onNodeWithTag("composer").assertIsNotEnabled()
+                compose.onNodeWithTag("composer").assertDoesNotExist()
             }
         }
     }
@@ -152,7 +146,7 @@ class DictationLatencyUiTest {
     @Test
     fun livePreviewKeepsMarkdownAndLinkLikeInputLiteral() {
         val transcript = "**Wörtlich** [Link](https://example.invalid) `Code`\n# Keine Überschrift"
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 ChatScreen(
                     ChatUiState(
@@ -182,7 +176,7 @@ class DictationLatencyUiTest {
             ),
         )
         val sent = mutableListOf<String>()
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme { ChatScreen(state.value, chatCallbacks(onSend = sent::add)) }
         }
         compose.onNodeWithTag("message_dictation-preview").performScrollTo().assertIsDisplayed()
@@ -218,7 +212,7 @@ class DictationLatencyUiTest {
     @Test
     fun provisionalTextIsAbsentOutsideListeningAndFinalizing() {
         val status = mutableStateOf<DictationUiStatus?>(null)
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 ChatScreen(
                     ChatUiState(dictationStatus = status.value, dictationPreview = "Nicht zeigen"),
@@ -238,16 +232,26 @@ class DictationLatencyUiTest {
     @Test
     fun selectingDelayOnlyRequestsChangeWithoutInventingPersistenceOrServerAcceptance() {
         val requests = mutableListOf<SttTranscriptionDelay>()
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme {
                 SettingsScreen(SettingsUiState(), settingsCallbacks(requests::add))
             }
         }
         compose.onNodeWithTag("stt_delay_minimal").assertDoesNotExist()
-        compose.onNodeWithTag("settings_group_personal").performScrollTo().performClick()
+        compose.onNodeWithTag("settings_group_speech").performScrollTo().performClick()
+        if (ai.hans.standard.voice.android.CodexDictationIntegration.enabled) {
+            compose.onNodeWithTag("codex_dictation_access").assertDoesNotExist()
+            compose.onNodeWithTag("voice_usage_help_toggle").performScrollTo().performClick()
+            compose.onNodeWithTag("codex_dictation_access").assertExists()
+            compose.onNodeWithTag("stt_delay_low").assertDoesNotExist()
+            compose.onNodeWithTag("stt_delay_minimal").assertDoesNotExist()
+            compose.onNodeWithTag("stt_delay_confirmed").assertDoesNotExist()
+            compose.runOnIdle { assertTrue(requests.isEmpty()) }
+            return
+        }
+        compose.onNodeWithTag("codex_dictation_access").assertDoesNotExist()
         compose.onNodeWithTag("stt_delay_low").performScrollTo().assertTextEquals("✓ Low · Standard")
         compose.onNodeWithTag("stt_delay_minimal").performScrollTo().performClick()
-
         compose.runOnIdle { assertEquals(listOf(SttTranscriptionDelay.MINIMAL), requests) }
         compose.onNodeWithTag("stt_delay_minimal").assertTextEquals("Minimal · früherer Text")
         compose.onNodeWithTag("stt_delay_low").performScrollTo().assertTextEquals("✓ Low · Standard")
@@ -265,10 +269,21 @@ class DictationLatencyUiTest {
             ),
         )
         val requests = mutableListOf<SttTranscriptionDelay>()
-        compose.setContent {
+        compose.setGermanContent {
             MaterialTheme { SettingsScreen(state.value, settingsCallbacks(requests::add)) }
         }
-        compose.onNodeWithTag("settings_group_personal").performScrollTo().performClick()
+        compose.onNodeWithTag("settings_group_speech").performScrollTo().performClick()
+        if (ai.hans.standard.voice.android.CodexDictationIntegration.enabled) {
+            compose.onNodeWithTag("codex_dictation_access").assertDoesNotExist()
+            compose.onNodeWithTag("voice_usage_help_toggle").performScrollTo().performClick()
+            compose.onNodeWithTag("codex_dictation_access").assertExists()
+            compose.onNodeWithTag("stt_delay_low").assertDoesNotExist()
+            compose.onNodeWithTag("stt_delay_minimal").assertDoesNotExist()
+            compose.onNodeWithTag("stt_delay_confirmed").assertDoesNotExist()
+            compose.runOnIdle { assertTrue(requests.isEmpty()) }
+            return
+        }
+        compose.onNodeWithTag("codex_dictation_access").assertDoesNotExist()
         compose.onNodeWithTag("stt_delay_minimal").performScrollTo()
             .assertTextEquals("✓ Minimal · früherer Text")
         compose.onNodeWithTag("stt_delay_confirmed").performScrollTo()
@@ -279,7 +294,6 @@ class DictationLatencyUiTest {
             .assertTextEquals("✓ Minimal · früherer Text")
         compose.onNodeWithTag("stt_delay_confirmed").performScrollTo()
             .assertTextEquals("Für die laufende Aufnahme vom Server bestätigt: low")
-
         compose.runOnIdle { state.value = state.value.copy(sttLatency = state.value.sttLatency.copy(confirmedActive = null)) }
         compose.onNodeWithTag("stt_delay_confirmed").assertDoesNotExist()
     }

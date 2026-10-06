@@ -56,6 +56,9 @@ data class ThreadStartResult(
 
 data object ThreadMemoryModeSetResult : AppServerResult
 
+/** Storage barrier only; never adds history or changes the selected thread in the reducer. */
+data class ThreadMaterializeResult(val threadId: String) : AppServerResult
+
 /** Receipt of the operation only; effective settings require thread/settings/updated. */
 data object ThreadSettingsUpdateResult : AppServerResult
 
@@ -79,6 +82,13 @@ data class TurnStartResult(
 ) : AppServerResult {
     fun asActiveTurn(): ActiveTurn = ActiveTurn(threadId, turnId, effectiveOptions)
 }
+
+/** Actual native identity receipt only: omitted model overrides do not prove settings. */
+internal data class NotificationToolOutputTurnResult(
+    val threadId: String,
+    val turnId: String,
+    val status: TurnStatus,
+)
 
 data class TurnSteerResult(
     val threadId: String,
@@ -232,10 +242,20 @@ private fun parseResult(request: EncodedRequest, result: JSONObject): AppServerR
         AppServerMethod.MODEL_LIST -> parseModelList(request, result)
         AppServerMethod.THREAD_START -> parseThreadStart(request, result)
         AppServerMethod.THREAD_RESUME -> parseThreadResume(request, result)
+        AppServerMethod.THREAD_READ -> parseThreadMaterialize(request, result)
         AppServerMethod.THREAD_SETTINGS_UPDATE -> parseThreadSettingsUpdate(request, result)
         AppServerMethod.THREAD_MEMORY_MODE_SET -> parseThreadMemoryModeSet(result)
         AppServerMethod.THREAD_LIST -> parseThreadList(result)
-        AppServerMethod.TURN_START -> parseTurnStart(request, result)
+        AppServerMethod.TURN_START -> if (request.context is RequestContext.NotificationToolOutputTurn) {
+            val context = request.context
+            val turn = JsonContract.requiredObject(result, "turn")
+            ExtensionAppServerResult(NotificationToolOutputTurnResult(context.threadId,
+                JsonContract.requiredString(turn, "id", ProtocolLimits.MAX_OPAQUE_ID_CHARS)
+                    .also { requireOpaqueId(it, "Turn id") },
+                TurnStatus.fromWire(JsonContract.requiredString(turn, "status", 64))))
+        } else parseTurnStart(request, result)
+        AppServerMethod.THREAD_TURNS_LIST -> ExtensionAppServerResult(
+            checkNotNull(request.extensionResultDecoder).decode(result))
         AppServerMethod.TURN_STEER -> parseTurnSteer(request, result)
         AppServerMethod.TURN_INTERRUPT -> parseTurnInterrupt(request, result)
         AppServerMethod.SKILLS_LIST -> parseSkillsList(result)
@@ -305,6 +325,34 @@ private fun parseAccountLogout(result: JSONObject): AccountLogoutResult {
 private fun parseThreadMemoryModeSet(result: JSONObject): ThreadMemoryModeSetResult {
     JsonContract.requireOnlyKeys(result, emptySet(), "thread/memoryMode/set result")
     return ThreadMemoryModeSetResult
+}
+
+private fun parseThreadMaterialize(
+    request: EncodedRequest,
+    result: JSONObject,
+): ThreadMaterializeResult {
+    val context = request.context as? RequestContext.ThreadMaterialize
+        ?: throw CrossCorrelationException("thread/read materialization context is missing")
+    JsonContract.requireUtf8Bound(result.toString(), ProtocolLimits.MAX_FRESH_THREAD_RECEIPT_BYTES,
+        "Fresh thread receipt")
+    JsonContract.requireOnlyKeys(result, setOf("thread"), "thread/read result")
+    val thread = JsonContract.requiredObject(result, "thread")
+    val id = JsonContract.requiredString(thread, "id", ProtocolLimits.MAX_OPAQUE_ID_CHARS)
+    if (id != context.threadId) {
+        throw CrossCorrelationException("thread/read confirmed a different thread")
+    }
+    if (JsonContract.requiredBoolean(thread, "ephemeral") ||
+        JsonContract.requiredString(thread, "historyMode", 32) != "paginated" ||
+        JsonContract.requiredArray(thread, "turns").length() != 0 ||
+        JsonContract.requiredString(JsonContract.requiredObject(thread, "status"), "type", 32) != "idle"
+    ) {
+        throw CrossCorrelationException("thread/read did not confirm an empty durable idle thread")
+    }
+    val rolloutPath = JsonContract.requiredString(thread, "path", ProtocolLimits.MAX_PATH_CHARS)
+    if (!rolloutPath.startsWith('/') || '\u0000' in rolloutPath) {
+        throw MalformedEnvelopeException("Fresh thread rollout path must be absolute and contain no NUL")
+    }
+    return ThreadMaterializeResult(id)
 }
 
 private fun parseThreadSettingsUpdate(

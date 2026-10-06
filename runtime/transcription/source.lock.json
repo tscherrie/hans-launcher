@@ -1,0 +1,11 @@
+{
+  "helperVersion": "0.1.0",
+  "rustVersion": "1.96.0",
+  "target": "aarch64-unknown-linux-musl",
+  "upstreamVersion": "0.155.0",
+  "upstreamCommit": "f0a1b8f0849d90960bc406b848f32e5a129b0457",
+  "sourceUrl": "https://codeload.github.com/openai/codex/tar.gz/f0a1b8f0849d90960bc406b848f32e5a129b0457",
+  "sourceSha256": "60bdaceda9354f65701d3d67b2b240201b25d1327df36028332d640a42a3e454",
+  "sourceBytes": 14498329,
+  "apkLibraryName": "libcodex_transcribe.so"
+}

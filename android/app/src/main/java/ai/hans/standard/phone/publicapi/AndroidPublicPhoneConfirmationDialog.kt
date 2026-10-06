@@ -1,5 +1,8 @@
 package ai.hans.standard.phone.publicapi
 
+import ai.hans.standard.R
+import ai.hans.standard.localization.AndroidHansTextResolver
+
 import android.app.Activity
 import android.app.AlertDialog
 import androidx.lifecycle.Lifecycle
@@ -71,7 +74,7 @@ class AndroidPublicPhoneConfirmationDialog(
                     val builder = AlertDialog.Builder(activity)
                         .setTitle(titleFor(request.risk))
                         .setMessage(messageFor(request, persistentDescriptor != null))
-                        .setNegativeButton("Ablehnen", null)
+                        .setNegativeButton(AndroidHansTextResolver(activity).text(R.string.integration_decline_7be75ce), null)
                         .setOnCancelListener {
                             decision.compareAndSet(DialogDecision.PENDING, DialogDecision.REJECTED)
                         }
@@ -79,8 +82,8 @@ class AndroidPublicPhoneConfirmationDialog(
                         builder.setPositiveButton(positiveLabelFor(request.risk), null)
                     } else {
                         builder
-                            .setNeutralButton("Einmal erlauben", null)
-                            .setPositiveButton("Dauerhaft erlauben", null)
+                            .setNeutralButton(AndroidHansTextResolver(activity).text(R.string.integration_allow_once_90153ce), null)
+                            .setPositiveButton(AndroidHansTextResolver(activity).text(R.string.integration_always_allow_179369f), null)
                     }
                     val dialog = builder.create()
                     dialog.setOnDismissListener {
@@ -190,15 +193,15 @@ class AndroidPublicPhoneConfirmationDialog(
     }
 
     private fun titleFor(risk: PublicPhoneRisk): String = when (risk) {
-        PublicPhoneRisk.SENSITIVE_READ -> "Private Telefondaten lesen?"
-        PublicPhoneRisk.USER_VISIBLE -> "Telefonaktion öffnen?"
-        PublicPhoneRisk.EXTERNAL_MUTATION -> "Externe Aktion ausführen?"
+        PublicPhoneRisk.SENSITIVE_READ -> AndroidHansTextResolver(activity).text(R.string.integration_read_private_phone_data_07caa81)
+        PublicPhoneRisk.USER_VISIBLE -> AndroidHansTextResolver(activity).text(R.string.integration_open_phone_action_cf02e19)
+        PublicPhoneRisk.EXTERNAL_MUTATION -> AndroidHansTextResolver(activity).text(R.string.integration_perform_external_action_9dc204b)
     }
 
     private fun positiveLabelFor(risk: PublicPhoneRisk): String = when (risk) {
-        PublicPhoneRisk.SENSITIVE_READ -> "Einmal erlauben"
-        PublicPhoneRisk.USER_VISIBLE -> "Jetzt öffnen"
-        PublicPhoneRisk.EXTERNAL_MUTATION -> "Jetzt ausführen"
+        PublicPhoneRisk.SENSITIVE_READ -> AndroidHansTextResolver(activity).text(R.string.integration_allow_once_90153ce)
+        PublicPhoneRisk.USER_VISIBLE -> AndroidHansTextResolver(activity).text(R.string.integration_open_now_6cc1431)
+        PublicPhoneRisk.EXTERNAL_MUTATION -> AndroidHansTextResolver(activity).text(R.string.integration_run_now_119b406)
     }
 
     private fun exactGrant(request: PublicPhoneConfirmationRequest) =
@@ -214,11 +217,11 @@ class AndroidPublicPhoneConfirmationDialog(
         persistentEligible: Boolean,
     ): String = if (persistentEligible) {
         val category = if (request.risk == PublicPhoneRisk.SENSITIVE_READ) {
-            "diese private Lesekategorie"
+            AndroidHansTextResolver(activity).text(R.string.integration_this_category_of_private_data_reads_13a8dc8)
         } else {
-            "diese sichtbare Öffnungsaktion"
+            AndroidHansTextResolver(activity).text(R.string.integration_this_visible_opening_action_4fee8fb)
         }
-        "${request.displaySummary} Du kannst $category dauerhaft erlauben und später in Hans widerrufen. Die Android-Systemberechtigung ist separat."
+        AndroidHansTextResolver(activity).text(R.string.integration_1_you_can_always_allow_2_and_revoke_this_later_in_hans__10452fb, request.displaySummary, category)
     } else {
         request.displaySummary
     }

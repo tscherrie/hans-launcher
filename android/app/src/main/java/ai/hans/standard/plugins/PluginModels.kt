@@ -1,5 +1,7 @@
 package ai.hans.standard.plugins
 
+import androidx.annotation.StringRes
+
 import ai.hans.standard.codex.ProtocolLimits
 
 @JvmInline
@@ -277,9 +279,9 @@ data class PluginConnectionActionSnapshot(
     val pluginId: String,
     val serverId: String,
     val kind: PluginConnectionActionKind,
-    val title: String,
-    val message: String,
-    val actionLabel: String,
+    @StringRes val titleResource: Int,
+    @StringRes val messageResource: Int,
+    @StringRes val actionLabelResource: Int,
     val policyReview: PluginRemoteMcpPolicyReviewSnapshot? = null,
 )
 

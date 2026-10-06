@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools" tools:locale="en">
+    <string name="codex_live_remote_access_active">Pause desktop remote access before starting a Live call. This Codex version cannot safely distinguish simultaneous desktop and voice tasks. Your pairing stays saved.</string>
+    <string name="codex_live_access">Live calls, dictation and read-aloud use your ChatGPT sign-in. Availability and limits depend on your account. No API key needed.</string>
+    <string name="codex_live_sign_in_required">Voice features need your ChatGPT sign-in. Reconnect Codex in Hans. No API key needed.</string>
+    <string name="codex_live_usage_limit">The ChatGPT Live voice limit has been reached. Check your account limits and try again later. Adding API credit does not reset this limit.</string>
+    <string name="codex_live_not_available">Codex Live voice is not currently available for this account or runtime. No API fallback was started.</string>
+    <string name="codex_live_session_not_ready">The Hans task is not ready for Live. Wait for Codex to reconnect, then start the call again.</string>
+    <string name="codex_live_interrupted">The Codex Live call could not connect or was interrupted. Check the connection and try again. Existing tasks were not sent again.</string>
+    <string name="codex_dictation_title">Dictation</string>
+    <string name="codex_dictation_access">Records locally and transcribes after you stop, using your ChatGPT sign-in. The finished text is sent once to your current Hans task. This compatibility endpoint may not be available for every account. No API key or Live call is used.</string>
+    <string name="codex_batch_transcription_unavailable">ChatGPT dictation is currently unavailable. The compatibility endpoint may not be supported by your account.</string>
+    <string name="codex_batch_transcription_failed">Dictation could not be transcribed. No API key was used and nothing was sent to Hans.</string>
+    <string name="codex_dictation_unconfirmed">The dictated request could not be fully confirmed. Hans may already be working; check the chat before repeating it. The request will not be retried automatically.</string>
+    <string name="codex_live_recovery_required">The previous voice session has not finished closing. Wait briefly and try again. If this persists, report this error for diagnosis. Running Codex tasks have not been interrupted.</string>
+</resources>

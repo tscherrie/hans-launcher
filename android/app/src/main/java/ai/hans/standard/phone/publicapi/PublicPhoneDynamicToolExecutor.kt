@@ -1,5 +1,8 @@
 package ai.hans.standard.phone.publicapi
 
+import ai.hans.standard.R
+import ai.hans.standard.localization.HansTextResolver
+
 import ai.hans.standard.codex.DynamicToolCallParams
 import ai.hans.standard.codex.DynamicToolCancellation
 import ai.hans.standard.codex.DynamicToolExecutionResult
@@ -21,6 +24,7 @@ class PublicPhoneDynamicToolExecutor(
     private val backgroundExecutor: Executor,
     private val confirmations: PublicPhoneConfirmationProvider =
         PublicPhoneConfirmationProvider.NONE,
+    private val text: HansTextResolver,
 ) : DynamicToolExecutor {
     override val specs: List<DynamicToolNamespaceSpec> =
         listOf(PublicPhoneDynamicToolCatalog.namespace)
@@ -96,7 +100,7 @@ class PublicPhoneDynamicToolExecutor(
                 tool = call.tool,
                 risk = risk,
                 argumentFingerprint = fingerprint,
-                displaySummary = command.summary,
+                displaySummary = command.summary(text),
                 persistentConsentScope = command.persistentConsentScope,
             )
             if (!gate.markExternalEffectStarted()) {
@@ -632,22 +636,22 @@ class PublicPhoneDynamicToolExecutor(
     private sealed class Command(
         val risk: PublicPhoneRisk?,
         val requiredCapabilities: Set<String>,
-        val summary: String,
+        val summary: (HansTextResolver) -> String,
         val persistentConsentScope: PersistentAndroidConsentScope? = null,
     ) {
-        data object Capabilities : Command(null, emptySet(), "Telefonfunktionen prüfen")
+        data object Capabilities : Command(null, emptySet(), { text -> text.text(R.string.integration_phone_capabilities) })
 
         class SearchContacts(val query: String, val limit: Int) : Command(
             PublicPhoneRisk.SENSITIVE_READ,
             setOf("contacts.read"),
-            "Kontakte nach einem Namen oder Begriff durchsuchen.",
+            { text -> text.text(R.string.integration_phone_contacts_search) },
             PersistentAndroidConsentScope.READ_CONTACTS,
         )
 
         class LookupContact(val contactId: Long) : Command(
             PublicPhoneRisk.SENSITIVE_READ,
             setOf("contacts.read"),
-            "Telefonnummern und E-Mail-Adressen eines Kontakts lesen.",
+            { text -> text.text(R.string.integration_phone_contact_read) },
             PersistentAndroidConsentScope.READ_CONTACTS,
         )
 
@@ -655,21 +659,21 @@ class PublicPhoneDynamicToolExecutor(
             Command(
                 PublicPhoneRisk.SENSITIVE_READ,
                 setOf("calendar.read"),
-                "Kalendereinträge im angegebenen Zeitraum lesen.",
+                { text -> text.text(R.string.integration_phone_calendar_read) },
                 PersistentAndroidConsentScope.READ_CALENDAR,
             )
 
         class ReadLocation(val mode: LocationReadMode, val timeoutMillis: Long) : Command(
             PublicPhoneRisk.SENSITIVE_READ,
             setOf("location.read"),
-            "Den Standort des Telefons lesen.",
+            { text -> text.text(R.string.integration_phone_location_read) },
             PersistentAndroidConsentScope.READ_LOCATION,
         )
 
         class ReadSensors(val types: Set<PublicSensorType>, val timeoutMillis: Long) : Command(
             PublicPhoneRisk.SENSITIVE_READ,
             setOf("sensors.snapshot"),
-            "Eine Momentaufnahme ausgewählter Telefonsensoren lesen.",
+            { text -> text.text(R.string.integration_phone_sensors_read) },
             PersistentAndroidConsentScope.READ_SENSORS,
         )
 
@@ -680,40 +684,34 @@ class PublicPhoneDynamicToolExecutor(
         ) : Command(
             PublicPhoneRisk.SENSITIVE_READ,
             kinds.mapTo(mutableSetOf()) { "media.${it.wireName}.catalog" },
-            "Metadaten aus dem freigegebenen Medienkatalog lesen.",
+            { text -> text.text(R.string.integration_phone_media_read) },
             PersistentAndroidConsentScope.READ_MEDIA,
         )
 
         class OpenCamera(val mode: CameraCaptureMode) : Command(
             PublicPhoneRisk.USER_VISIBLE,
             setOf("camera.open_capture_ui"),
-            "Die Kamera sichtbar im Modus ${mode.wireName} öffnen. Die Aufnahme bleibt unter Nutzerkontrolle.",
+            { text -> text.text(R.string.integration_phone_camera, mode.wireName) },
             PersistentAndroidConsentScope.OPEN_CAMERA,
         )
 
         class PrepareCalendar(val draft: CalendarEventDraft) : Command(
             PublicPhoneRisk.USER_VISIBLE,
             emptySet(),
-            PublicPhoneBounds.cleanUntrusted(
-                "Kalendereditor mit dem Entwurf '${draft.title}' sichtbar öffnen; gespeichert wird erst durch den Nutzer.",
-                512,
-            ),
+            { text -> PublicPhoneBounds.cleanUntrusted(text.text(R.string.integration_phone_calendar_draft, draft.title), 512) },
             PersistentAndroidConsentScope.PREPARE_CALENDAR_EVENT,
         )
 
         class CreateCalendar(val draft: CalendarEventDraft) : Command(
             PublicPhoneRisk.EXTERNAL_MUTATION,
             setOf("calendar.create"),
-            PublicPhoneBounds.cleanUntrusted(
-                "Kalendereintrag '${draft.title}' jetzt direkt erstellen.",
-                512,
-            ),
+            { text -> PublicPhoneBounds.cleanUntrusted(text.text(R.string.integration_phone_calendar_create, draft.title), 512) },
         )
 
         class ListReplyableNotifications(val limit: Int) : Command(
             PublicPhoneRisk.SENSITIVE_READ,
             setOf("notifications.reply"),
-            "Aktive Benachrichtigungen mit Antwortmöglichkeit lesen.",
+            { text -> text.text(R.string.integration_phone_notifications) },
             PersistentAndroidConsentScope.READ_REPLYABLE_NOTIFICATIONS,
         )
 
@@ -724,10 +722,7 @@ class PublicPhoneDynamicToolExecutor(
         ) : Command(
             PublicPhoneRisk.EXTERNAL_MUTATION,
             setOf("notifications.reply"),
-            PublicPhoneBounds.cleanUntrusted(
-                "Diese Nachricht jetzt über eine Benachrichtigung senden: '$message'",
-                512,
-            ),
+            { text -> PublicPhoneBounds.cleanUntrusted(text.text(R.string.integration_phone_reply, message), 512) },
         )
     }
 
