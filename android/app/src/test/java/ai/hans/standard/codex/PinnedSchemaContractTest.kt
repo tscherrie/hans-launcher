@@ -13,6 +13,18 @@ class PinnedSchemaContractTest {
         JSONObject(schemaFile().readText()).getJSONObject("definitions")
     }
 
+    @Test fun nativeTurnContextSupportsUntrustedDataForStartAndSteer() {
+        assertEquals(setOf("kind", "value"), required("AdditionalContextEntry"))
+        val kinds = definitions.getJSONObject("AdditionalContextKind").getJSONArray("enum")
+        assertEquals(setOf("untrusted", "application"),
+            (0 until kinds.length()).map(kinds::getString).toSet())
+        listOf("TurnStartParams", "TurnSteerParams").forEach { name ->
+            val entry = definitions.getJSONObject(name).getJSONObject("properties")
+                .getJSONObject("additionalContext").getJSONObject("additionalProperties")
+            assertEquals("#/definitions/AdditionalContextEntry", entry.getString("\$ref"))
+        }
+    }
+
     @Test
     fun yoloSandboxHasDifferentPinnedThreadAndTurnWireShapes() {
         val sandboxMode = definitions.getJSONObject("SandboxMode").getJSONArray("enum")

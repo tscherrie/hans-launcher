@@ -21,6 +21,44 @@ class EventDrivenSemanticSnapshotWaiterTest {
     }
 
     @Test
+    fun transientMissingRootRecoversFromPublishedEventWithoutRepeatedCapture() {
+        val harness = Harness()
+        harness.fresh.set(null)
+        val captureFinished = CountDownLatch(1)
+        harness.afterCapture = { captureFinished.countDown() }
+        val task = harness.start { true }
+        try {
+            assertTrue(captureFinished.await(2, TimeUnit.SECONDS))
+            val recovered = frame(3, "root available")
+            harness.current.set(recovered)
+            harness.waiter.wake()
+            assertSame(recovered, task.get(2, TimeUnit.SECONDS))
+            assertEquals(1, harness.captures.get())
+        } finally { harness.cancelAndWake() }
+    }
+
+    @Test
+    fun shortVisualRecoveryDeadlineIsNotExtendedByMissingRootEvents() {
+        val harness = Harness()
+        harness.fresh.set(null)
+        val captureFinished = CountDownLatch(1)
+        harness.afterCapture = { captureFinished.countDown() }
+        val task = FutureTask {
+            harness.waiter.await(750, harness.cancelled::get, harness.available::get) { true }
+        }
+        Thread(task).apply { isDaemon = true; start() }
+        try {
+            assertTrue(captureFinished.await(2, TimeUnit.SECONDS))
+            harness.current.set(null)
+            harness.now.set(750)
+            harness.waiter.wake()
+            assertNull(task.get(2, TimeUnit.SECONDS))
+            assertEquals(750L, harness.captureBudget.get())
+            assertEquals(1, harness.captures.get())
+        } finally { harness.cancelAndWake() }
+    }
+
+    @Test
     fun targetArrivingAfterInitialWrongScreenWakesWaitAndCapturesOnlyOnce() {
         val harness = Harness()
         val firstRead = CountDownLatch(1)

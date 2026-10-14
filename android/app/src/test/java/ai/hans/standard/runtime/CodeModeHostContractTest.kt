@@ -46,7 +46,10 @@ class CodeModeHostContractTest {
         val arguments = CodeModeHostContract.appServerArguments("http://127.0.0.1:45678")
 
         assertEquals("--strict-config", arguments.first())
-        assertEquals(28, arguments.count { it == "-c" })
+        assertEquals(29, arguments.count { it == "-c" })
+        assertEquals(1, arguments.count { it == "model=\"gpt-6.1-sol\"" })
+        assertEquals(1, arguments.count { it == "model_reasoning_effort=\"high\"" })
+        assertEquals(1, arguments.count { it == "service_tier=\"priority\"" })
         assertEquals(1, arguments.count { it == "features.memories=true" })
         assertEquals(1, arguments.count { it == "memories.generate_memories=true" })
         assertEquals(1, arguments.count { it == "memories.use_memories=true" })

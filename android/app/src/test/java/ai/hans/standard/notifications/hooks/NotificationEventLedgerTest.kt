@@ -334,15 +334,26 @@ class NotificationEventLedgerTest {
         val (ledger, storage) = fixture { now }
         ledger.activateAfter(0)
         ledger.accept(event(1))
-        ledger.accept(event(2))
+        // Removing the first source must leave this unrelated READY event active.
+        ledger.accept(event(2, key = "unrelated-active-source"))
         val claim = ledger.claim(ledger.pending().first().eventId, "main-thread")!!
         ledger.accepted(claim, "main-thread", "turn-1")
+        val text = "Historical report expires with its terminal record"
+        val report = NotificationEventReport("hans-notice-one", text, notificationEventSha256(text), null)
+        assertEquals(report, ledger.commitReport(claim.eventId, "main-thread", "turn-1", report))
         ledger.settle(claim.eventId, "main-thread", "turn-1", true)
+        assertTrue(ledger.remove(claim.packageName, claim.androidKey))
+        assertEquals(listOf(report), ledger.reports("main-thread"))
         now += NotificationEventLimits.TOMBSTONE_MILLIS + 1
         ledger.accept(event(3))
         assertEquals(listOf(2L, 3L), storage.state!!.records.map { it.sequence })
+        assertTrue(storage.state!!.records.first().sourceActive)
+        assertEquals(NotificationEventPhase.READY, storage.state!!.records.first().phase)
+        assertTrue(ledger.reports("main-thread").isEmpty())
+        assertFalse(NotificationEventStateCodec.encode(storage.state!!).contains(text))
         assertTrue(ledger.accept(event(1))) // cursor avoids replay after tombstone compaction
         assertEquals(2, ledger.pending().size)
+        assertTrue(ledger.reports("main-thread").isEmpty())
     }
 
     @Test fun fullLedgerOfCompletedEventsCompactsOldestTombstoneInsteadOfBlockingEveryNewPush() {
@@ -351,11 +362,19 @@ class NotificationEventLedgerTest {
             assertTrue(ledger.accept(event(index + 1L)))
             val claim = ledger.claim(ledger.pending().single().eventId, "main-thread")!!
             assertTrue(ledger.accepted(claim, "main-thread", "turn-$index"))
+            if (index == 0) {
+                val report = NotificationEventReport("hans-notice-oldest", "Oldest retained report",
+                    notificationEventSha256("Oldest retained report"), null)
+                assertEquals(report, ledger.commitReport(claim.eventId, "main-thread", "turn-$index", report))
+            }
             assertTrue(ledger.settle(claim.eventId, "main-thread", "turn-$index", true))
         }
+        assertEquals(1, ledger.reports("main-thread").size)
         assertTrue(ledger.accept(event(257)))
         assertEquals(256, storage.state!!.records.size)
         assertFalse(storage.state!!.records.any { it.sequence == 1L })
+        assertTrue(ledger.reports("main-thread").isEmpty())
+        assertFalse(NotificationEventStateCodec.encode(storage.state!!).contains("Oldest retained report"))
         assertEquals(listOf(257L), ledger.pending().map { it.sequence })
         assertTrue(ledger.accept(event(1))) // durable cursor still ACKs old replay without work
         assertEquals(1, ledger.pending().size)
@@ -461,8 +480,8 @@ class NotificationEventLedgerTest {
         assertEquals(0L, reopened.status().outcomes.speechQueuedCount)
     }
 
-    @Test fun sourceRemovalExclusionAndPrivacyClearEraseOnlyMatchingDurableReportText() {
-        val (ledger, _) = active()
+    @Test fun removalRetainsHistoricalTextButExclusionAndPrivacyClearStillEraseIt() {
+        val (ledger, storage) = active()
         val receipts = (1L..2L).map { sequence ->
             ledger.accept(event(sequence, key = "source-$sequence", packageName = "source.app$sequence"))
             val claim = ledger.claim(ledger.pending().last().eventId, "main-thread")!!
@@ -473,12 +492,114 @@ class NotificationEventLedgerTest {
         }
         assertEquals(receipts, ledger.reports("main-thread"))
         assertTrue(ledger.remove("source.app1", "source-1"))
+        assertEquals(receipts, ledger.reports("main-thread"))
+        assertEquals(listOf(receipts[1]), ledger.reports("main-thread") { it != "source.app1" })
+        assertTrue(ledger.purgeExcluded { it != "source.app1" })
         assertEquals(listOf(receipts[1]), ledger.reports("main-thread"))
+        assertFalse(NotificationEventStateCodec.encode(storage.state!!).contains(receipts[0].text))
         assertTrue(ledger.reports("main-thread") { false }.isEmpty())
-        assertTrue(ledger.purgeExcluded { it != "source.app2" })
-        assertTrue(ledger.reports("main-thread").isEmpty())
         assertTrue(ledger.clearPrivateData())
         assertTrue(ledger.reports("main-thread").isEmpty())
+        assertFalse(NotificationEventStateCodec.encode(storage.state!!).contains(receipts[1].text))
+        val reopened = NotificationEventLedger(storage)
+        assertTrue(reopened.accept(event(1, key = "source-1", packageName = "source.app1")))
+        assertTrue(reopened.accept(event(2, key = "source-2", packageName = "source.app2")))
+        assertTrue(reopened.pending().isEmpty())
+        assertTrue(reopened.reports("main-thread").isEmpty())
+    }
+
+    @Test fun removedAdmittedReportSurvivesCodecReopenAndLateTerminalReceiptWithoutNewAuthority() {
+        val (ledger, storage) = active()
+        assertTrue(ledger.accept(event(1)))
+        val claim = ledger.claim(ledger.pending().single().eventId, "main-thread")!!
+        val report = NotificationEventReport("hans-notice-one", "Your train was cancelled.",
+            notificationEventSha256("Your train was cancelled."), "native-anchor")
+        assertEquals(report, ledger.commitReport(claim.eventId, "main-thread", "turn-1", report))
+        assertTrue(ledger.accept(event(2, NotificationEventKind.REMOVED)))
+        storage.state = NotificationEventStateCodec.decode(NotificationEventStateCodec.encode(storage.state!!))
+        val reopened = NotificationEventLedger(storage)
+        assertEquals(listOf(report), reopened.reports("main-thread"))
+        assertTrue(reopened.reports("other-thread").isEmpty())
+        assertTrue(reopened.pending().isEmpty())
+        assertFalse(reopened.mayTransmit(claim))
+        assertFalse(reopened.hasLiveReportSource(claim.eventId, "main-thread", claim.packageName, claim.androidKey))
+        assertNull(reopened.reportFor(claim.eventId, "main-thread", "turn-1"))
+        assertNull(reopened.reportSourceFor(claim.eventId, "main-thread", "turn-1"))
+        assertNull(reopened.commitReport(claim.eventId, "main-thread", "turn-1", report))
+        assertNull(reopened.commitReport(claim.eventId, "main-thread", "turn-1", report.copy(text = "Changed",
+            textSha256 = notificationEventSha256("Changed"))))
+        assertTrue(reopened.accepted(claim, "main-thread", "turn-1"))
+        assertTrue(reopened.settle(claim.eventId, "main-thread", "turn-1", true))
+        storage.state = NotificationEventStateCodec.decode(NotificationEventStateCodec.encode(storage.state!!))
+        val terminal = NotificationEventLedger(storage)
+        assertTrue(terminal.accepted(claim, "main-thread", "turn-1"))
+        assertEquals(listOf(report), terminal.reports("main-thread"))
+        assertEquals(NotificationEventPhase.COMPLETED, storage.state!!.records.single().phase)
+        assertFalse(storage.state!!.records.single().sourceActive)
+        assertEquals("", storage.state!!.records.single().payloadJson)
+        assertEquals(0L, terminal.status().outcomes.speechQueuedCount)
+    }
+
+    @Test fun inactiveSourceCannotCreateReportAfterLateNativeAcceptance() {
+        val (ledger, storage) = active()
+        ledger.accept(event(1))
+        val claim = ledger.claim(ledger.pending().single().eventId, "main-thread")!!
+        assertTrue(ledger.markSubmitted(claim))
+        assertTrue(ledger.remove(claim.packageName, claim.androidKey))
+        assertTrue(ledger.accepted(claim, "main-thread", "turn-1"))
+        val report = NotificationEventReport("hans-notice-late", "This report arrived too late.",
+            notificationEventSha256("This report arrived too late."), null)
+        assertNull(ledger.commitReport(claim.eventId, "main-thread", "turn-1", report))
+        assertTrue(ledger.reports("main-thread").isEmpty())
+        assertFalse(ledger.hasLiveReportSource(claim.eventId, "main-thread", claim.packageName, claim.androidKey))
+        assertEquals("", storage.state!!.records.single().payloadJson)
+    }
+
+    @Test fun supersededSourceRetainsEachAdmittedReportOnceWithoutReplayingEarlierSpeech() {
+        val (ledger, storage) = active()
+        ledger.accept(event(1, body = "Train delayed"))
+        val first = ledger.claim(ledger.pending().single().eventId, "main-thread")!!
+        val firstReport = NotificationEventReport("hans-notice-one", "Your train is delayed.",
+            notificationEventSha256("Your train is delayed."), null)
+        assertEquals(firstReport, ledger.commitReport(first.eventId, "main-thread", "turn-1", firstReport))
+        assertTrue(ledger.settle(first.eventId, "main-thread", "turn-1", true))
+        assertTrue(ledger.remove(first.packageName, first.androidKey))
+        assertTrue(ledger.accept(event(2, NotificationEventKind.UPDATED, "Train cancelled")))
+        val second = ledger.claim(ledger.pending().single().eventId, "main-thread")!!
+        val secondReport = NotificationEventReport("hans-notice-two", "Your train was cancelled.",
+            notificationEventSha256("Your train was cancelled."), null)
+        assertEquals(secondReport, ledger.commitReport(second.eventId, "main-thread", "turn-2", secondReport))
+        assertEquals(secondReport, ledger.commitReport(second.eventId, "main-thread", "turn-2",
+            secondReport.copy(id = "hans-notice-retry")))
+        storage.state = NotificationEventStateCodec.decode(NotificationEventStateCodec.encode(storage.state!!))
+        val reopened = NotificationEventLedger(storage)
+        assertEquals(listOf(firstReport, secondReport), reopened.reports("main-thread"))
+        assertNull(reopened.commitReport(first.eventId, "main-thread", "turn-1", firstReport))
+        assertTrue(reopened.pending().isEmpty())
+        assertFalse(reopened.hasLiveReportSource(first.eventId, "main-thread", first.packageName, first.androidKey))
+        assertEquals(0L, reopened.status().outcomes.speechQueuedCount)
+    }
+
+    @Test fun codecRejectsHistoricalReportAsPendingTaskOrRestoredExternalPayload() {
+        val (ledger, storage) = active()
+        ledger.accept(event(1))
+        val claim = ledger.claim(ledger.pending().single().eventId, "main-thread")!!
+        val originalPayload = claim.payloadJson
+        val report = NotificationEventReport("hans-notice-one", "Admitted report",
+            notificationEventSha256("Admitted report"), null)
+        ledger.commitReport(claim.eventId, "main-thread", "turn-1", report)
+        ledger.remove(claim.packageName, claim.androidKey)
+        val restoredPayload = JSONObject(NotificationEventStateCodec.encode(storage.state!!))
+        restoredPayload.getJSONArray("records").getJSONObject(0).put("payloadJson", originalPayload)
+        assertThrows(IllegalArgumentException::class.java) {
+            NotificationEventStateCodec.decode(restoredPayload.toString())
+        }
+        val pendingReport = JSONObject(NotificationEventStateCodec.encode(storage.state!!))
+        pendingReport.getJSONArray("records").getJSONObject(0).put("phase", NotificationEventPhase.SUBMITTED.name)
+            .put("payloadJson", originalPayload)
+        assertThrows(IllegalArgumentException::class.java) {
+            NotificationEventStateCodec.decode(pendingReport.toString())
+        }
     }
 
     @Test fun failedDurableReportCommitAndCorruptedReportHashCannotClaimPresentation() {

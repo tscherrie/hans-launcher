@@ -24,8 +24,8 @@ sealed interface CodexInput {
     /**
      * Context supplied by Hans rather than typed by the user.
      *
-     * App Server 0.154.0 has no separate per-turn developer-context input, so this is encoded as
-     * an ordinary text input on the wire. Keeping it as a distinct Kotlin type prevents it from
+     * Legacy routing input, encoded as ordinary text on the wire. New historical data belongs
+     * in [UntrustedTurnContext], not in this user-input list. Keeping this distinct prevents it from
      * being projected into the visible user-message bubble. Callers must wrap all external data
      * with explicit data-only boundaries before constructing this value.
      */
@@ -345,6 +345,7 @@ object AppServerRequests {
         input: List<CodexInput>,
         options: DispatchOptions,
         clientUserMessageId: String? = null,
+        additionalContext: UntrustedTurnContext? = null,
     ): EncodedRequest {
         requireOpaqueId(threadId, "Thread id")
         require(input.isNotEmpty()) { "A turn requires at least one input" }
@@ -366,6 +367,7 @@ object AppServerRequests {
             .putIfNotNull("personality", options.personality?.wireValue)
             .putIfNotNull("summary", options.reasoningSummary?.wireValue)
             .putIfNotNull("clientUserMessageId", clientUserMessageId)
+            .putIfNotNull("additionalContext", additionalContext?.toJson())
         return encode(
             id = id,
             method = AppServerMethod.TURN_START,
@@ -408,9 +410,11 @@ object AppServerRequests {
         activeTurn: ActiveTurn,
         input: List<CodexInput>,
         clientUserMessageId: String? = null,
+        additionalContext: UntrustedTurnContext? = null,
     ): EncodedRequest = encodeTurnSteer(
         id, activeTurn.threadId, activeTurn.turnId, input, clientUserMessageId,
         activeTurn.effectiveOptions,
+        additionalContext,
     )
 
     /** A recovered active identity permits steering, but proves no model or reasoning options. */
@@ -420,8 +424,10 @@ object AppServerRequests {
         expectedTurnId: String,
         input: List<CodexInput>,
         clientUserMessageId: String? = null,
+        additionalContext: UntrustedTurnContext? = null,
     ): EncodedRequest = encodeTurnSteer(
         id, threadId, expectedTurnId, input, clientUserMessageId, effectiveOptions = null,
+        additionalContext = additionalContext,
     )
 
     private fun encodeTurnSteer(
@@ -431,6 +437,7 @@ object AppServerRequests {
         input: List<CodexInput>,
         clientUserMessageId: String?,
         effectiveOptions: DispatchOptions?,
+        additionalContext: UntrustedTurnContext?,
     ): EncodedRequest {
         requireOpaqueId(threadId, "Thread id")
         requireOpaqueId(expectedTurnId, "Expected turn id")
@@ -444,7 +451,8 @@ object AppServerRequests {
                 .put("threadId", threadId)
                 .put("expectedTurnId", expectedTurnId)
                 .put("input", input.toJsonArray())
-                .putIfNotNull("clientUserMessageId", clientUserMessageId),
+                .putIfNotNull("clientUserMessageId", clientUserMessageId)
+                .putIfNotNull("additionalContext", additionalContext?.toJson()),
             context = RequestContext.TurnSteer(
                 threadId = threadId,
                 expectedTurnId = expectedTurnId,

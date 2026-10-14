@@ -1119,6 +1119,12 @@ class HansSetupRepository(
 
     private fun normalize(document: HansSetupDocument): HansSetupDocument {
         var next = document
+        // A signed update must not reopen a completed setup or invent a voice test receipt.
+        if (HansSetupStep.SYSTEM_SPEECH !in next.steps &&
+            next.record(HansSetupStep.COMPLETE).status == HansSetupStepStatus.VERIFIED) {
+            next = next.withStatus(HansSetupStep.SYSTEM_SPEECH, HansSetupStepStatus.SKIPPED,
+                "system_speech_upgrade_available_in_settings")
+        }
         val keyCapture = next.record(HansSetupStep.HARDWARE_MAPPING)
         if (
             keyCapture.status == HansSetupStepStatus.VERIFYING &&
@@ -1451,6 +1457,7 @@ class HansSetupRepository(
                 setOf(HansSetupStep.CAMERA_HOLD_LIVE_TEST),
         )
         val DECLINABLE_STEPS = DECLINE_DEPENDENCIES.keys + setOf(
+            HansSetupStep.SYSTEM_SPEECH,
             HansSetupStep.HARDWARE_LIVE_TEST,
             HansSetupStep.CAMERA_CAPTURE_TEST,
             HansSetupStep.CAMERA_HOLD_LIVE_TEST,

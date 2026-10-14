@@ -18,6 +18,8 @@
         <exclude domain="sharedpref" path="hans_dynamic_tool_contract_v1.xml" />
         <exclude domain="sharedpref" path="hans_file_links_v1.xml" />
         <exclude domain="sharedpref" path="hans_speech_credential_v1.xml" />
+        <exclude domain="sharedpref" path="hans_fast_phone_credential_v1.xml" />
+        <exclude domain="sharedpref" path="hans_fast_phone_use_v1.xml" />
         <!-- The private interview document is not a confirmed-profile export. -->
         <exclude domain="file" path="hans-user-profile-v1.json" />
         <exclude domain="file" path="hans-user-profile-v1.json.bak" />
@@ -44,6 +46,8 @@
         <exclude domain="sharedpref" path="hans_dynamic_tool_contract_v1.xml" />
         <exclude domain="sharedpref" path="hans_file_links_v1.xml" />
         <exclude domain="sharedpref" path="hans_speech_credential_v1.xml" />
+        <exclude domain="sharedpref" path="hans_fast_phone_credential_v1.xml" />
+        <exclude domain="sharedpref" path="hans_fast_phone_use_v1.xml" />
         <!-- Do not transfer drafts, confirmation nonces, or AtomicFile recovery copies. -->
         <exclude domain="file" path="hans-user-profile-v1.json" />
         <exclude domain="file" path="hans-user-profile-v1.json.bak" />

@@ -5,6 +5,7 @@ import ai.hans.standard.codex.DynamicToolExecutionResult
 import ai.hans.standard.diagnostics.ToolFailureCode
 import ai.hans.standard.diagnostics.ToolFailureDetail
 import ai.hans.standard.diagnostics.ToolFailureDiagnostic
+import ai.hans.standard.diagnostics.HistoricalDynamicToolFailureClassifier
 import ai.hans.standard.phone.accessibility.AccessibilityCommand
 import ai.hans.standard.phone.accessibility.AccessibilityConfirmationRequest
 import ai.hans.standard.phone.accessibility.AccessibilityConfirmationRisk
@@ -38,12 +39,14 @@ import ai.hans.standard.phone.accessibility.android.AccessibilitySnapshotFailure
 import ai.hans.standard.phone.accessibility.android.AccessibilitySensitiveActionApproval
 import ai.hans.standard.phone.accessibility.android.AndroidDictationLifecycleRegistry
 import ai.hans.standard.phone.accessibility.android.HansAccessibilitySession
+import ai.hans.standard.phone.accessibility.android.SemanticSnapshotContent
 import ai.hans.standard.phone.accessibility.android.VisualUiCapture
 import ai.hans.standard.phone.accessibility.android.VisualUiCaptureResult
 import ai.hans.standard.phone.accessibility.resume.UiTaskContinuationCheckpoint
 import ai.hans.standard.phone.accessibility.resume.UiTaskContinuationCheckpointer
 import java.util.concurrent.Executor
 import org.json.JSONObject
+import org.json.JSONArray
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -117,7 +120,7 @@ class AndroidAccessibilityDynamicToolsTest {
     }
 
     @Test
-    fun visualExpiryIsLocalMetadataOnlyAndDoesNotCaptureOrDispatch() {
+    fun visualExpiryPersistsOnlyAllowlistedDetailAndDoesNotCaptureOrDispatch() {
         listOf("inspect_visual_ui", "visual_gesture_fallback").forEach { tool ->
             var now = 1L
             val proofs = VisualFallbackProofStore({ now }, { "fallback:expired-proof" })
@@ -133,10 +136,109 @@ class AndroidAccessibilityDynamicToolsTest {
                 ToolFailureCode.SEMANTIC_FALLBACK_PROOF_REQUIRED, ToolFailureDetail.PROOF_EXPIRED,
             ), result.failureDiagnostic)
             assertEquals(JSONObject().put("status", "failed").put("capability", "android_accessibility")
-                .put("errorCode", "semantic_fallback_proof_required").toString(), result.contentText)
+                .put("errorCode", "semantic_fallback_proof_required")
+                .put("detailCode", "proof_expired").toString(), result.contentText)
+            val persisted = JSONObject().put("type", "dynamicToolCall")
+                .put("status", "completed").put("success", false)
+                .put("contentItems", JSONArray().put(JSONObject()
+                    .put("type", "inputText").put("text", result.contentText)))
+            assertEquals(result.failureDiagnostic, HistoricalDynamicToolFailureClassifier.classify(persisted))
             assertEquals(0, session.captureCalls)
+            assertTrue(session.visualRevalidations.isEmpty())
             assertTrue(session.commands.isEmpty())
         }
+    }
+
+    @Test
+    fun identicalEventRecaptureKeepsVisualEvidenceAndRebindsOnlyOneGesture() {
+        val original = snapshot()
+        val recaptured = snapshot(correlation = CORRELATION.copy(snapshotId = AccessibilitySnapshotId(2)))
+        val session = FakeSession(
+            snapshot = recaptured,
+            visualRevalidation = { correlation ->
+                recaptured.takeIf { correlation == original.correlation &&
+                    SemanticSnapshotContent.same(original, recaptured) }
+            },
+        )
+        val proofs = VisualFallbackProofStore({ 1L }, { "fallback:unchanged-event" })
+        val token = proofs.issue(call("find_ui", "find"), original.correlation)
+        val tools = executor(session, fallbackProofs = proofs)
+
+        val result = tools.run(call("visual_gesture_fallback", "gesture", gestureArgs(token)))
+
+        assertTrue(result.success)
+        val command = session.commands.single() as AccessibilityCommand.CoordinateGesture
+        assertEquals(recaptured.correlation, command.correlation)
+        assertEquals(listOf(original.correlation), session.visualRevalidations)
+        assertEquals(listOf(recaptured.correlation), session.commandPins)
+        assertFalse(tools.run(call("visual_gesture_fallback", "again", gestureArgs(token))).success)
+        assertEquals(1, session.commands.size)
+    }
+
+    @Test
+    fun unchangedRecaptureAllowsScreenshotButChangedContentOrHostIdentityGrantsNothing() {
+        listOf("unchanged", "content_changed", "identity_changed").forEach { scenario ->
+            val original = snapshot()
+            val recaptured = snapshot(
+                packageName = if (scenario == "content_changed") "org.example.different" else "org.example.store",
+                correlation = CORRELATION.copy(snapshotId = AccessibilitySnapshotId(2)),
+            )
+            val session = FakeSession(
+                snapshot = recaptured,
+                visualCapture = VisualUiCaptureResult.Success(VisualUiCapture(
+                    correlation = recaptured.correlation,
+                    imageDataUrl = "data:image/jpeg;base64,AQIDBA==",
+                    pixelWidth = 480, pixelHeight = 800,
+                    sourcePixelWidth = 1_080, sourcePixelHeight = 2_400,
+                    displayBounds = recaptured.displayBounds, capturedAtElapsedMillis = 123,
+                )),
+                visualRevalidation = { correlation ->
+                    recaptured.takeIf { scenario != "identity_changed" &&
+                        correlation == original.correlation && SemanticSnapshotContent.same(original, recaptured) }
+                },
+            )
+            var tokenNumber = 0
+            val proofs = VisualFallbackProofStore({ 1L }, { "fallback:recapture-${++tokenNumber}" })
+            val token = proofs.issue(call("find_ui", "find"), original.correlation)
+            val result = executor(session, fallbackProofs = proofs).run(call(
+                "inspect_visual_ui", "visual",
+                JSONObject().put("correlation", correlationValue()).put("fallbackToken", token).toString(),
+            ))
+
+            assertEquals(scenario == "unchanged", result.success)
+            assertEquals(if (scenario == "unchanged") 1 else 0, session.captureCalls)
+            assertTrue(session.commands.isEmpty())
+            if (scenario != "unchanged") {
+                assertEquals(ToolFailureDetail.PROOF_CURRENT_SNAPSHOT_MISMATCH, result.failureDiagnostic?.detail)
+            }
+        }
+    }
+
+    @Test
+    fun screenshotOfChangedUiCannotReplaceOriginalSemanticProof() {
+        val original = snapshot()
+        val session = FakeSession(
+            snapshot = original,
+            visualCapture = VisualUiCaptureResult.Success(VisualUiCapture(
+                correlation = CORRELATION, imageDataUrl = "data:image/jpeg;base64,AQIDBA==",
+                pixelWidth = 480, pixelHeight = 800, sourcePixelWidth = 1_080, sourcePixelHeight = 2_400,
+                displayBounds = original.displayBounds, capturedAtElapsedMillis = 123,
+            )),
+            afterVisualCapture = { frame ->
+                snapshot(packageName = "org.example.other", correlation = frame.correlation)
+            },
+        )
+        val proofs = VisualFallbackProofStore({ 1L }, { "fallback:changed-during-image" })
+        val token = proofs.issue(call("find_ui", "find"), CORRELATION)
+        val result = executor(session, fallbackProofs = proofs).run(call(
+            "inspect_visual_ui", "visual",
+            JSONObject().put("correlation", correlationValue()).put("fallbackToken", token).toString(),
+        ))
+        assertFalse(result.success)
+        assertEquals("visual_capture_content_changed", JSONObject(result.contentText).getString("errorCode"))
+        assertFalse(JSONObject(result.contentText).has("visualFallbackToken"))
+        assertTrue(session.commands.isEmpty())
+        assertTrue(proofs.claim(token, call("inspect_visual_ui", "retry"), CORRELATION, CORRELATION) != null)
     }
 
     @Test
@@ -444,6 +546,7 @@ class AndroidAccessibilityDynamicToolsTest {
         assertEquals(
             setOf(
                 "run_steps",
+                "perform_goal",
                 "inspect_ui",
                 "inspect_visual_ui",
                 "find_ui",
@@ -702,6 +805,21 @@ class AndroidAccessibilityDynamicToolsTest {
         assertEquals("accessibility_permission_required", json.getString("errorCode"))
         assertEquals("accessibility_service", json.getString("requiredSpecialAccess"))
         assertEquals("special_access_required", json.getString("availability"))
+    }
+
+    @Test
+    fun missingSessionWithUnknownAccessReturnsFixedStateUnavailableWithoutPermissionClaim() {
+        val result = executor(session = null,
+            specialAccessProbe = AccessibilitySpecialAccessProbe { error("private platform value") },
+        ).run(call("inspect_ui", "unknown-access"))
+        val json = JSONObject(result.contentText)
+        assertFalse(result.success)
+        assertEquals("accessibility_state_unavailable", json.getString("errorCode"))
+        assertTrue(json.getBoolean("retryable"))
+        assertFalse(json.has("requiredSpecialAccess"))
+        assertFalse(json.has("specialAccessGranted"))
+        assertFalse(result.contentText.contains("private"))
+        assertEquals(ToolFailureCode.ACCESSIBILITY_STATE_UNAVAILABLE, result.failureDiagnostic?.code)
     }
 
     @Test
@@ -1342,6 +1460,7 @@ class AndroidAccessibilityDynamicToolsTest {
         session: HansAccessibilitySession?,
         serviceConnected: Boolean = false,
         specialAccessEnabled: Boolean = false,
+        specialAccessProbe: AccessibilitySpecialAccessProbe = AccessibilitySpecialAccessProbe { specialAccessEnabled },
         authorizer: AccessibilityApprovalAuthorizer = AccessibilityApprovalAuthorizer { true },
         availability: UiInteractionAvailability = UiInteractionAvailability.AVAILABLE,
         availabilityProbe: UiInteractionAvailabilityProbe =
@@ -1357,7 +1476,7 @@ class AndroidAccessibilityDynamicToolsTest {
         backgroundExecutor = Executor(Runnable::run),
         sessions = sessionSource,
         serviceConnection = AccessibilityServiceConnectionProbe { serviceConnected },
-        specialAccess = AccessibilitySpecialAccessProbe { specialAccessEnabled },
+        specialAccess = specialAccessProbe,
         uiAvailability = availabilityProbe,
         approvalAuthorizer = authorizer,
         fallbackProofs = fallbackProofs,
@@ -1527,7 +1646,7 @@ class AndroidAccessibilityDynamicToolsTest {
     )
 
     private class FakeSession(
-        private val snapshot: SemanticUiSnapshot,
+        private var snapshot: SemanticUiSnapshot,
         private val visualCapture: VisualUiCaptureResult =
             VisualUiCaptureResult.Failure("visual_capture_unavailable"),
         private val sensitiveActionApproval: (
@@ -1539,6 +1658,8 @@ class AndroidAccessibilityDynamicToolsTest {
         private val receiptSnapshot: (UiSnapshotCorrelation) -> SemanticUiSnapshot? = { null },
         private val retainReceipt: (UiSnapshotCorrelation) -> Boolean = { false },
         private val withdrawReceipt: (UiSnapshotCorrelation) -> Unit = {},
+        private val visualRevalidation: ((UiSnapshotCorrelation) -> SemanticUiSnapshot?)? = null,
+        private val afterVisualCapture: (SemanticUiSnapshot) -> SemanticUiSnapshot = { it },
         private val handler: (AccessibilityCommand, AccessibilityUserApproval?) -> AccessibilityExecutionResult =
             { command, _ -> succeededStatic(command) },
     ) : HansAccessibilitySession {
@@ -1548,12 +1669,25 @@ class AndroidAccessibilityDynamicToolsTest {
         val receiptReads = mutableListOf<UiSnapshotCorrelation>()
         val receiptPins = mutableListOf<UiSnapshotCorrelation>()
         val receiptWithdrawals = mutableListOf<UiSnapshotCorrelation>()
+        val visualRevalidations = mutableListOf<UiSnapshotCorrelation>()
+        val commandPins = mutableListOf<UiSnapshotCorrelation>()
         var refreshCalls = 0
             private set
         var captureCalls = 0
             private set
 
         override fun currentSnapshot(): SemanticUiSnapshot = snapshot
+
+        override fun currentSnapshotForVisualFallback(correlation: UiSnapshotCorrelation): SemanticUiSnapshot? {
+            visualRevalidations += correlation
+            return if (visualRevalidation != null) visualRevalidation.invoke(correlation)
+            else snapshot.takeIf { it.correlation == correlation }
+        }
+
+        override fun retainSnapshotForCommands(correlation: UiSnapshotCorrelation): Boolean {
+            commandPins += correlation
+            return snapshot.correlation == correlation
+        }
 
         override fun receiptSnapshotForObservation(correlation: UiSnapshotCorrelation): SemanticUiSnapshot? {
             receiptReads += correlation
@@ -1577,6 +1711,7 @@ class AndroidAccessibilityDynamicToolsTest {
 
         override fun captureVisualSnapshot(): VisualUiCaptureResult {
             captureCalls += 1
+            snapshot = afterVisualCapture(snapshot)
             return visualCapture
         }
 

@@ -105,6 +105,20 @@ class AndroidHansSetupFreshProbe(
     }
 
     override fun probe(step: HansSetupStep, operationNonce: String?): HansSetupProbeResult = when (step) {
+        HansSetupStep.SYSTEM_SPEECH -> {
+            val runtime = ai.hans.standard.voice.tts.android.AndroidSystemSpeech.get(appContext).runtime
+            val state = runtime.snapshot
+            runtime.refresh()
+            val available = state.options.enabled && state.selectedVoice != null &&
+                state.status in setOf(
+                    ai.hans.standard.voice.tts.SystemSpeechStatus.READY,
+                    ai.hans.standard.voice.tts.SystemSpeechStatus.COMPLETED,
+                    ai.hans.standard.voice.tts.SystemSpeechStatus.STOPPED,
+                    ai.hans.standard.voice.tts.SystemSpeechStatus.SPEAKING,
+                )
+            result(available, "system_speech_engine_ready_not_listening_proof",
+                "system_speech_setup_needed", transient = !available)
+        }
         HansSetupStep.HARDWARE_MAPPING -> result(
             ActionKeyMappingPreferencesStore(appContext).read().mappings.any {
                 it.action == KeySemanticAction.DICTATION

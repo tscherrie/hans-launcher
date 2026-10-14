@@ -68,6 +68,8 @@ data class HansLocalUiState(
     val appsLoading: Boolean = false,
     val appsErrorMessage: String = "",
     val speechCredentialStatus: SpeechCredentialUiStatus = SpeechCredentialUiStatus.MISSING,
+    val fastPhoneUse: FastPhoneUseUiState = FastPhoneUseUiState(),
+    val phoneRoutineLearning: PhoneRoutineLearningUiState = PhoneRoutineLearningUiState(),
     val dictationStatus: DictationUiStatus? = null,
     val dictationInputMuted: Boolean = false,
     val dictationPreview: String = "",
@@ -640,7 +642,7 @@ object HansClientUiProjector {
             ?: ReasoningEffort.of(settings.reasoningEffort)
         val requestedServiceTier = client?.pendingSettingsSelection?.serviceTier ?: when (local.pendingFastModeEnabled) {
             true -> HansSettings.FAST_SERVICE_TIER
-            false -> HansSettings.DEFAULT_SERVICE_TIER
+            false -> HansSettings.STANDARD_SERVICE_TIER
             null -> if (client?.pendingSelection != null) {
                 client.pendingSelection.serviceTier
             } else {
@@ -697,6 +699,8 @@ object HansClientUiProjector {
                     ?.any { it.id == HansSettings.FAST_SERVICE_TIER }
             } == true,
             fastModeEnabled = confirmed?.serviceTier == HansSettings.FAST_SERVICE_TIER,
+            fastPhoneUse = local.fastPhoneUse,
+            phoneRoutineLearning = local.phoneRoutineLearning,
             voices = HansSettings.SUPPORTED_VOICES.map { voice ->
                 VoiceUiOption(voice, voice.replaceFirstChar { it.uppercase() })
             },

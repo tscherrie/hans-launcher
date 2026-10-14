@@ -47,6 +47,7 @@ object DispatchPolicy {
         desiredOptions: DispatchOptions,
         catalog: ModelCatalog,
         clientUserMessageId: String? = null,
+        additionalContext: UntrustedTurnContext? = null,
     ): DispatchPlan {
         catalog.requireSupported(desiredOptions)
         if (activeTurn == null) {
@@ -57,6 +58,7 @@ object DispatchPolicy {
                     input = input,
                     options = desiredOptions,
                     clientUserMessageId = clientUserMessageId,
+                    additionalContext = additionalContext,
                 ),
             )
         }
@@ -76,6 +78,7 @@ object DispatchPolicy {
                 activeTurn = activeTurn,
                 input = input,
                 clientUserMessageId = clientUserMessageId,
+                additionalContext = additionalContext,
             ),
         )
     }

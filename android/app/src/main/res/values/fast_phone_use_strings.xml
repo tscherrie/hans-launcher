@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools" tools:locale="en">
+    <string name="fast_phone_title">Fast Phone Use</string>
+    <string name="fast_phone_enable">Faster on-screen decisions</string>
+    <string name="fast_phone_description">Uses OpenAI Decisions for small screen actions. Optional, separately billed API access; your ChatGPT login and voice features stay unchanged. Screen text needed for each action is sent to OpenAI.</string>
+    <string name="fast_phone_status_off">Off. Standard phone control remains available.</string>
+    <string name="fast_phone_status_key_missing">Enabled, but an OpenAI API key is still required.</string>
+    <string name="fast_phone_status_key_unavailable">Key temporarily unavailable. Unlock this phone and try again.</string>
+    <string name="fast_phone_status_unverified">Key saved. API access will be verified with the first screen task.</string>
+    <string name="fast_phone_status_verified">Ready. OpenAI Decisions access verified.</string>
+    <string name="fast_phone_status_key_rejected">OpenAI rejected this key or its Decisions access. Replace the key.</string>
+    <string name="fast_phone_status_quota">OpenAI API credit or spending limit reached. Check API billing, then switch Fast Phone Use off and on.</string>
+    <string name="fast_phone_status_rate_limit">OpenAI rate limit reached. Try a screen task again later.</string>
+    <string name="fast_phone_status_network">The Decisions request timed out. Try again when your connection is ready.</string>
+    <string name="fast_phone_status_service">Decisions is temporarily unavailable. Standard phone control remains available.</string>
+    <string name="fast_phone_add_key">Add API key</string>
+    <string name="fast_phone_replace_key">Replace API key</string>
+    <string name="fast_phone_remove_key">Remove API key</string>
+    <string name="fast_phone_create_key">Create an OpenAI API key ↗</string>
+    <string name="fast_phone_billing">API credit and limits ↗</string>
+    <string name="fast_phone_key_title">Fast Phone Use API key</string>
+    <string name="fast_phone_key_help">Paste your OpenAI API key here, never in chat. It is encrypted with Android Keystore on this phone and excluded from backups. Saving it does not enable Fast Phone Use or verify API access.</string>
+    <string name="fast_phone_key_save_failed">The key could not be saved. Check it and try again.</string>
+    <string name="fast_phone_learning_enable">Learn repeated tasks daily</string>
+    <string name="fast_phone_learning_help">Optional. Successful Fast Phone Use goal summaries are stored privately on this phone and grouped via your ChatGPT login, at most once daily. No full chats, screenshots or entered text. User tasks take priority; missed analysis catches up when possible. Learned hints never grant permission or replay clicks.</string>
+    <string name="fast_phone_learning_off">Daily learning is off.</string>
+    <string name="fast_phone_learning_wait_login">Waiting for ChatGPT login.</string>
+    <string name="fast_phone_learning_wait_idle">Paused for your current task.</string>
+    <string name="fast_phone_learning_wait_network">Waiting for an internet connection.</string>
+    <string name="fast_phone_learning_schedule_failed">Android has not accepted the background schedule. Hans will retry when opened.</string>
+    <string name="fast_phone_learning_running">Analysing repeated tasks.</string>
+    <string name="fast_phone_learning_retry">Analysis interrupted or unavailable. Hans will retry when possible.</string>
+    <string name="fast_phone_learning_wait_history">Waiting for repeated successful screen goals.</string>
+    <string name="fast_phone_learning_current">Up to date. The next analysis needs new history.</string>
+    <string name="fast_phone_learning_scheduled">Daily analysis scheduled with Android.</string>
+    <string name="fast_phone_learning_waiting">Waiting for a background opportunity.</string>
+    <string name="fast_phone_learning_error">Daily learning is unavailable or its change is not yet confirmed. Try again, or forget learned goals to reset it.</string>
+    <string name="fast_phone_learning_last_success">Last analysis: %1$s · %2$d learned goal groups</string>
+    <string name="fast_phone_learning_save_failed">Could not change daily learning. Check ChatGPT login and try again.</string>
+    <string name="fast_phone_forget_routines">Forget learned screen goals</string>
+    <string name="fast_phone_routines_forgotten">Learned screen goals forgotten.</string>
+    <string name="fast_phone_routines_forget_failed">Could not forget learned screen goals.</string>
+</resources>

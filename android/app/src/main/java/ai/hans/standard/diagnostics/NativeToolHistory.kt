@@ -11,6 +11,26 @@ internal enum class NativeToolHistoryStatus {
 
 internal data class NativeToolHistoryEntry(val tool: String, val failure: ToolFailureDiagnostic)
 
+/** Exact official App Server payloads whose persisted history format has been inspected.
+ * 0.160.1 source: openai/codex@d27764b82f7118f674371e6d6e76271d9d606edb,
+ * protocol/src/{protocol,items,dynamic_tools}.rs, history/src/rollout_payload.rs,
+ * rollout/src/policy.rs and state/{src/sqlite.rs,migrations/0001_threads.sql}.
+ * Both use state_5.sqlite, the selected threads.rollout_path, and paginated TurnItems.
+ * Version text alone is not proof; an upgrade must re-audit this contract before admission.
+ */
+internal object NativeToolHistoryRuntimeContract {
+    const val VERSION_0_155 = "0.155.0"
+    const val SHA256_0_155 = "a18a82fbfcecec13f320545f4b8e0c542247e16918fdbc61f3f8f7e4d121306d"
+    const val VERSION_0_160_1 = "0.160.1"
+    const val SHA256_0_160_1 = "a949b9fd5a00d4c0be2243d04073d666293c3633355b51e687365839fa528170"
+
+    fun supports(version: String, artifactSha256: String): Boolean = when (version) {
+        VERSION_0_155 -> artifactSha256 == SHA256_0_155
+        VERSION_0_160_1 -> artifactSha256 == SHA256_0_160_1
+        else -> false
+    }
+}
+
 internal data class NativeToolHistoryResult(
     val status: NativeToolHistoryStatus,
     val entries: List<NativeToolHistoryEntry> = emptyList(),
@@ -34,7 +54,8 @@ internal data class NativeToolHistoryResult(
     ))
 }
 
-/** Pinned 0.155 native JSONL: item_completed stores PascalCase TurnItem and snake_case fields.
+/** Source-checked 0.155.0/0.160.1 native JSONL: item_completed stores PascalCase TurnItem
+ * and snake_case fields (not the App Server's camelCase notification wire shape).
  * The legacy dynamic_tool_call_response event is transient, not durable evidence.
  */
 internal object NativeToolHistoryParser {

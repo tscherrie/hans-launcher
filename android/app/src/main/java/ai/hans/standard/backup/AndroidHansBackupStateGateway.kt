@@ -311,7 +311,7 @@ internal class AndroidHansBackupStateGateway(
             serviceTier = if (has("serviceTier") && !isNull("serviceTier")) {
                 getString("serviceTier")
             } else {
-                HansSettings.DEFAULT_SERVICE_TIER
+                HansSettings.STANDARD_SERVICE_TIER
             },
             voice = getString("voice"),
             liveVoice = if (has("liveVoice") && !isNull("liveVoice")) {

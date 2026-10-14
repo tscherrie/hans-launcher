@@ -341,6 +341,23 @@ class GenericUiStepsExecutorTest {
         assertTrue(locked.launches.isEmpty())
     }
 
+    @Test fun reconnectingSessionUsesFreshDiagnosticAndNeverLaunchesOrRetriesSequence() {
+        val fixture = Fixture().apply {
+            activeSession = null
+            missingSession = DeviceControlProjection.serviceReconnecting()
+        }
+        val result = fixture.result(call(plan().put("launch", true).toString()))
+        assertCode("accessibility_service_reconnecting", result)
+        val json = JSONObject(result.contentText)
+        assertTrue(json.getBoolean("retryable"))
+        assertTrue(json.getBoolean("specialAccessGranted"))
+        assertFalse(json.getBoolean("retrySequence"))
+        assertFalse(json.getBoolean("externalEffectMayHaveStarted"))
+        assertEquals(0, json.getJSONArray("steps").length())
+        assertTrue(fixture.launches.isEmpty())
+        assertTrue(fixture.session.submitted.isEmpty())
+    }
+
     @Test fun foreignSessionCorrelationAndFailedRetentionNeverSubmit() {
         val foreign = Fixture()
         foreign.session.views += snapshot(1, session = AccessibilitySessionId("other-session"))
@@ -601,6 +618,7 @@ class GenericUiStepsExecutorTest {
     private class Fixture(queued: Boolean = false) {
         val session = Session()
         var activeSession: HansAccessibilitySession? = session
+        var missingSession = DeviceControlProjection.failure("accessibility_session_unavailable")
         var available = true
         var epoch = 0L
         var now = 0L
@@ -621,6 +639,7 @@ class GenericUiStepsExecutorTest {
                 if (available) UiInteractionAvailability.AVAILABLE else UiInteractionAvailability.DEVICE_LOCKED
             },
             evidenceEpoch = { epoch }, nowMillis = { now },
+            missingSessionResult = { missingSession },
         )
         fun result(call: DynamicToolCallParams) = immediate(executor, call)
         fun changeContext(kind: String) {

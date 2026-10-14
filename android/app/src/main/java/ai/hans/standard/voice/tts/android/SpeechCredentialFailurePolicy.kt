@@ -31,8 +31,10 @@ internal class SpeechCredentialFailureRecovery(
             SpeechCredentialStatus.TEMPORARILY_UNAVAILABLE
 
         SpeechCredentialFailureDisposition.CLEAR_INVALID_MATERIAL -> {
-            clearInvalidMaterial()
-            SpeechCredentialStatus.MISSING
+            // Failed durable clearing must not be reported as missing. Preserve retryability
+            // when private storage is unavailable, just as with a temporarily locked Keystore.
+            if (runCatching { clearInvalidMaterial() }.isSuccess) SpeechCredentialStatus.MISSING
+            else SpeechCredentialStatus.TEMPORARILY_UNAVAILABLE
         }
     }
 

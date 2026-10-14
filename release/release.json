@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "releaseId": "hans-0.1.0-rc.51",
+  "releaseId": "hans-0.1.0-rc.56",
   "releaseProfile": "standard-v2",
   "channel": "staging",
   "sourceRevisionPolicy": "sealed-manifest-only",
@@ -13,8 +13,8 @@
   "applications": {
     "standard": {
       "applicationId": "ai.hans.standard",
-      "versionCode": 52,
-      "versionName": "0.1.0-rc.51",
+      "versionCode": 57,
+      "versionName": "0.1.0-rc.56",
       "publicAvailability": false
     }
   },

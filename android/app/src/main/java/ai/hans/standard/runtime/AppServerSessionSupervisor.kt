@@ -35,9 +35,9 @@ internal class AppServerSessionSupervisor(
         if (session == null || closed.get() || !session.ready || session.stopRequested) {
             return unavailable(ai.hans.standard.diagnostics.NativeToolHistoryStatus.RUNTIME_UNAVAILABLE)
         }
-        if (ai.hans.standard.BuildConfig.CODEX_RUNTIME_VERSION != "0.155.0" ||
-            ai.hans.standard.BuildConfig.CODEX_RUNTIME_SHA256 !=
-            "a18a82fbfcecec13f320545f4b8e0c542247e16918fdbc61f3f8f7e4d121306d") {
+        if (!ai.hans.standard.diagnostics.NativeToolHistoryRuntimeContract.supports(
+                ai.hans.standard.BuildConfig.CODEX_RUNTIME_VERSION,
+                ai.hans.standard.BuildConfig.CODEX_RUNTIME_SHA256)) {
             return unavailable(ai.hans.standard.diagnostics.NativeToolHistoryStatus.UNSUPPORTED_RUNTIME)
         }
         val sqliteHome = session.effectiveSqliteHome

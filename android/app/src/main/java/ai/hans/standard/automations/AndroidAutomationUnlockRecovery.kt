@@ -50,6 +50,7 @@ internal object AndroidAutomationUnlockRecovery {
         // UI continuation reconciliation has its own durable claim gate and never polls. Phase B
         // currently records this event without dispatching or replaying an old Android action.
         AndroidUiTaskContinuationRuntime.onUserPresent(context)
+        ai.hans.standard.fastphone.routines.android.AndroidPhoneRoutineDailyLearning.onActivity(context)
         return dispatchDebouncer.attempt {
             AndroidAutomationDispatch.enqueueOrRetry(
                 context,

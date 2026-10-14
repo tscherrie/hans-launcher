@@ -1513,7 +1513,7 @@ class CodexSessionControllerTest {
             HansSettings.FAST_SERVICE_TIER,
             fastStart.getJSONObject("params").getString("serviceTier"),
         )
-        assertEquals(HansSettings.DEFAULT_SERVICE_TIER, harness.settings.value.serviceTier)
+        assertEquals(HansSettings.STANDARD_SERVICE_TIER, harness.settings.value.serviceTier)
 
         harness.respond(fastStart, turnStartResult("thread-1", "turn-fast"), 6)
         assertEquals(fast, harness.controller.snapshot().confirmedSelection)
@@ -1524,14 +1524,14 @@ class CodexSessionControllerTest {
         harness.controller.dispatch(listOf(CodexInput.Text("Normal")), standard)
         val standardStart = harness.runtime.takeRequest("turn/start")
         assertEquals(
-            HansSettings.DEFAULT_SERVICE_TIER,
+            HansSettings.STANDARD_SERVICE_TIER,
             standardStart.getJSONObject("params").getString("serviceTier"),
         )
         assertEquals(HansSettings.FAST_SERVICE_TIER, harness.settings.value.serviceTier)
 
         harness.respond(standardStart, turnStartResult("thread-1", "turn-standard"), 8)
         assertEquals(standard, harness.controller.snapshot().confirmedSelection)
-        assertEquals(HansSettings.DEFAULT_SERVICE_TIER, harness.settings.value.serviceTier)
+        assertEquals(HansSettings.STANDARD_SERVICE_TIER, harness.settings.value.serviceTier)
     }
 
     @Test
@@ -1830,6 +1830,61 @@ class CodexSessionControllerTest {
         assertEquals("gpt-5.6-sol", harness.settings.value.model)
         harness.respond(boundaryStart, turnStartResult("thread-1", "turn-luna"), 9)
         assertEquals("gpt-5.6-luna", harness.settings.value.model)
+    }
+
+    @Test fun currentUntrustedLearningContextIsSampledForStartAndSteerWithoutAnotherBubble() {
+        var value = "{\"revision\":1,\"active\":true}"
+        val sampled = mutableListOf<String>()
+        val harness = readyHarness(userTurnContext = UserTurnContextProvider { thread, input ->
+            assertEquals("thread-1", thread)
+            sampled += input.filterIsInstance<CodexInput.Text>().joinToString { it.text }
+            ai.hans.standard.codex.UntrustedTurnContext("hans_phone_routine_hints", value)
+        })
+        val sol = DispatchSelection("gpt-5.6-sol", ReasoningEffort.ULTRA)
+        assertNotNull(harness.controller.dispatch(listOf(CodexInput.Text("First user request")), sol))
+        val start = harness.runtime.takeRequest("turn/start")
+        assertEquals(value, start.getJSONObject("params").getJSONObject("additionalContext")
+            .getJSONObject("hans_phone_routine_hints").getString("value"))
+        harness.respond(start, turnStartResult("thread-1", "turn-1"), 6)
+        value = "{\"revision\":2,\"active\":false,\"candidates\":[]}"
+        assertNotNull(harness.controller.dispatch(listOf(CodexInput.Text("Second user request")), sol))
+        val steer = harness.runtime.takeRequest("turn/steer").getJSONObject("params")
+        assertEquals(value, steer.getJSONObject("additionalContext")
+            .getJSONObject("hans_phone_routine_hints").getString("value"))
+        assertEquals(1, steer.getJSONArray("input").length())
+        assertEquals(listOf("First user request", "Second user request"), sampled)
+        assertEquals(2, harness.controller.snapshot().outboundTimeline.size)
+    }
+
+    @Test fun delayedModelBoundaryResamplesForgottenLearningInsteadOfSendingStaleHints() {
+        var value = "old private hint"
+        val harness = readyHarness(userTurnContext = UserTurnContextProvider { _, _ ->
+            ai.hans.standard.codex.UntrustedTurnContext("hans_phone_routine_hints", value)
+        })
+        val sol = DispatchSelection("gpt-5.6-sol", ReasoningEffort.ULTRA)
+        harness.controller.dispatch(listOf(CodexInput.Text("Start")), sol)
+        harness.respond(harness.runtime.takeRequest("turn/start"), turnStartResult("thread-1", "turn-1"), 6)
+        harness.controller.dispatch(listOf(CodexInput.Text("New model request")),
+            DispatchSelection("gpt-5.6-luna", ReasoningEffort.MAX))
+        val interrupt = harness.runtime.takeRequest("turn/interrupt")
+        value = "{\"active\":false,\"candidates\":[]}"
+        harness.respond(interrupt, JSONObject(), 7)
+        val params = harness.runtime.takeRequest("turn/start").getJSONObject("params")
+        assertEquals(value, params.getJSONObject("additionalContext")
+            .getJSONObject("hans_phone_routine_hints").getString("value"))
+        assertFalse(params.toString().contains("old private hint"))
+        assertEquals(2, harness.controller.snapshot().outboundTimeline.size)
+    }
+
+    @Test fun optionalLearningFailureCannotBlockUserDispatch() {
+        val harness = readyHarness(userTurnContext = UserTurnContextProvider { _, _ ->
+            error("private storage failure")
+        })
+        assertNotNull(harness.controller.dispatch(listOf(CodexInput.Text("Still send this"))))
+        val params = harness.runtime.takeRequest("turn/start").getJSONObject("params")
+        assertFalse(params.has("additionalContext"))
+        assertEquals("Still send this", params.getJSONArray("input").getJSONObject(0).getString("text"))
+        assertTrue(harness.diagnostics.none { it.contains("private storage failure") })
     }
 
     @Test
@@ -3014,7 +3069,7 @@ class CodexSessionControllerTest {
         harness.respond(fastRequest, JSONObject(), 6)
         harness.event(settingsChanged(fast), 7)
         assertEquals(fast, harness.controller.snapshot().confirmedSelection)
-        val standard = fast.copy(serviceTier = HansSettings.DEFAULT_SERVICE_TIER)
+        val standard = fast.copy(serviceTier = HansSettings.STANDARD_SERVICE_TIER)
         assertTrue(harness.controller.updateSelection(standard))
         val standardRequest = harness.runtime.takeRequest("thread/settings/update")
         assertTrue(standardRequest.getJSONObject("params").isNull("serviceTier"))
@@ -6602,8 +6657,10 @@ class CodexSessionControllerTest {
         catalog: JSONObject = modelList(),
         performanceObserver: PerformanceSessionObserver = PerformanceSessionObserver.NONE,
         desktopRemoteAccessEnabled: Boolean = true,
+        userTurnContext: UserTurnContextProvider = UserTurnContextProvider.NONE,
     ): Harness {
-        val harness = Harness(performanceObserver = performanceObserver, desktopRemoteAccessEnabled = desktopRemoteAccessEnabled)
+        val harness = Harness(performanceObserver = performanceObserver, desktopRemoteAccessEnabled = desktopRemoteAccessEnabled,
+            userTurnContext = userTurnContext)
         harness.startRuntime()
         val account = harness.runtime.takeRequest("account/read")
         val models = harness.runtime.takeRequest("model/list")
@@ -7119,6 +7176,7 @@ class CodexSessionControllerTest {
         private val autoMaterializeFreshThread: Boolean = true,
         performanceObserver: PerformanceSessionObserver = PerformanceSessionObserver.NONE,
         desktopRemoteAccessEnabled: Boolean = true,
+        userTurnContext: UserTurnContextProvider = UserTurnContextProvider.NONE,
     ) {
         val runtime = FakeRuntimeTransport()
         val setupDeadlines = FakeSetupDispatchDeadlineScheduler()
@@ -7143,6 +7201,7 @@ class CodexSessionControllerTest {
             protocolDiagnostics = diagnostics::add,
             performanceObserver = performanceObserver,
             desktopRemoteAccessEnabled = desktopRemoteAccessEnabled,
+            userTurnContext = userTurnContext,
             bundledSetupPlugin = bundledSetupPlugin,
             pluginInstallTransactions = pluginInstallTransactions,
             pluginUninstallTransactions = pluginUninstallTransactions,
@@ -7536,7 +7595,10 @@ class CodexSessionControllerTest {
     }
 
     private class FakeSettingsStore(
-        var value: HansSettings = HansSettings(),
+        // Historical session fixtures intentionally remain Astra/Medium/Standard. Fresh product
+        // defaults have their own tests and must not rewrite every unrelated dispatch scenario.
+        var value: HansSettings = HansSettings(model = "gpt-6-astra", reasoningEffort = "medium",
+            serviceTier = HansSettings.STANDARD_SERVICE_TIER),
     ) : HansSettingsStore {
         var confirmedWrites = 0
 

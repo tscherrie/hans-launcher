@@ -7,6 +7,25 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class HansSetupRepositoryTest {
+    @Test fun completedOlderSetupDoesNotReopenWhenSystemSpeechIsIntroduced() {
+        val older = documentAt(HansSetupStep.COMPLETE).let { it.copy(steps =
+            (it.steps - HansSetupStep.SYSTEM_SPEECH) +
+                (HansSetupStep.COMPLETE to HansSetupStepRecord(status = HansSetupStepStatus.VERIFIED))) }
+        val migrated = repository(storage = MemoryStorage(older)).read()
+        assertTrue(migrated.complete)
+        assertEquals(HansSetupStepStatus.SKIPPED, migrated.record(HansSetupStep.SYSTEM_SPEECH).status)
+    }
+
+    @Test fun systemSpeechCanBeDeferredSkippedOrFreshlyVerifiedWithoutMicrophone() {
+        val repository = repository(storage = MemoryStorage(documentAt(HansSetupStep.SYSTEM_SPEECH)))
+        assertEquals(HansSetupStep.SYSTEM_SPEECH,
+            repository.recordSimpleChoice(HansSetupStep.SYSTEM_SPEECH, "defer").currentStep)
+        val token = repository.beginOperation(HansSetupStep.SYSTEM_SPEECH)
+        assertEquals(HansSetupStep.SYSTEM_SPEECH,
+            repository.applyFreshProbe(token, HansSetupProbeResult(false, "voice_missing", true)).currentStep)
+        assertEquals(HansSetupStep.MODEL_REASONING,
+            repository.recordSimpleChoice(HansSetupStep.SYSTEM_SPEECH, "not_now").currentStep)
+    }
     @Test
     fun addingAllFilesAccessKeepsCompletedSetupWithoutInventingAndroidConsent() {
         val older = documentAt(HansSetupStep.COMPLETE).copy(optionalCapabilities =
@@ -57,6 +76,7 @@ class HansSetupRepositoryTest {
         repository.recordSimpleChoice(HansSetupStep.NOTIFICATION_LISTENER_CONSENT, "not_now")
         repository.recordSimpleChoice(HansSetupStep.ACCESSIBILITY_CONSENT, "not_now")
         repository.recordSimpleChoice(HansSetupStep.HOME_ROLE_CONSENT, "not_now")
+        repository.recordSimpleChoice(HansSetupStep.SYSTEM_SPEECH, "not_now")
         repository.recordSimpleChoice(HansSetupStep.MODEL_REASONING, "not_now")
         HansSetupOptionalCapability.entries.forEach { capability ->
             assertEquals(capability, repository.read().currentOptionalCapability)
@@ -267,6 +287,7 @@ class HansSetupRepositoryTest {
     fun modelStillWaitsForEffectiveAppServerReceiptWithoutMandatoryVoicePractice() {
         val repository = repository()
         reachVoiceTest(repository)
+        repository.recordSimpleChoice(HansSetupStep.SYSTEM_SPEECH, "not_now")
         val modelToken = repository.beginOperation(HansSetupStep.MODEL_REASONING)
         repository.requestModelSelection(modelToken, "gpt-5.6-luna", "max")
         repository.observeEffectiveSelection("gpt-5.6-sol", "ultra")

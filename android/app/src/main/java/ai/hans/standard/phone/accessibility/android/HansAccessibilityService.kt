@@ -153,6 +153,7 @@ internal class HansAccessibilityService : AccessibilityService(), RootFreeAccess
             snapshotFailure = snapshotDiagnostics::latest,
             executor = domainExecutor,
             visualCapture = ::captureVisualSnapshot,
+            currentSnapshotForVisualFallback = ::currentSnapshotForVisualFallback,
             sensitiveActionApproval = ::requestSensitiveActionApproval,
             receiptSnapshot = { correlation ->
                 if (canExposeReceipt(correlation)) snapshots.receiptFrame(correlation)?.snapshot else null
@@ -259,13 +260,14 @@ internal class HansAccessibilityService : AccessibilityService(), RootFreeAccess
         }
         val current = snapshots.current() ?: return AndroidHostActionStatus.STALE_TARGET
         if (current.correlation != correlation) return AndroidHostActionStatus.STALE_TARGET
+        val frame = snapshots.commandFrame(correlation)
+            ?: return AndroidHostActionStatus.STALE_TARGET
         if (!current.displayBounds.contains(gesture.start)) return AndroidHostActionStatus.BLOCKED
         if (gesture.end?.let(current.displayBounds::contains) == false) {
             return AndroidHostActionStatus.BLOCKED
         }
-        val rootLocator = snapshots.currentFrame()?.takeIf { it.correlation == correlation }
-            ?.locators
-            ?.firstOrNull()
+        val rootLocator = frame.snapshot.roots.singleOrNull()
+            ?.let { frame.byOrdinal[it.nodeOrdinal] }
             ?: return AndroidHostActionStatus.STALE_TARGET
         if (AndroidAutomationExclusions.isProhibited(packageName, rootLocator)) {
             return AndroidHostActionStatus.BLOCKED
@@ -283,6 +285,12 @@ internal class HansAccessibilityService : AccessibilityService(), RootFreeAccess
             val availability = currentUiAvailability()
             if (!availability.isAvailable) {
                 return@callOnMain availability.toAndroidHostActionStatus()
+            }
+            // The worker's cached check precedes main-looper scheduling. Revalidate at the
+            // actual dispatch boundary so an intervening event/app switch cannot redirect the
+            // coordinate gesture. This fresh read never republishes or retries a command.
+            if (!coordinateGestureContextIsCurrentOnMain(frame, rootLocator)) {
+                return@callOnMain AndroidHostActionStatus.STALE_TARGET
             }
             if (
                 dispatchGesture(
@@ -332,6 +340,50 @@ internal class HansAccessibilityService : AccessibilityService(), RootFreeAccess
         }
     }
 
+    private fun coordinateGestureContextIsCurrentOnMain(
+        expected: AndroidAccessibilityFrame,
+        rootLocator: AndroidNodeLocator,
+    ): Boolean {
+        check(Looper.myLooper() == Looper.getMainLooper())
+        val correlation = expected.correlation
+        if (!connected.get() || sessionId != correlation.sessionId ||
+            snapshots.commandFrame(correlation) !== expected ||
+            !CoordinateGestureFrameGuard.matches(expected, snapshots.currentFrame())
+        ) return false
+        val activeRoot = resolveActiveApplicationRoot() ?: return false
+        val display = when (val resolution = displayResolver.resolve(activeRoot.displayId)) {
+            is AndroidAccessibilityDisplayResolution.Available -> resolution.display
+            is AndroidAccessibilityDisplayResolution.Failed -> {
+                activeRoot.root.close()
+                return false
+            }
+        }
+        if (display.displayId != expected.displayId || display.bounds != expected.snapshot.displayBounds) {
+            activeRoot.root.close()
+            return false
+        }
+        val projected = projector.withNodeMatchingLocator(
+            root = activeRoot.root,
+            expectedLocator = rootLocator,
+            correlation = correlation,
+            displayId = display.displayId,
+            displayBounds = display.bounds,
+            capturedAtElapsedMillis = SystemClock.elapsedRealtime(),
+        ) { _, liveRootLocator, raw, _ ->
+            val liveSnapshot = snapshotFactory.build(raw)
+            connected.get() && sessionId == correlation.sessionId &&
+                currentUiAvailability().isAvailable &&
+                snapshots.commandFrame(correlation) === expected &&
+                CoordinateGestureFrameGuard.matches(expected, snapshots.currentFrame()) &&
+                AndroidNodeActionTargetValidator.matches(
+                    expected.snapshot, rootLocator, liveSnapshot, liveRootLocator,
+                ) && SemanticSnapshotContent.same(expected.snapshot, liveSnapshot) &&
+                !AndroidAutomationExclusions.isProhibited(packageName, liveRootLocator)
+        }
+        return !projected.readFailed && !projected.targetAmbiguous && projected.targetFound &&
+            projected.value == true
+    }
+
     private fun captureVisualSnapshot(): VisualUiCaptureResult {
         if (Looper.myLooper() == Looper.getMainLooper()) {
             return VisualUiCaptureResult.Failure("visual_capture_main_thread_rejected")
@@ -347,8 +399,11 @@ internal class HansAccessibilityService : AccessibilityService(), RootFreeAccess
             return VisualUiCaptureResult.Failure("visual_capture_busy")
         }
         try {
-            val before = callOnMain { captureAndPublishOnMain() }
+            val before = refreshSnapshotOnDemand()
                 ?: return visualFailureOrUiUnavailable("ui_snapshot_unavailable")
+            val beforeFrame = callOnMain {
+                snapshots.currentFrame()?.takeIf { it.correlation == before.correlation }
+            } ?: return visualFailureOrUiUnavailable("visual_capture_display_unavailable")
             val canCapture = callOnMain {
                 serviceInfo.capabilities and
                     AccessibilityServiceInfo.CAPABILITY_CAN_TAKE_SCREENSHOT != 0
@@ -359,11 +414,7 @@ internal class HansAccessibilityService : AccessibilityService(), RootFreeAccess
 
             val completion = CountDownLatch(1)
             val raw = AtomicReference<RawScreenshotResult>()
-            val screenshotDisplayId = callOnMain {
-                snapshots.currentFrame()
-                    ?.takeIf { it.correlation == before.correlation }
-                    ?.displayId
-            } ?: return visualFailureOrUiUnavailable("visual_capture_display_unavailable")
+            val screenshotDisplayId = beforeFrame.displayId
             val requestResult = callOnMain {
                 val availability = currentUiAvailability()
                 if (!availability.isAvailable) {
@@ -386,7 +437,7 @@ internal class HansAccessibilityService : AccessibilityService(), RootFreeAccess
                         override fun onFailure(errorCode: Int) {
                             raw.compareAndSet(
                                 null,
-                                RawScreenshotResult.Failure(screenshotFailureCode(errorCode)),
+                                RawScreenshotResult.Failure(AccessibilityScreenshotFailure.code(errorCode)),
                             )
                             completion.countDown()
                         }
@@ -420,25 +471,16 @@ internal class HansAccessibilityService : AccessibilityService(), RootFreeAccess
 
             // Publish a fresh semantic snapshot after the pixels were captured. If the active
             // window changed meanwhile, the image must not authorize coordinates on another UI.
-            val afterState = callOnMain {
-                val snapshot = captureAndPublishOnMain()
-                    ?: return@callOnMain PostScreenshotLocatorState(null, null)
-                PostScreenshotLocatorState(
-                    snapshot = snapshot,
-                    displayId = snapshots.currentFrame()
-                        ?.takeIf { it.correlation == snapshot.correlation }
-                        ?.displayId,
-                )
-            } ?: return visualFailureOrUiUnavailable("ui_snapshot_unavailable")
-            val after = afterState.snapshot
+            val after = refreshSnapshotOnDemand()
                 ?: return visualFailureOrUiUnavailable("ui_snapshot_unavailable")
-            val afterDisplayId = afterState.displayId
+            val afterFrame = callOnMain {
+                snapshots.currentFrame()?.takeIf { it.correlation == after.correlation }
+            }
                 ?: return visualFailureOrUiUnavailable("visual_capture_display_unavailable")
-            val captureStillCorrelated = VisualCaptureCorrelationGuard.matches(
-                before = before,
-                after = after,
+            val captureStillCorrelated = VisualCaptureFrameCorrelationGuard.matches(
+                before = beforeFrame,
+                after = afterFrame,
                 screenshotDisplayId = screenshotDisplayId,
-                afterDisplayId = afterDisplayId,
             )
             if (!captureStillCorrelated) {
                 return VisualUiCaptureResult.Failure("visual_capture_content_changed")
@@ -479,19 +521,41 @@ internal class HansAccessibilityService : AccessibilityService(), RootFreeAccess
         }
     }
 
-    private fun screenshotFailureCode(errorCode: Int): String = when (errorCode) {
-        ERROR_TAKE_SCREENSHOT_NO_ACCESSIBILITY_ACCESS -> "visual_capture_access_revoked"
-        ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT -> "visual_capture_rate_limited"
-        ERROR_TAKE_SCREENSHOT_INVALID_DISPLAY -> "visual_capture_invalid_display"
-        ERROR_TAKE_SCREENSHOT_INTERNAL_ERROR -> "visual_capture_internal_error"
-        else -> "visual_capture_platform_rejected"
-    }
-
     private fun visualFailureOrUiUnavailable(fallbackCode: String): VisualUiCaptureResult.Failure {
         val availability = currentUiAvailability()
         return VisualUiCaptureResult.Failure(
-            if (availability.isAvailable) fallbackCode else availability.userActionRequiredErrorCode(),
+            when {
+                !availability.isAvailable -> availability.userActionRequiredErrorCode()
+                fallbackCode == "ui_snapshot_unavailable" ->
+                    snapshotDiagnostics.latest()?.let { "visual_capture_snapshot_${it.detailCode}" }
+                        ?: fallbackCode
+                else -> fallbackCode
+            },
         )
+    }
+
+    /**
+     * Revalidates an explicitly retained observation without refreshing its lease. Accessibility
+     * events may change snapshot IDs while the same UI remains visible; they must not by
+     * themselves revoke a visual fallback proof. Root/display/layout changes still fail closed.
+     */
+    private fun currentSnapshotForVisualFallback(
+        correlation: UiSnapshotCorrelation,
+    ): SemanticUiSnapshot? {
+        if (Looper.myLooper() == Looper.getMainLooper()) return null
+        val original = snapshots.commandFrame(correlation) ?: return null
+        if (!VisualFallbackFrameGuard.isComplete(original)) return null
+        val fresh = refreshSnapshotOnDemand() ?: return null
+        return callOnMain {
+            if (!connected.get() || sessionId != correlation.sessionId ||
+                !currentUiAvailability().isAvailable
+            ) return@callOnMain null
+            val retained = snapshots.commandFrame(correlation) ?: return@callOnMain null
+            if (retained !== original) return@callOnMain null
+            val current = snapshots.currentFrame()
+                ?.takeIf { it.correlation == fresh.correlation } ?: return@callOnMain null
+            current.snapshot.takeIf { VisualFallbackFrameGuard.matches(original, current) }
+        }
     }
 
     override fun actionObservationBaseline(): AccessibilitySnapshotId? = callOnMain {
@@ -746,9 +810,9 @@ internal class HansAccessibilityService : AccessibilityService(), RootFreeAccess
 
     /**
      * Android occasionally exposes an active application window while `rootInActiveWindow` is
-     * transiently null. Fall back only to a normal active/focused app window, retaining the
-     * window's own display id. Secure windows remain protected because Android returns no
-     * accessible root for them.
+     * transiently null, or the all-display window list is temporarily missing. The resolver uses
+     * the direct root's public owner-window metadata as a second independent lookup. Every
+     * accepted root still belongs to an active/focused application window on an explicit display.
      */
     private fun resolveActiveApplicationRoot(): AndroidResolvedApplicationRoot? =
         if (!currentUiAvailability().isAvailable) {
@@ -772,33 +836,17 @@ internal class HansAccessibilityService : AccessibilityService(), RootFreeAccess
     /**
      * One bounded refresh requested by a tool call. A newly rebound service can be connected
      * before Android publishes its first active-window root. Capture once, then let the main
-     * looper consume the first real Accessibility event before one final capture. This waits on
-     * the event monitor rather than polling or invalidating the UI continuously.
+     * looper publish a fresh frame from real Accessibility events. The shared waiter enforces
+     * session/availability checks and a fixed deadline without polling or repeated captures.
      */
     private fun refreshSnapshotOnDemand(): SemanticUiSnapshot? {
         ensureSessionPublished()
         if (!currentUiAvailability().isAvailable) return null
-        val previousCorrelation = snapshots.current()?.correlation
-        val immediate = callOnMain { captureAndPublishOnMain() }
-        if (immediate != null || Looper.myLooper() == Looper.getMainLooper()) return immediate
-
-        val deadline = SystemClock.elapsedRealtime() + ON_DEMAND_REFRESH_WAIT_MILLIS
-        synchronized(snapshotMonitor) {
-            while (connected.get()) {
-                snapshots.current()
-                    ?.takeIf { it.correlation != previousCorrelation }
-                    ?.let { return it }
-                val remaining = deadline - SystemClock.elapsedRealtime()
-                if (remaining <= 0) break
-                try {
-                    snapshotMonitor.wait(remaining)
-                } catch (_: InterruptedException) {
-                    Thread.currentThread().interrupt()
-                    return null
-                }
-            }
+        if (Looper.myLooper() == Looper.getMainLooper()) return captureAndPublishOnMain()
+        val expectedSession = sessionId ?: return null
+        return awaitSemanticSnapshot(expectedSession, ON_DEMAND_REFRESH_WAIT_MILLIS, { false }) {
+            true
         }
-        return callOnMain { captureAndPublishOnMain() }
     }
 
     private fun ensureSessionPublished() {
@@ -1069,11 +1117,6 @@ internal class HansAccessibilityService : AccessibilityService(), RootFreeAccess
         }
     }
 
-    private data class PostScreenshotLocatorState(
-        val snapshot: SemanticUiSnapshot?,
-        val displayId: Int?,
-    )
-
     private data class SensitiveActionTarget(
         val displayId: Int,
         val packageName: String,
@@ -1136,6 +1179,77 @@ internal object VisualCaptureCorrelationGuard {
             SemanticSnapshotContent.same(before, after)
 }
 
+/** No retry policy is implied by a platform error; secure content is permanently protected. */
+@android.annotation.SuppressLint("InlinedApi")
+internal object AccessibilityScreenshotFailure {
+    fun code(errorCode: Int): String = when (errorCode) {
+        AccessibilityService.ERROR_TAKE_SCREENSHOT_NO_ACCESSIBILITY_ACCESS ->
+            "visual_capture_access_revoked"
+        AccessibilityService.ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT ->
+            "visual_capture_rate_limited"
+        AccessibilityService.ERROR_TAKE_SCREENSHOT_INVALID_DISPLAY ->
+            "visual_capture_invalid_display"
+        AccessibilityService.ERROR_TAKE_SCREENSHOT_INTERNAL_ERROR ->
+            "visual_capture_internal_error"
+        // These public constants were added in API 34. They are compile-time integer values;
+        // older Android releases cannot emit them and need no runtime API invocation.
+        AccessibilityService.ERROR_TAKE_SCREENSHOT_INVALID_WINDOW ->
+            "visual_capture_invalid_window"
+        AccessibilityService.ERROR_TAKE_SCREENSHOT_SECURE_WINDOW ->
+            "visual_capture_secure_window"
+        else -> "visual_capture_platform_rejected"
+    }
+}
+
+internal object VisualCaptureFrameCorrelationGuard {
+    fun matches(
+        before: AndroidAccessibilityFrame,
+        after: AndroidAccessibilityFrame,
+        screenshotDisplayId: Int,
+    ): Boolean =
+        before.displayId == screenshotDisplayId &&
+            VisualCaptureCorrelationGuard.matches(
+                before.snapshot, after.snapshot, screenshotDisplayId, after.displayId,
+            ) && sameRoot(before, after)
+
+    internal fun sameRoot(
+        first: AndroidAccessibilityFrame,
+        second: AndroidAccessibilityFrame,
+    ): Boolean {
+        val firstRoot = first.snapshot.roots.singleOrNull() ?: return false
+        val secondRoot = second.snapshot.roots.singleOrNull() ?: return false
+        val firstLocator = first.byOrdinal[firstRoot.nodeOrdinal] ?: return false
+        val secondLocator = second.byOrdinal[secondRoot.nodeOrdinal] ?: return false
+        return firstLocator.isSameActionTarget(secondLocator)
+    }
+}
+
+/** The final main-looper dispatch may use only the exact still-published gesture frame. */
+internal object CoordinateGestureFrameGuard {
+    fun matches(expected: AndroidAccessibilityFrame, current: AndroidAccessibilityFrame?): Boolean =
+        current != null && current.correlation == expected.correlation &&
+            VisualCaptureFrameCorrelationGuard.matches(expected, current, expected.displayId)
+}
+
+/** A proof can cross ID churn, never missing/truncated trees or a changed frame identity. */
+internal object VisualFallbackFrameGuard {
+    fun isComplete(frame: AndroidAccessibilityFrame): Boolean {
+        if (!frame.snapshot.isComplete || frame.locators.size != frame.snapshot.nodes.size ||
+            frame.snapshot.nodes.any { it.handle.nodeOrdinal !in frame.byOrdinal }
+        ) return false
+        val root = frame.snapshot.roots.singleOrNull() ?: return false
+        val locator = frame.byOrdinal[root.nodeOrdinal] ?: return false
+        return locator.structuralPath.isEmpty() &&
+            !locator.fingerprint.packageName.isNullOrBlank() &&
+            !locator.fingerprint.className.isNullOrBlank()
+    }
+
+    fun matches(original: AndroidAccessibilityFrame, current: AndroidAccessibilityFrame): Boolean =
+        isComplete(original) && isComplete(current) &&
+            current.correlation.snapshotId.value >= original.correlation.snapshotId.value &&
+            VisualCaptureFrameCorrelationGuard.matches(original, current, original.displayId)
+}
+
 internal enum class AndroidAccessibilityWindowKind {
     APPLICATION,
     OTHER,
@@ -1153,9 +1267,9 @@ internal interface AndroidAccessibilityWindow : AutoCloseable {
 }
 
 /**
- * Root and display id are resolved atomically. A direct root is accepted only when its window id
- * matches an active/focused application window returned by getWindowsOnAllDisplays(). This avoids
- * deriving display state from AccessibilityService's non-UI Context.
+ * Root and display id are resolved together using only public window metadata. The all-display
+ * list and the direct root's getWindow() are independent framework lookups: either can transiently
+ * miss an otherwise valid active application. No path guesses a display from the service Context.
  */
 internal data class AndroidResolvedApplicationRoot(
     val displayId: Int,
@@ -1168,14 +1282,12 @@ internal class AndroidActiveWindowRootResolver {
         candidateWindows: () -> List<AndroidAccessibilityWindow>,
     ): AndroidResolvedApplicationRoot? {
         val direct = runCatching(directRoot).getOrNull()
-        val candidates = runCatching(candidateWindows).getOrElse {
-            direct?.close()
-            return null
-        }
+        val candidates = runCatching(candidateWindows).getOrDefault(emptyList())
+        var directTransferred = false
         return try {
             val eligible = candidates.mapNotNull(::eligibleWindow)
             val directWindowId = direct?.let { node ->
-                runCatching { node.windowId }.getOrNull()
+                runCatching { node.windowId }.getOrNull()?.takeIf { it >= 0 }
             }
             val directWindow = directWindowId?.let { windowId ->
                 eligible.singleOrNull { candidate ->
@@ -1183,9 +1295,23 @@ internal class AndroidActiveWindowRootResolver {
                 }
             }
             if (direct != null && directWindow != null) {
+                directTransferred = true
                 return AndroidResolvedApplicationRoot(directWindow.displayId, direct)
             }
-            direct?.close()
+            if (direct != null && directWindowId != null) {
+                val owner = runCatching(direct::window).getOrNull()
+                if (owner != null) {
+                    val ownerMetadata = try {
+                        eligibleWindow(owner)?.takeIf { it.windowId == directWindowId }
+                    } finally {
+                        runCatching(owner::close)
+                    }
+                    if (ownerMetadata != null) {
+                        directTransferred = true
+                        return AndroidResolvedApplicationRoot(ownerMetadata.displayId, direct)
+                    }
+                }
+            }
 
             eligible.asSequence()
                 .sortedWith(
@@ -1194,12 +1320,18 @@ internal class AndroidActiveWindowRootResolver {
                         .thenByDescending { it.displayId == android.view.Display.DEFAULT_DISPLAY },
                 )
                 .mapNotNull { candidate ->
-                    runCatching(candidate.window::root).getOrNull()?.let { root ->
+                    val root = runCatching(candidate.window::root).getOrNull()
+                        ?: return@mapNotNull null
+                    if (runCatching { root.windowId == candidate.windowId }.getOrDefault(false)) {
                         AndroidResolvedApplicationRoot(candidate.displayId, root)
+                    } else {
+                        runCatching(root::close)
+                        null
                     }
                 }
                 .firstOrNull()
         } finally {
+            if (!directTransferred) direct?.let { runCatching(it::close) }
             candidates.forEach { candidate -> runCatching(candidate::close) }
         }
     }
@@ -1231,9 +1363,10 @@ internal class AndroidActiveWindowRootResolver {
     )
 }
 
-private class AccessibilityWindowInfoWindow(
+internal class AccessibilityWindowInfoWindow(
     private val window: AccessibilityWindowInfo,
 ) : AndroidAccessibilityWindow {
+    private val closed = AtomicBoolean(false)
     override val windowId: Int
         get() = window.id
     override val displayId: Int
@@ -1254,6 +1387,6 @@ private class AccessibilityWindowInfoWindow(
 
     @Suppress("DEPRECATION")
     override fun close() {
-        window.recycle()
+        if (closed.compareAndSet(false, true)) window.recycle()
     }
 }

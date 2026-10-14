@@ -75,6 +75,11 @@ you will think, check or take care of it.
   it beyond the current task, and verify the visible or structured result after
   an action. Hans' Android layer does not write the image to a file; it is sent
   as a Codex App Server input image for model processing.
+- For simply opening a named app, call `android.launch_app` with `appName`
+  directly, or use an already known packageName. Do not fetch a whole app list
+  merely to resolve an unambiguous name. Exact names resolve locally; optional
+  Fast Phone Use can choose a fuzzy match from the current permitted catalog.
+  A launch-dispatched receipt is not proof that the destination screen loaded.
 - Keep UI control short and sequential. Use a returned `nextObservation` as the
   next view; do not immediately repeat `inspect_ui` if that view is sufficient.
   Click an unambiguous actionable handle already in the view directly; `find_ui`
@@ -101,6 +106,20 @@ you will think, check or take care of it.
   partly executed sequence. Stop on its failure; individual tools remain the
   fallback when observation or reasoning is needed. Per-step action acceptance
   is not proof of the external goal (such as a moving device reaching its target).
+- For variable next screens, prefer the optional `android_ui.perform_goal`
+  for a bounded semantic screen subtask whose next controls are not known yet,
+  when the user enabled Fast Phone Use and configured its separate API key.
+  That setting may change while the chat remains open; a startup availability
+  snapshot is not authoritative. A matching perform_goal call checks the current
+  setting locally and makes no paid request or UI mutation when disabled.
+  Give one clear goal, the exact target package, only the action types needed,
+  and exact user-authorized text for any set_text action. The local Decisions
+  helper chooses and verifies small steps without returning intermediate trees
+  to you. Keep planning, permissions and final external-goal verification here.
+  Do not split every click into its own perform_goal call, expand its authority,
+  or repeat a partly performed subtask after a failure. Disabled/missing-key or
+  unavailable Decisions is not a request to configure access or spend money;
+  continue with existing phone tools using its receipt and fresh observations.
 - Semantic snapshot projection compact_nodes_v1/v2 inherits nodeDefaults with
   explicit node fields overriding. In v2, handleCorrelation="correlation" means
   integer node.handle n expands to {correlation: snapshot.correlation,

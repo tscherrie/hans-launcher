@@ -31,8 +31,9 @@ class CodexAssistantProfileTest {
         ).bufferedReader().use { it.readText() }
         val response = JSONObject(fixture)
         response.getJSONObject("result").getJSONObject("config")
-            .put("model", "gpt-6-astra")
-            .put("model_reasoning_effort", "medium")
+            .put("model", "gpt-6.1-sol")
+            .put("model_reasoning_effort", "high")
+            .put("service_tier", "priority")
         CodexAssistantProfile.requireEffectiveConfig(response.toString(), "hans-profile-native-probe")
     }
 
@@ -40,9 +41,10 @@ class CodexAssistantProfileTest {
     fun approvedProfileUsesExactValuesAndNeverEmbedsCredentials() {
         val values = overrides()
         assertEquals("--strict-config", CodexAssistantProfile.strictArguments().first())
-        assertEquals(28, values.size)
-        assertEquals("\"gpt-6-astra\"", values["model"])
-        assertEquals("\"medium\"", values["model_reasoning_effort"])
+        assertEquals(29, values.size)
+        assertEquals("\"gpt-6.1-sol\"", values["model"])
+        assertEquals("\"high\"", values["model_reasoning_effort"])
+        assertEquals("\"priority\"", values["service_tier"])
         assertEquals("\"concise\"", values["model_reasoning_summary"])
         assertEquals("\"low\"", values["model_verbosity"])
         assertEquals("\"friendly\"", values["personality"])
@@ -80,12 +82,28 @@ class CodexAssistantProfileTest {
     }
 
     @Test
-    fun fastAndUpstreamSizingOrExtractionModelChoicesRemainUntouched() {
+    fun mainFastDefaultDoesNotChangeUpstreamSizingOrExtractionModelChoices() {
         val values = overrides()
         listOf(
-            "service_tier", "model_auto_compact_token_limit", "tool_output_token_limit",
+            "model_auto_compact_token_limit", "tool_output_token_limit",
             "memories.extract_model", "memories.consolidation_model",
         ).forEach { key -> assertFalse("Do not override $key", values.containsKey(key)) }
+    }
+
+    @Test fun priorityIsDocumentedByThePinnedRuntimeConfigSchemaAndRequiresEffectiveProof() {
+        val start = java.io.File(checkNotNull(System.getProperty("user.dir"))).absoluteFile
+        val schemaFile = generateSequence(start) { it.parentFile }
+            .map { java.io.File(it, "runtime/evidence/0.160.1/source/config.schema.json") }.first { it.isFile }
+        val serviceTier = JSONObject(schemaFile.readText()).getJSONObject("properties").getJSONObject("service_tier")
+        assertEquals("string", serviceTier.getString("type"))
+        assertTrue(serviceTier.getString("description").contains("priority"))
+        listOf(null, "default", "flex").forEach { incorrect ->
+            val response = effectiveResponse()
+            response.getJSONObject("result").getJSONObject("config").put("service_tier", incorrect ?: JSONObject.NULL)
+            assertThrows(IllegalStateException::class.java) {
+                CodexAssistantProfile.requireEffectiveConfig(response.toString(), "profile:1")
+            }
+        }
     }
 
     @Test

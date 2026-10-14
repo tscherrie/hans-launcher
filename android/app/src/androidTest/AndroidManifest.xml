@@ -1,6 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <application android:testOnly="true">
+        <service android:name="ai.hans.standard.voice.tts.FixtureSystemSpeechEngine"
+            android:exported="true" android:process=":system_speech_fixture">
+            <intent-filter>
+                <action android:name="android.intent.action.TTS_SERVICE" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+            <meta-data android:name="android.speech.tts" android:resource="@xml/system_speech_test_engine" />
+        </service>
         <!--
              AndroidX first probes the target package and then falls back to the
              instrumentation package for createAndroidComposeRule<ComponentActivity>().
@@ -16,6 +24,9 @@
             android:exported="true" />
         <activity
             android:name="ai.hans.standard.diagnostics.OrdinaryUidMigrationDiagnosticsProbeActivity"
+            android:exported="true" />
+        <activity
+            android:name="ai.hans.standard.fastphone.provisioning.OrdinaryUidFastPhoneProvisioningProbeActivity"
             android:exported="true" />
         <!-- A real foreign package/process/window for call-presentation tests, not a system app. -->
         <activity

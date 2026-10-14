@@ -158,17 +158,17 @@ class DispatchSelectionResolverTest {
             DispatchSelection(
                 "gpt-5.6-terra",
                 ReasoningEffort.HIGH,
-                HansSettings.DEFAULT_SERVICE_TIER,
+                HansSettings.STANDARD_SERVICE_TIER,
             ),
             resolveDispatchSelection(
                 models,
                 "gpt-5.6-terra",
                 ReasoningEffort.HIGH,
-                HansSettings.DEFAULT_SERVICE_TIER,
+                HansSettings.STANDARD_SERVICE_TIER,
             ),
         )
         assertEquals(
-            HansSettings.DEFAULT_SERVICE_TIER,
+            HansSettings.STANDARD_SERVICE_TIER,
             resolveDispatchSelection(
                 models,
                 "gpt-5.6-luna",
@@ -176,6 +176,20 @@ class DispatchSelectionResolverTest {
                 requestedServiceTier = null,
             )?.serviceTier,
         )
+    }
+
+    @Test fun freshFastProductPreferenceCannotInventPriorityOnAnUnsupportedRuntimeModel() {
+        val sol = model("gpt-6.1-sol", ReasoningEffort.HIGH, setOf(ReasoningEffort.HIGH), fast = false)
+        val fresh = HansSettings()
+        val resolved = checkNotNull(resolveDispatchSelection(listOf(sol), fresh.model,
+            ReasoningEffort.of(fresh.reasoningEffort), fresh.serviceTier))
+        assertEquals("gpt-6.1-sol", resolved.model)
+        assertEquals(ReasoningEffort.HIGH, resolved.effort)
+        assertEquals("default", resolved.serviceTier)
+        assertEquals("default", DispatchSelection(sol.wireModel, ReasoningEffort.HIGH).serviceTier)
+        assertEquals("priority", checkNotNull(resolveDispatchSelection(listOf(sol.copy(
+            serviceTiers = listOf(ModelServiceTier("priority", "Fast", "synthetic fast")))), fresh.model,
+            ReasoningEffort.HIGH, fresh.serviceTier)).serviceTier)
     }
 
     private fun model(

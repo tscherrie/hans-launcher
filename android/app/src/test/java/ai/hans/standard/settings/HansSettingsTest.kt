@@ -14,9 +14,11 @@ class HansSettingsTest {
     fun defaultsMatchTheProductContract() {
         val settings = HansSettings()
 
-        assertEquals("gpt-6-astra", settings.model)
-        assertEquals("medium", settings.reasoningEffort)
+        assertEquals("gpt-6.1-sol", settings.model)
+        assertEquals("high", settings.reasoningEffort)
         assertEquals(HansSettings.DEFAULT_SERVICE_TIER, settings.serviceTier)
+        assertEquals("priority", settings.serviceTier)
+        assertEquals(setOf("default", "priority"), HansSettings.SUPPORTED_SERVICE_TIERS)
         assertEquals(ActiveTurnInputMode.STEER, settings.activeTurnInputMode)
         assertEquals("fable", settings.voice)
         assertEquals(1.25f, settings.speechRate)
@@ -29,9 +31,9 @@ class HansSettingsTest {
     }
 
     @Test
-    fun astraIsTheDefaultWithoutRemovingExistingModelChoices() {
+    fun sol61IsTheDefaultWithoutRemovingAstraOrExistingModelChoices() {
         assertEquals("gpt-6-astra", HansSettings(model = "gpt-6-astra").model)
-        assertEquals("gpt-6-astra", HansSettings().model)
+        assertEquals("gpt-6.1-sol", HansSettings().model)
         assertEquals(
             listOf("gpt-6-luna", "gpt-5.6-terra", "gpt-6.1-sol", "gpt-6-astra", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-6-sol"),
             HansSettings.MODEL_ORDER,
@@ -54,7 +56,7 @@ class HansSettingsTest {
     }
 
     @Test
-    fun assetAndWireDispatchDefaultsMatchFreshSettingsWithoutEnablingFast() {
+    fun assetAndWireDispatchDefaultsMatchFreshSol61HighFastSettings() {
         val relativePath = "android/app/src/main/assets/hans/default-settings.json"
         val start = File(requireNotNull(System.getProperty("user.dir"))).absoluteFile
         val asset = generateSequence(start) { it.parentFile }
@@ -65,10 +67,14 @@ class HansSettingsTest {
 
         assertEquals(settings.model, json.getString("model"))
         assertEquals(settings.reasoningEffort, json.getString("reasoningEffort"))
+        assertEquals(settings.serviceTier, json.getString("serviceTier"))
         assertEquals(settings.model, DispatchOptions.DEFAULT.model)
         assertEquals(settings.reasoningEffort, DispatchOptions.DEFAULT.effort.wireValue)
         assertEquals(settings.serviceTier, DispatchOptions.DEFAULT.serviceTier)
-        assertEquals("default", settings.serviceTier)
+        assertEquals("priority", settings.serviceTier)
+        assertEquals("gpt-6-astra", DispatchOptions.ASTRA_MEDIUM.model)
+        assertEquals("medium", DispatchOptions.ASTRA_MEDIUM.effort.wireValue)
+        assertEquals("default", DispatchOptions.ASTRA_MEDIUM.serviceTier)
         assertEquals(settings.activeTurnInputMode.wireValue, json.getString("activeTurnInputMode"))
         assertEquals(settings.voice, json.getString("voice"))
         assertEquals(settings.speechRate.toDouble(), json.getDouble("speechRate"), 0.0)

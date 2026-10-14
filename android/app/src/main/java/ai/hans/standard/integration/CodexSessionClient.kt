@@ -32,6 +32,7 @@ internal class CodexSessionClient(
     pluginSurfaceEvidenceStager: PluginSurfaceEvidenceStager? = null,
     pluginPreparationExecutor: Executor = Executor { command -> command.run() },
     pluginInstallDeadline: PluginInstallDeadline? = null,
+    userTurnContext: UserTurnContextProvider = UserTurnContextProvider.NONE,
 ) {
     private val toolPerformance = ToolPerformanceRecorder()
     private val phoneToolsServer = dynamicToolExecutor?.let { executor ->
@@ -49,6 +50,7 @@ internal class CodexSessionClient(
         settingsStore = settingsStore,
         clientMessageIds = clientMessageIds,
         developerInstructions = developerInstructions,
+        userTurnContext = userTurnContext,
         dynamicToolExecutor = dynamicToolExecutor?.let { MeasuredDynamicToolExecutor(it, toolPerformance) },
         protocolDiagnostics = protocolDiagnostics,
         pluginInstallTransactions = pluginInstallTransactions,

@@ -1,6 +1,7 @@
 package ai.hans.standard.voice.tts.android
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.os.Build
 import android.security.KeyStoreException as AndroidKeyStoreException
 import android.security.keystore.KeyGenParameterSpec
@@ -25,9 +26,10 @@ import javax.crypto.spec.GCMParameterSpec
 class AndroidKeystoreSpeechCredentialStore internal constructor(
     context: Context,
     private val keyAlias: String = DEFAULT_KEY_ALIAS,
-    preferencesName: String = DEFAULT_PREFERENCES_NAME,
+    private val preferencesName: String = DEFAULT_PREFERENCES_NAME,
+    preferencesOverride: SharedPreferences? = null,
 ) : BearerTokenSource {
-    private val preferences = context.applicationContext.getSharedPreferences(
+    private val preferences = preferencesOverride ?: context.applicationContext.getSharedPreferences(
         preferencesName,
         Context.MODE_PRIVATE,
     )
@@ -38,6 +40,10 @@ class AndroidKeystoreSpeechCredentialStore internal constructor(
 
     @Synchronized
     override fun loadBearerToken(): String? {
+        if (preferencesName in uncertainPersistence) {
+            lastStatus = SpeechCredentialStatus.TEMPORARILY_UNAVAILABLE
+            return null
+        }
         val version = preferences.getInt(KEY_VERSION, 0)
         val encodedIv = preferences.getString(KEY_IV, null)
         val encodedCiphertext = preferences.getString(KEY_CIPHERTEXT, null)
@@ -114,8 +120,7 @@ class AndroidKeystoreSpeechCredentialStore internal constructor(
                 encrypt(plaintext)
             }
             try {
-                check(
-                    preferences.edit()
+                val committed = preferences.edit()
                         .clear()
                         .putInt(KEY_VERSION, ENVELOPE_VERSION)
                         .putString(KEY_IV, Base64.encodeToString(envelope.iv, Base64.NO_WRAP))
@@ -123,8 +128,13 @@ class AndroidKeystoreSpeechCredentialStore internal constructor(
                             KEY_CIPHERTEXT,
                             Base64.encodeToString(envelope.ciphertext, Base64.NO_WRAP),
                         )
-                        .commit(),
-                ) { "speech_credential_persistence_failed" }
+                        .commit()
+                if (!committed) {
+                    uncertainPersistence.add(preferencesName)
+                    lastStatus = SpeechCredentialStatus.TEMPORARILY_UNAVAILABLE
+                    throw IllegalStateException("speech_credential_persistence_failed")
+                }
+                uncertainPersistence.remove(preferencesName)
                 lastStatus = SpeechCredentialStatus.AVAILABLE
             } finally {
                 envelope.iv.fill(0)
@@ -185,7 +195,14 @@ class AndroidKeystoreSpeechCredentialStore internal constructor(
     }
 
     private fun clearInternal(deleteKey: Boolean) {
-        preferences.edit().clear().commit()
+        if (!preferences.edit().clear().commit()) {
+            // SharedPreferences may change its memory cache even when disk commit fails. Do not
+            // expose that speculative state to another store instance, or delete the old key.
+            uncertainPersistence.add(preferencesName)
+            lastStatus = SpeechCredentialStatus.TEMPORARILY_UNAVAILABLE
+            throw IllegalStateException("speech_credential_persistence_failed")
+        }
+        uncertainPersistence.remove(preferencesName)
         if (deleteKey) {
             runCatching {
                 KeyStore.getInstance(KEYSTORE).apply { load(null) }.deleteEntry(keyAlias)
@@ -265,5 +282,6 @@ class AndroidKeystoreSpeechCredentialStore internal constructor(
         private const val MIN_TOKEN_CHARACTERS = 16
         private const val MAX_TOKEN_CHARACTERS = 1_024
         private const val MAX_CIPHERTEXT_BYTES = MAX_TOKEN_CHARACTERS + 64
+        private val uncertainPersistence = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     }
 }

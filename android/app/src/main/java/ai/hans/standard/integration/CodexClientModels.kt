@@ -69,7 +69,7 @@ data class DeviceCodeLoginUi(
 data class DispatchSelection(
     val model: String,
     val effort: ReasoningEffort,
-    val serviceTier: String = HansSettings.DEFAULT_SERVICE_TIER,
+    val serviceTier: String = HansSettings.STANDARD_SERVICE_TIER,
 ) {
     init {
         require(model in HansSettings.SUPPORTED_MODELS) { "Unsupported Hans model" }
@@ -141,12 +141,13 @@ internal fun resolveDispatchSelection(
             .map(ReasoningEffort::of)
             .firstOrNull(supported::contains)
         ?: return null
-    val requestedTier = requestedServiceTier ?: HansSettings.DEFAULT_SERVICE_TIER
+    // Absence is wire Standard, not the preference of a newly installed Hans.
+    val requestedTier = requestedServiceTier ?: HansSettings.STANDARD_SERVICE_TIER
     val serviceTier = when {
-        requestedTier == HansSettings.DEFAULT_SERVICE_TIER -> requestedTier
+        requestedTier == HansSettings.STANDARD_SERVICE_TIER -> requestedTier
         requestedTier in HansSettings.SUPPORTED_SERVICE_TIERS &&
             model.serviceTiers.any { it.id == requestedTier } -> requestedTier
-        else -> HansSettings.DEFAULT_SERVICE_TIER
+        else -> HansSettings.STANDARD_SERVICE_TIER
     }
     return DispatchSelection(model.wireModel, effort, serviceTier)
 }

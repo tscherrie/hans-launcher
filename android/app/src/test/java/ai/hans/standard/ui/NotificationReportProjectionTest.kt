@@ -53,6 +53,59 @@ class NotificationReportProjectionTest {
             HansSettings(), resolver).chat.messages.isEmpty())
     }
 
+    @Test fun newImportantNoticeFollowsVisibleToolActivityAndPrecedesLaterAnswers() {
+        val user = ClientTimelineItem("user", ClientTimelineRole.USER, "Check this for me", 1, 1,
+            true, ClientTimelineStatus.SENT)
+        val tool = ClientTimelineItem("tool", ClientTimelineRole.TOOL, "Checking calendar", 2, 1,
+            false, ClientTimelineStatus.IN_PROGRESS)
+        val report = createNotificationReport(notice.id, notice.text, listOf(user, tool))
+        val local = HansLocalUiState(notificationReportMessages = listOf(notice.copy(
+            localTimelineAnchorId = report.timelineAnchorId)), notificationReportThreadId = "main-thread")
+
+        val first = HansClientUiProjector.project(snapshot(user, tool), local, HansSettings(), resolver).chat.messages
+        assertEquals(listOf("user", "tool", notice.id), first.map { it.id })
+        assertEquals(notice.text, first.last().text)
+
+        val answer = ClientTimelineItem("answer", ClientTimelineRole.HANS, "Done", 3, 1,
+            true, ClientTimelineStatus.COMPLETE, AgentMessagePhase.FINAL_ANSWER, "user-turn")
+        val later = HansClientUiProjector.project(snapshot(user, tool, answer), local,
+            HansSettings(), resolver).chat.messages
+        assertEquals(listOf("user", "tool", notice.id, "answer"), later.map { it.id })
+        assertEquals(1, later.count { it.id == notice.id })
+    }
+
+    @Test fun blankRunningToolIsAVisibleAnchorButEmptyMetadataDoesNotBuryTheNotice() {
+        val user = ClientTimelineItem("user", ClientTimelineRole.USER, "Help", 1, 1,
+            true, ClientTimelineStatus.SENT)
+        val running = ClientTimelineItem("running-tool", ClientTimelineRole.TOOL, "", 2, 1,
+            false, ClientTimelineStatus.IN_PROGRESS)
+        val hidden = ClientTimelineItem("empty-metadata", ClientTimelineRole.SYSTEM, "", 3, 1,
+            true, ClientTimelineStatus.COMPLETE)
+        val report = createNotificationReport(notice.id, notice.text, listOf(hidden, running, user))
+        assertEquals("running-tool", report.timelineAnchorId)
+        val local = HansLocalUiState(notificationReportMessages = listOf(notice.copy(
+            localTimelineAnchorId = report.timelineAnchorId)), notificationReportThreadId = "main-thread")
+        val messages = HansClientUiProjector.project(snapshot(user, running, hidden), local,
+            HansSettings(), resolver).chat.messages
+        assertEquals(listOf("user", "running-tool", notice.id), messages.map { it.id })
+        assertEquals(notice.text, messages.last().text)
+    }
+
+    @Test fun hiddenSetupToolsCannotBecomeTheAnchorForANewImportantNotice() {
+        val answer = ClientTimelineItem("visible-answer", ClientTimelineRole.HANS, "Ready", 1, 1,
+            true, ClientTimelineStatus.COMPLETE, AgentMessagePhase.FINAL_ANSWER, "ordinary-turn")
+        val hidden = ClientTimelineItem("setup-tool", ClientTimelineRole.TOOL, "Internal setup receipt", 2, 1,
+            true, ClientTimelineStatus.COMPLETE, turnId = "setup-turn")
+        val client = snapshot(answer, hidden).copy(setupTurnIds = setOf("setup-turn"))
+        val report = createNotificationReport(notice.id, notice.text, client.timeline, client.setupTurnIds)
+        assertEquals(answer.id, report.timelineAnchorId)
+        val local = HansLocalUiState(notificationReportMessages = listOf(notice.copy(
+            localTimelineAnchorId = report.timelineAnchorId)), notificationReportThreadId = "main-thread")
+        val messages = HansClientUiProjector.project(client, local, HansSettings(), resolver).chat.messages
+        assertEquals(listOf(answer.id, notice.id), messages.map { it.id })
+        assertEquals(notice.text, messages.last().text)
+    }
+
     private fun snapshot(vararg items: ClientTimelineItem, threadId: String = "main-thread") = CodexClientSnapshot(
         ClientRuntimePhase.READY, ClientSessionPhase.READY, 1,
         SessionUiSnapshot(AccountUiSnapshot(AccountPhase.SIGNED_IN, null, null, null, null, null),

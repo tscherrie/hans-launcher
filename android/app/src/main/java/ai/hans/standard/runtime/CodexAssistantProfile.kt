@@ -11,17 +11,19 @@ import org.json.JSONObject
  * replacing CODEX_HOME, credentials, plugin configuration or conversation history.
  *
  * Model/effort are startup defaults only: each personal turn still sends the user's confirmed
- * selection explicitly. Fast, memory extraction models, compaction and tool-output limits are
- * deliberately not overridden here.
+ * selection and tier explicitly. Memory extraction models, compaction and tool-output limits are
+ * deliberately not overridden here; the main-agent Fast default is separate from those roles.
  */
 internal object CodexAssistantProfile {
-    const val ID = "hans-personal-2026-08-27"
+    const val ID = "hans-personal-2026-10-07"
     val personality: Personality = Personality.FRIENDLY
     val reasoningSummary: ReasoningSummary = ReasoningSummary.CONCISE
 
     private val settings: Map<String, Any> = linkedMapOf(
         "model" to HansSettings.DEFAULT_MODEL,
         "model_reasoning_effort" to HansSettings.DEFAULT_REASONING_EFFORT,
+        // Pinned 0.160.1 config.schema.json documents explicit priority routing.
+        "service_tier" to HansSettings.DEFAULT_SERVICE_TIER,
         "model_reasoning_summary" to reasoningSummary.wireValue,
         "model_verbosity" to "low",
         "personality" to personality.wireValue,

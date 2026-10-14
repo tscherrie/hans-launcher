@@ -80,6 +80,7 @@ fun openAiSpeechRemediation(code: String): OpenAiSpeechRemediation? = when (
 
 /** Natural-language explanation for stable local/provider codes; raw API messages never enter. */
 fun openAiSpeechFailureMessage(code: String, text: HansTextResolver): String = when {
+    code.startsWith("system_speech_") -> text.text(R.string.system_speech_failed)
     code in setOf("codex_transcription_auth_missing", "codex_transcription_auth_required") ->
         text.text(R.string.codex_live_sign_in_required)
     code == "codex_transcription_auth_changed" -> text.text(R.string.codex_live_session_not_ready)

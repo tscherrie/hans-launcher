@@ -14,6 +14,7 @@ import ai.hans.standard.phone.accessibility.InMemorySemanticUiSnapshotSource
 import ai.hans.standard.phone.accessibility.SemanticUiAction
 import ai.hans.standard.phone.accessibility.SemanticUiRole
 import ai.hans.standard.phone.accessibility.SemanticUiSnapshot
+import ai.hans.standard.phone.accessibility.SnapshotTruncationReason
 import ai.hans.standard.phone.accessibility.UiBounds
 import ai.hans.standard.phone.accessibility.UiInteractionAvailability
 import ai.hans.standard.phone.accessibility.UiInteractionAvailabilityProbe
@@ -522,6 +523,75 @@ class BoundedAccessibilityCommandSessionTest {
     }
 
     @Test
+    fun visualFallbackHookDefaultsClosedAndDoesNotSubstituteCurrentSnapshot() {
+        val harness = SessionHarness(queueCapacity = 1)
+        try {
+            assertNull(harness.session.currentSnapshotForVisualFallback(harness.before.correlation))
+            assertSame(harness.before, harness.session.currentSnapshot())
+            assertTrue(harness.host.nodeCalls.isEmpty())
+        } finally { harness.close() }
+    }
+
+    @Test
+    fun visualFallbackHookRejectsWrongSessionWindowOlderFrameAndIncompleteResult() {
+        var calls = 0
+        var returned = semanticSnapshot(correlation = testCorrelation(snapshot = 2))
+        val harness = SessionHarness(
+            queueCapacity = 1,
+            currentSnapshotForVisualFallback = { calls += 1; returned },
+        )
+        try {
+            val original = harness.before.correlation
+            assertSame(returned, harness.session.currentSnapshotForVisualFallback(original))
+            assertNull(harness.session.currentSnapshotForVisualFallback(
+                testCorrelation(session = "another-session"),
+            ))
+            assertEquals(1, calls)
+            returned = semanticSnapshot(correlation = testCorrelation(snapshot = 2, window = 8))
+            assertNull(harness.session.currentSnapshotForVisualFallback(original))
+            returned = semanticSnapshot(correlation = testCorrelation(snapshot = 2, session = "other-session"))
+            assertNull(harness.session.currentSnapshotForVisualFallback(original))
+            returned = semanticSnapshot(correlation = testCorrelation(snapshot = 1))
+            assertNull(harness.session.currentSnapshotForVisualFallback(testCorrelation(snapshot = 2)))
+            returned = SemanticUiSnapshot(
+                returned.correlation, returned.displayBounds, returned.capturedAtElapsedMillis,
+                returned.nodes, returned.roots, setOf(SnapshotTruncationReason.PLATFORM_NODE_UNAVAILABLE),
+                returned.estimatedBytes, returned.totalTextCharacters,
+            )
+            assertNull(harness.session.currentSnapshotForVisualFallback(original))
+            harness.session.close()
+            assertNull(harness.session.currentSnapshotForVisualFallback(original))
+            assertEquals(5, calls)
+            assertTrue(harness.host.nodeCalls.isEmpty())
+        } finally { harness.close() }
+    }
+
+    @Test
+    fun throwingVisualFallbackHookFailsClosedAndCloseDuringReadRejectsLateResult() {
+        val throwing = SessionHarness(
+            queueCapacity = 1,
+            currentSnapshotForVisualFallback = { error("synthetic read failure") },
+        )
+        try {
+            assertNull(throwing.session.currentSnapshotForVisualFallback(throwing.before.correlation))
+            assertTrue(throwing.host.nodeCalls.isEmpty())
+        } finally { throwing.close() }
+
+        lateinit var closing: SessionHarness
+        closing = SessionHarness(
+            queueCapacity = 1,
+            currentSnapshotForVisualFallback = {
+                closing.session.close()
+                semanticSnapshot(correlation = testCorrelation(snapshot = 2))
+            },
+        )
+        try {
+            assertNull(closing.session.currentSnapshotForVisualFallback(closing.before.correlation))
+            assertTrue(closing.host.nodeCalls.isEmpty())
+        } finally { closing.close() }
+    }
+
+    @Test
     fun exactReceiptHooksRejectCrossSessionWrongCorrelationAndClosedSession() {
         val after = semanticSnapshot(correlation = testCorrelation(snapshot = 2))
         var returned = after
@@ -647,6 +717,7 @@ class BoundedAccessibilityCommandSessionTest {
         awaitFreshSnapshot: (Long, () -> Boolean, (SemanticUiSnapshot) -> Boolean) -> SemanticUiSnapshot? =
             { _, _, _ -> null },
         wakeSnapshotWait: () -> Unit = {},
+        currentSnapshotForVisualFallback: (UiSnapshotCorrelation) -> SemanticUiSnapshot? = { null },
     ) {
         val before = semanticSnapshot(
             roots = listOf(
@@ -730,6 +801,7 @@ class BoundedAccessibilityCommandSessionTest {
             withdrawReceiptForCommands = withdrawReceiptForCommands,
             awaitFreshSnapshot = awaitFreshSnapshot,
             wakeSnapshotWait = wakeSnapshotWait,
+            currentSnapshotForVisualFallback = currentSnapshotForVisualFallback,
         )
 
         fun click(key: String) = AccessibilityCommand.Click(

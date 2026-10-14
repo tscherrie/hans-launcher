@@ -121,21 +121,76 @@ class NotificationEventStorageTest {
         assertEquals(0L, reopened.status().outcomes.speechQueuedCount)
     }
 
-    @Test fun removedSourceErasesTheDurableReportAndFreshSameThreadProjectionCanRemoveItsCard() {
+    @Test fun removedSourceRetainsOneAdmittedConversationMessageAcrossAtomicReopenAndTerminalReconciliation() {
         val ledger = NotificationEventLedger(AtomicFileNotificationEventStorage(context, fileName))
         ledger.activateAfter(0)
         ledger.accept(event(1))
         val claim = ledger.claim(ledger.pending().single().eventId, "main-thread")!!
         ledger.accepted(claim, "main-thread", "turn-1")
         val text = "private notice report"
-        ledger.commitReport(claim.eventId, "main-thread", "turn-1",
-            NotificationEventReport("hans-notice-one", text, notificationEventSha256(text), null))
+        val report = NotificationEventReport("hans-notice-one", text, notificationEventSha256(text), "native-anchor")
+        assertEquals(report, ledger.commitReport(claim.eventId, "main-thread", "turn-1", report))
         assertEquals(1, ledger.reports("main-thread").size)
         assertTrue(ledger.accept(event(2, NotificationEventKind.REMOVED)))
         val reopened = NotificationEventLedger(AtomicFileNotificationEventStorage(context, fileName))
-        assertTrue(reopened.reports("main-thread").isEmpty())
+        assertEquals(listOf(report), reopened.reports("main-thread"))
+        assertTrue(reopened.reports("other-thread").isEmpty())
+        assertTrue(reopened.pending().isEmpty())
+        assertFalse(reopened.mayTransmit(claim))
+        assertFalse(reopened.hasLiveReportSource(claim.eventId, "main-thread", claim.packageName, claim.androidKey))
         assertNull(reopened.reportFor(claim.eventId, "main-thread", "turn-1"))
-        assertFalse(File(context.noBackupFilesDir, fileName).readText().contains(text))
+        assertNull(reopened.reportSourceFor(claim.eventId, "main-thread", "turn-1"))
+        assertNull(reopened.commitReport(claim.eventId, "main-thread", "turn-1", report))
+        assertTrue(reopened.accepted(claim, "main-thread", "turn-1"))
+        assertTrue(reopened.settle(claim.eventId, "main-thread", "turn-1", true))
+        val terminal = NotificationEventLedger(AtomicFileNotificationEventStorage(context, fileName))
+        assertEquals(listOf(report), terminal.reports("main-thread"))
+        assertTrue(terminal.accepted(claim, "main-thread", "turn-1"))
+        assertEquals(listOf(report), terminal.reports("main-thread"))
+        assertEquals(0L, terminal.status().outcomes.speechQueuedCount)
+        val record = AtomicFileNotificationEventStorage(context, fileName).read()!!.records.single()
+        assertFalse(record.sourceActive)
+        assertEquals("", record.payloadJson)
+        assertEquals(NotificationEventPhase.COMPLETED, record.phase)
+    }
+
+    @Test fun supersededReportsSurviveAtomicReopenButPackageExclusionAndExplicitHistoryClearEraseThem() {
+        val ledger = NotificationEventLedger(AtomicFileNotificationEventStorage(context, fileName))
+        ledger.activateAfter(0)
+        ledger.accept(event(1))
+        val first = ledger.claim(ledger.pending().single().eventId, "main-thread")!!
+        val firstReport = NotificationEventReport("hans-notice-one", "First admitted notice",
+            notificationEventSha256("First admitted notice"), null)
+        assertEquals(firstReport, ledger.commitReport(first.eventId, "main-thread", "turn-1", firstReport))
+        assertTrue(ledger.settle(first.eventId, "main-thread", "turn-1", true))
+        assertTrue(ledger.remove(first.packageName, first.androidKey))
+        assertTrue(ledger.accept(event(2, NotificationEventKind.UPDATED)))
+        val second = ledger.claim(ledger.pending().single().eventId, "main-thread")!!
+        val secondReport = NotificationEventReport("hans-notice-two", "Second admitted notice",
+            notificationEventSha256("Second admitted notice"), null)
+        assertEquals(secondReport, ledger.commitReport(second.eventId, "main-thread", "turn-2", secondReport))
+        val reopened = NotificationEventLedger(AtomicFileNotificationEventStorage(context, fileName))
+        assertEquals(listOf(firstReport, secondReport), reopened.reports("main-thread"))
+        assertEquals(secondReport, reopened.commitReport(second.eventId, "main-thread", "turn-2",
+            secondReport.copy(id = "hans-notice-retry")))
+        assertEquals(listOf(firstReport, secondReport), reopened.reports("main-thread"))
+        assertTrue(reopened.reports("main-thread") { false }.isEmpty())
+        assertTrue(reopened.purgeExcluded { false })
+        val excluded = NotificationEventLedger(AtomicFileNotificationEventStorage(context, fileName))
+        assertTrue(excluded.reports("main-thread").isEmpty())
+        assertFalse(File(context.noBackupFilesDir, fileName).readText().contains(firstReport.text))
+        assertFalse(File(context.noBackupFilesDir, fileName).readText().contains(secondReport.text))
+        assertNull(excluded.commitReport(second.eventId, "main-thread", "turn-2", secondReport))
+        assertTrue(excluded.accept(event(3)))
+        val third = excluded.claim(excluded.pending().single().eventId, "main-thread")!!
+        assertEquals(secondReport, excluded.commitReport(third.eventId, "main-thread", "turn-3", secondReport))
+        assertTrue(excluded.clearPrivateData())
+        val cleared = NotificationEventLedger(AtomicFileNotificationEventStorage(context, fileName))
+        assertTrue(cleared.reports("main-thread").isEmpty())
+        assertFalse(File(context.noBackupFilesDir, fileName).readText().contains(secondReport.text))
+        assertTrue(cleared.accept(event(3)))
+        assertTrue(cleared.pending().isEmpty())
+        assertNull(cleared.commitReport(third.eventId, "main-thread", "turn-3", secondReport))
     }
 
     @Test fun trafficStormCoalescesDurablyAndAcceptedBaselineSurvivesAtomicReopen() {

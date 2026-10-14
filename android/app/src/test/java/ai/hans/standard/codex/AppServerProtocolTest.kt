@@ -44,16 +44,16 @@ class AppServerProtocolTest {
     fun contractIsPinnedToTheRuntimeSchemaVersion() {
         assertEquals("0.155.0", CodexProtocolContract.APP_SERVER_VERSION)
         assertEquals("v2", CodexProtocolContract.SCHEMA_GENERATION_MODE)
-        assertEquals(DispatchOptions.ASTRA_MEDIUM, DispatchOptions.DEFAULT)
-        assertEquals("gpt-6-astra", DispatchOptions.DEFAULT.model)
-        assertEquals(ReasoningEffort.MEDIUM, DispatchOptions.DEFAULT.effort)
+        assertEquals(DispatchOptions.SOL_6_1_HIGH_FAST, DispatchOptions.DEFAULT)
+        assertEquals("gpt-6.1-sol", DispatchOptions.DEFAULT.model)
+        assertEquals(ReasoningEffort.HIGH, DispatchOptions.DEFAULT.effort)
         assertEquals("gpt-5.6-terra", DispatchOptions.TERRA_MAX.model)
         assertEquals(ApprovalPolicy.NEVER, DispatchOptions.DEFAULT.approvalPolicy)
         assertEquals(
             DispatchSandbox.DANGER_FULL_ACCESS,
             DispatchOptions.DEFAULT.sandbox,
         )
-        assertEquals(CodexServiceTier.STANDARD, DispatchOptions.DEFAULT.serviceTier)
+        assertEquals(CodexServiceTier.FAST, DispatchOptions.DEFAULT.serviceTier)
     }
 
     @Test
@@ -140,7 +140,7 @@ class AppServerProtocolTest {
             id = RequestId.Number(33),
             threadId = "thread-standard",
             input = listOf(CodexInput.Text("Normal")),
-            options = DispatchOptions.DEFAULT,
+            options = DispatchOptions.DEFAULT.copy(serviceTier = CodexServiceTier.STANDARD),
         )
 
         val params = JSONObject(request.json).getJSONObject("params")
@@ -413,8 +413,9 @@ class AppServerProtocolTest {
         val result = response.result as TurnStartResult
 
         assertEquals(DispatchOptions.DEFAULT, result.effectiveOptions)
-        assertEquals("gpt-6-astra", result.asActiveTurn().effectiveOptions.model)
-        assertEquals(ReasoningEffort.MEDIUM, result.asActiveTurn().effectiveOptions.effort)
+        assertEquals("gpt-6.1-sol", result.asActiveTurn().effectiveOptions.model)
+        assertEquals(ReasoningEffort.HIGH, result.asActiveTurn().effectiveOptions.effort)
+        assertEquals(CodexServiceTier.FAST, result.asActiveTurn().effectiveOptions.serviceTier)
     }
 
     @Test
@@ -422,7 +423,7 @@ class AppServerProtocolTest {
         val correlator = ResponseCorrelator()
         val request = AppServerRequests.threadStart(
             id = RequestId.Number(31),
-            options = DispatchOptions.DEFAULT,
+            options = DispatchOptions.ASTRA_MEDIUM,
         )
         correlator.register(request)
 

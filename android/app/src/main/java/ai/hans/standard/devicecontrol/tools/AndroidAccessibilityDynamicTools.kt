@@ -44,6 +44,7 @@ import ai.hans.standard.phone.accessibility.android.HansAccessibilityApprovals
 import ai.hans.standard.phone.accessibility.android.HansAccessibilitySession
 import ai.hans.standard.phone.accessibility.android.HansAccessibilitySessions
 import ai.hans.standard.phone.accessibility.android.HansPhoneToolEvidence
+import ai.hans.standard.phone.accessibility.android.SemanticSnapshotContent
 import ai.hans.standard.phone.accessibility.android.VisualUiCapture
 import ai.hans.standard.phone.accessibility.android.VisualUiCaptureResult
 import ai.hans.standard.phone.accessibility.resume.AndroidUiTaskContinuationRuntime
@@ -80,6 +81,7 @@ object AndroidAccessibilityDynamicToolCatalog {
                 "never repeat the mutation just for observation.",
         tools = listOf(
             GenericUiStepsContract.spec,
+            FastPhoneUseContract.spec,
             function(
                 "inspect_ui",
                 "Read a bounded semantic snapshot of the visible Android window. " +
@@ -351,13 +353,7 @@ class AndroidAccessibilityDynamicToolExecutor(
         }
         val session = sessions.current()
         if (session == null) {
-            completion.complete(
-                if (serviceConnection.isConnected() || specialAccess.isEnabled()) {
-                    DeviceControlProjection.serviceReconnecting()
-                } else {
-                    DeviceControlProjection.permissionRequired()
-                },
-            )
+            completion.complete(AccessibilitySessionRecovery.unavailable(specialAccess, serviceConnection))
             return
         }
         if (call.tool == "inspect_ui") {
@@ -441,8 +437,7 @@ class AndroidAccessibilityDynamicToolExecutor(
             completion.complete(DeviceControlProjection.failure("invalid_arguments"))
             return
         }
-        val current = session.currentSnapshot()?.correlation
-        if (current == null) {
+        if (session.currentSnapshot() == null) {
             completion.complete(
                 DeviceControlProjection.snapshotTemporarilyUnavailable(
                     runCatching { session.latestSnapshotFailure() }.getOrNull(),
@@ -450,7 +445,7 @@ class AndroidAccessibilityDynamicToolExecutor(
             )
             return
         }
-        val claim = when (val attempt = fallbackProofs.claimWithDiagnostic(token, call, correlation, current)) {
+        val claim = when (val attempt = claimVisualProof(token, call, correlation, session)) {
             is VisualFallbackProofStore.ClaimAttempt.Granted -> attempt.claim
             is VisualFallbackProofStore.ClaimAttempt.Rejected -> {
                 completion.complete(DeviceControlProjection.failure(
@@ -462,8 +457,36 @@ class AndroidAccessibilityDynamicToolExecutor(
         if (!requireUiAvailable(call, completion, claim)) return
         when (val result = session.captureVisualSnapshot()) {
             is VisualUiCaptureResult.Success -> {
-                claim.consume()
-                val gestureToken = fallbackProofs.issue(call, result.capture.correlation)
+                // The image's exact frame must remain retained and still match the original
+                // zero-match evidence. A stable screenshot of a different UI grants nothing.
+                val captured = session.currentSnapshot()
+                    ?.takeIf { it.correlation == result.capture.correlation }
+                val original = claim.validatedSnapshot
+                val unchanged = captured != null && original != null &&
+                    captured.isComplete && SemanticSnapshotContent.same(original, captured) &&
+                    captured.correlation.sessionId == original.correlation.sessionId &&
+                    captured.correlation.windowId == original.correlation.windowId &&
+                    runCatching {
+                        session.retainSnapshotForCommands(captured.correlation) &&
+                            sessions.current() === session &&
+                            session.currentSnapshotForVisualFallback(correlation)?.let { current ->
+                                current.isComplete && SemanticSnapshotContent.same(captured, current)
+                            } == true
+                    }.getOrDefault(false)
+                if (!unchanged) {
+                    claim.release()
+                    completion.complete(DeviceControlProjection.failure("visual_capture_content_changed"))
+                    return
+                }
+                val gestureToken = when (val replacement = claim.replaceFor(call, result.capture.correlation)) {
+                    is VisualFallbackProofStore.ReplacementAttempt.Granted -> replacement.token
+                    is VisualFallbackProofStore.ReplacementAttempt.Rejected -> {
+                        completion.complete(DeviceControlProjection.failure(
+                            "semantic_fallback_proof_required", replacement.diagnostic,
+                        ))
+                        return
+                    }
+                }
                 completion.complete(
                     DeviceControlProjection.visualSnapshot(result.capture, gestureToken),
                 )
@@ -489,8 +512,7 @@ class AndroidAccessibilityDynamicToolExecutor(
             completion.complete(DeviceControlProjection.failure("invalid_arguments"))
             return
         }
-        val current = session.currentSnapshot()?.correlation
-        if (current == null) {
+        if (session.currentSnapshot() == null) {
             completion.complete(
                 DeviceControlProjection.snapshotTemporarilyUnavailable(
                     runCatching { session.latestSnapshotFailure() }.getOrNull(),
@@ -498,12 +520,7 @@ class AndroidAccessibilityDynamicToolExecutor(
             )
             return
         }
-        val attempt = fallbackProofs.claimWithDiagnostic(
-            token = decoded.token,
-            call = call,
-            correlation = decoded.command.correlation,
-            currentCorrelation = current,
-        )
+        val attempt = claimVisualProof(decoded.token, call, decoded.command.correlation, session)
         val claim = when (attempt) {
             is VisualFallbackProofStore.ClaimAttempt.Granted -> attempt.claim
             is VisualFallbackProofStore.ClaimAttempt.Rejected -> {
@@ -516,10 +533,32 @@ class AndroidAccessibilityDynamicToolExecutor(
         submit(
             call = call,
             session = session,
-            commandResult = Result.success(decoded.command),
+            // Only the host's freshly proven equivalent frame is rebound; caller input and
+            // the original proof remain unchanged, including turn and expiration fences.
+            commandResult = Result.success(decoded.command.copy(
+                correlation = checkNotNull(claim.validatedSnapshot).correlation,
+            )),
             completion = completion,
             fallbackClaim = claim,
         )
+    }
+
+    private fun claimVisualProof(
+        token: String,
+        call: DynamicToolCallParams,
+        correlation: UiSnapshotCorrelation,
+        session: HansAccessibilitySession,
+    ): VisualFallbackProofStore.ClaimAttempt = fallbackProofs.claimWithSnapshotRevalidation(
+        token, call, correlation,
+    ) { original ->
+        if (sessions.current() !== session) return@claimWithSnapshotRevalidation null
+        val fresh = session.currentSnapshotForVisualFallback(original)
+            ?: return@claimWithSnapshotRevalidation null
+        if (sessions.current() !== session ||
+            !session.retainSnapshotForCommands(fresh.correlation) ||
+            session.currentSnapshot()?.correlation != fresh.correlation
+        ) return@claimWithSnapshotRevalidation null
+        fresh
     }
 
     private fun submit(
@@ -985,11 +1024,84 @@ class VisualFallbackProofStore(
         return ClaimAttempt.Granted(Claim(this, token, call.callId))
     }
 
+    /**
+     * Allows snapshot IDs to advance only after the trusted live host revalidates the retained
+     * original frame. Reserve the one-shot lease before the read, then check expiry/epoch again:
+     * a slow fresh capture must never lengthen the evidence lifetime or cross a turn handoff.
+     */
+    @Synchronized
+    fun claimWithSnapshotRevalidation(
+        token: String,
+        call: DynamicToolCallParams,
+        correlation: UiSnapshotCorrelation,
+        revalidate: (UiSnapshotCorrelation) -> SemanticUiSnapshot?,
+    ): ClaimAttempt {
+        purgeExpired(token)?.let { return ClaimAttempt.Rejected(it) }
+        val proof = proofs[token]
+            ?: return ClaimAttempt.Rejected(ToolFailureDetail.PROOF_MISSING_OR_CONSUMED)
+        val rejected = when {
+            proof.threadId != call.threadId -> ToolFailureDetail.PROOF_THREAD_MISMATCH
+            proof.turnId != call.turnId -> ToolFailureDetail.PROOF_TURN_MISMATCH
+            proof.correlation != correlation -> ToolFailureDetail.PROOF_CORRELATION_MISMATCH
+            proof.claimedBy != null -> ToolFailureDetail.PROOF_ALREADY_CLAIMED
+            else -> null
+        }
+        if (rejected != null) return ClaimAttempt.Rejected(rejected)
+        proof.claimedBy = call.callId
+        val fresh = runCatching { revalidate(proof.correlation) }.getOrNull()
+        purgeExpired(token)?.let { return ClaimAttempt.Rejected(it) }
+        if (proofs[token] !== proof) {
+            return ClaimAttempt.Rejected(ToolFailureDetail.PROOF_MISSING_OR_CONSUMED)
+        }
+        if (fresh == null || !fresh.isComplete ||
+            fresh.correlation.sessionId != proof.correlation.sessionId ||
+            fresh.correlation.windowId != proof.correlation.windowId ||
+            fresh.correlation.snapshotId.value < proof.correlation.snapshotId.value
+        ) {
+            proof.claimedBy = null
+            return ClaimAttempt.Rejected(ToolFailureDetail.PROOF_CURRENT_SNAPSHOT_MISMATCH)
+        }
+        return ClaimAttempt.Granted(Claim(this, token, call.callId, fresh))
+    }
+
     @Synchronized
     private fun finish(token: String, callId: String, consume: Boolean) {
         val proof = proofs[token] ?: return
         if (proof.claimedBy != callId) return
         if (consume) proofs.remove(token) else proof.claimedBy = null
+    }
+
+    @Synchronized
+    private fun replace(
+        token: String,
+        callId: String,
+        call: DynamicToolCallParams,
+        correlation: UiSnapshotCorrelation,
+    ): ReplacementAttempt {
+        purgeExpired(token)?.let { return ReplacementAttempt.Rejected(it) }
+        val proof = proofs[token]
+            ?: return ReplacementAttempt.Rejected(ToolFailureDetail.PROOF_MISSING_OR_CONSUMED)
+        val rejected = when {
+            proof.threadId != call.threadId -> ToolFailureDetail.PROOF_THREAD_MISMATCH
+            proof.turnId != call.turnId -> ToolFailureDetail.PROOF_TURN_MISMATCH
+            proof.claimedBy != callId -> ToolFailureDetail.PROOF_ALREADY_CLAIMED
+            proof.correlation.sessionId != correlation.sessionId ||
+                proof.correlation.windowId != correlation.windowId ||
+                proof.correlation.snapshotId.value > correlation.snapshotId.value ->
+                ToolFailureDetail.PROOF_CORRELATION_MISMATCH
+            else -> null
+        }
+        if (rejected != null) {
+            if (proof.claimedBy == callId) proof.claimedBy = null
+            return ReplacementAttempt.Rejected(rejected)
+        }
+        val replacement = tokenFactory()
+        require(replacement.length in 16..160 && replacement.all { it.isLetterOrDigit() || it in "-_.:" })
+        require(replacement != token && !proofs.containsKey(replacement))
+        proofs.remove(token)
+        // A screenshot replaces evidence, never its original deadline.
+        proofs[replacement] = proof.copy(correlation = correlation, claimedBy = null)
+        return ReplacementAttempt.Granted(replacement)
     }
 
     @Synchronized
@@ -1020,10 +1132,19 @@ class VisualFallbackProofStore(
         }
     }
 
+    sealed interface ReplacementAttempt {
+        data class Granted(val token: String) : ReplacementAttempt
+        data class Rejected(val detail: ToolFailureDetail) : ReplacementAttempt {
+            val diagnostic: ToolFailureDiagnostic
+                get() = ToolFailureDiagnostic(ToolFailureCode.SEMANTIC_FALLBACK_PROOF_REQUIRED, detail)
+        }
+    }
+
     class Claim internal constructor(
         private val owner: VisualFallbackProofStore,
         private val token: String,
         private val callId: String,
+        val validatedSnapshot: SemanticUiSnapshot? = null,
     ) {
         private val finished = AtomicBoolean(false)
 
@@ -1033,6 +1154,13 @@ class VisualFallbackProofStore(
 
         fun release() {
             if (finished.compareAndSet(false, true)) owner.finish(token, callId, consume = false)
+        }
+
+        fun replaceFor(call: DynamicToolCallParams, correlation: UiSnapshotCorrelation): ReplacementAttempt {
+            if (!finished.compareAndSet(false, true)) {
+                return ReplacementAttempt.Rejected(ToolFailureDetail.PROOF_MISSING_OR_CONSUMED)
+            }
+            return owner.replace(token, callId, call, correlation)
         }
     }
 
@@ -1138,7 +1266,8 @@ internal object DeviceControlProjection {
         JSONObject()
             .put("status", "failed")
             .put("capability", "android_accessibility")
-            .put("errorCode", code),
+            .put("errorCode", code)
+            .apply { diagnostic.detail?.let { put("detailCode", it.wire) } },
         success = false,
         failureDiagnostic = diagnostic,
     )

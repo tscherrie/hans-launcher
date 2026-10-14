@@ -140,8 +140,9 @@ internal class NotificationEventLedger(
         read()?.records?.firstOrNull { it.eventId == eventId && it.sourceActive &&
             it.correlation?.threadId == threadId && it.correlation.turnId == turnId }?.let { it.packageName to it.androidKey }
 
+    /** Admitted text is conversation history, independent of the Android source's later lifetime. */
     @Synchronized fun reports(threadId: String?, allowedPackage: (String) -> Boolean = { true }): List<NotificationEventReport> = read()?.records
-        ?.filter { it.sourceActive && it.correlation?.threadId == threadId && allowedPackage(it.packageName) }
+        ?.filter { it.correlation?.threadId == threadId && allowedPackage(it.packageName) }
         ?.mapNotNull { it.report }.orEmpty()
 
     /** Only a positive not-transmitted result permits a future, real-event retry. */
@@ -226,7 +227,8 @@ internal class NotificationEventLedger(
         state.copy(records = state.records.map { record ->
             if (record.packageName != packageName || record.androidKey != androidKey) record
             else record.copy(sourceActive = false,
-                report = null,
+                // Stop further transport/report/speech authority, but retain already admitted
+                // text until a privacy purge or bounded terminal-record eviction removes it.
                 phase = if (record.phase == NotificationEventPhase.READY) NotificationEventPhase.CANCELLED else record.phase,
                 payloadJson = if (record.phase == NotificationEventPhase.READY) "" else record.payloadJson,
                 settledAtEpochMillis = if (record.phase == NotificationEventPhase.READY) clock().coerceAtLeast(0)

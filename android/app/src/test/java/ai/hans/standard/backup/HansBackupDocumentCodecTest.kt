@@ -156,7 +156,7 @@ class HansBackupDocumentCodecTest {
             }
             val restored = HansBackupDocumentCodec.decode(resealDocument(root))
             assertEquals(
-                HansSettings.DEFAULT_SERVICE_TIER,
+                HansSettings.STANDARD_SERVICE_TIER,
                 restored.payload.settings.serviceTier,
             )
             assertEquals("willow", restored.payload.settings.liveVoice)
@@ -189,7 +189,7 @@ class HansBackupDocumentCodecTest {
                 val expectedServiceTier = if (serviceTierShape == "present") {
                     HansSettings.FAST_SERVICE_TIER
                 } else {
-                    HansSettings.DEFAULT_SERVICE_TIER
+                    HansSettings.STANDARD_SERVICE_TIER
                 }
                 val case = "liveVoice null=$retainNullLiveVoice, serviceTier=$serviceTierShape"
                 assertEquals(case, "ripple", restored.settings.liveVoice)

@@ -10,7 +10,7 @@
     <string name="voice_settings_selected_voice">Hans’ Stimme: %1$s</string>
     <string name="voice_settings_choose_voice">Hans’ Stimme auswählen</string>
     <string name="voice_settings_voice_scope">Gilt ab der nächsten Sitzung.</string>
-    <string name="voice_settings_voice_usage">Dieselbe Stimme wird für Telefonate und das Vorlesen von Text verwendet. Diktate transkribieren nur deine Aufnahme.</string>
+    <string name="voice_settings_voice_usage">Diese Stimme gilt für Telefonate. Fertige Texte liest eine separat einstellbare Android-Systemstimme vor. Diktate transkribieren nur deine Aufnahme.</string>
     <string name="voice_settings_usage_title">Mit Hans sprechen</string>
     <string name="voice_settings_task_overview">Diktat: Taste, sonst Mikrofon. Erneut drücken beendet und sendet.</string>
     <string name="voice_settings_call_overview">Telefonat: Hans antippen. Mit Verabschiedung beenden.</string>
@@ -18,7 +18,7 @@
     <string name="voice_settings_current_voice">Aktuelle Sprachsitzung: %1$s</string>
     <string name="voice_settings_done">Fertig</string>
     <string name="voice_settings_text_replies_title">Textantworten vorlesen</string>
-    <string name="voice_settings_text_replies_help">Liest fertige Textantworten mit derselben Stimme vor. Antworten während eines Telefonats bleiben davon unberührt.</string>
+    <string name="voice_settings_text_replies_help">Wähle, wann fertige Textantworten mit der Android-Systemstimme vorgelesen werden. Antworten während eines Telefonats bleiben davon unberührt.</string>
     <string name="voice_settings_key_capture">Drücke die gewünschte Taste einmal kurz.</string>
     <string name="voice_settings_key_ready">Kurz drücken startet die Aufnahme; erneut drücken beendet und sendet. Das Mikrofon auf dem Bildschirm wird ausgeblendet.</string>
     <string name="voice_settings_key_unassigned">Wähle eine physische Taste für Diktate. Bis dahin nutzt du das Mikrofon unten rechts.</string>

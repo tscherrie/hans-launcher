@@ -8,403 +8,73 @@ import ai.hans.standard.codex.DispatchOptions
 import ai.hans.standard.codex.DispatchSandbox
 import ai.hans.standard.codex.ReasoningEffort
 import ai.hans.standard.codex.RequestId
-import ai.hans.standard.runtime.BoundedJsonLineFramer
-import ai.hans.standard.runtime.CodexRuntimeContract
 import ai.hans.standard.runtime.CodexRuntimeDirectories
-import ai.hans.standard.runtime.JsonLineReadResult
-import ai.hans.standard.runtime.network.RuntimeNetworkStack
 import android.content.Context
-import java.io.BufferedInputStream
-import java.io.BufferedOutputStream
 import java.io.Closeable
 import java.io.File
-import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.nio.file.Files
+import java.nio.ByteBuffer
+import java.nio.charset.CodingErrorAction
+import java.nio.channels.FileChannel
+import java.nio.channels.OverlappingFileLockException
 import java.nio.file.FileVisitResult
 import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.SimpleFileVisitor
 import java.nio.file.StandardCopyOption
+import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.BasicFileAttributes
 import java.nio.file.attribute.PosixFilePermission
 import java.security.MessageDigest
 import java.util.UUID
-import java.util.concurrent.Executors
-import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import org.json.JSONObject
 
 /**
- * One-shot, isolated App Server evaluator for untrusted notifications.
- *
- * Every item gets a fresh process and ephemeral thread in a dedicated CODEX_HOME. Only the current
- * login material is projected into that home. Command, app, plugin, web, MCP, hook, memory, and
- * subagent surfaces are absent or disabled; there is no image input, and every unexpected tool or
- * image event fails closed.
+ * Notification pipeline wrapper. All model stages share the reusable restricted text runner;
+ * enrichment preemption and the existing operation-wide epoch are intentionally unchanged.
  */
 internal class CodexAppServerRestrictedNotificationTriageExecutor(
     context: Context,
-    private val contextProvider: NotificationRelevanceContextProvider =
-        NotificationRelevanceContextProvider.EMPTY,
+    private val contextProvider: NotificationRelevanceContextProvider = NotificationRelevanceContextProvider.EMPTY,
     private val enrichmentProvider: NotificationEnrichmentProvider = NotificationEnrichmentProvider.NONE,
-    private val personalMemoryContextProvider: NotificationPersonalMemoryContextProvider =
-        NotificationPersonalMemoryContextProvider.NONE,
-    private val model: String = DEFAULT_MODEL,
-    private val effort: ReasoningEffort = ReasoningEffort.LOW,
-    private val timeoutSeconds: Long = DEFAULT_TIMEOUT_SECONDS,
-) : RestrictedNotificationTriageExecutor, PreemptibleRestrictedNotificationTriageExecutor,
-    Closeable {
-    private val appContext = context.applicationContext
-    private val timeoutExecutor = Executors.newSingleThreadScheduledExecutor { runnable ->
-        Thread(runnable, "hans-notification-triage-timeout").apply { isDaemon = true }
-    }
-    private val executable = CodexRuntimeContract.executableFile(appContext.applicationInfo.nativeLibraryDir)
-    private val mainDirectories = CodexRuntimeContract.directories(
-        noBackupFilesDirectory = appContext.noBackupFilesDir,
-        cacheDirectory = appContext.cacheDir,
-    )
-    private val authSource = File(mainDirectories.codexHomeDirectory, AUTH_FILE_NAME)
-    private val executableVerified = AtomicBoolean(false)
-    private val workspacePrepared = AtomicBoolean(false)
+    private val personalMemoryContextProvider: NotificationPersonalMemoryContextProvider = NotificationPersonalMemoryContextProvider.NONE,
+    model: String = "gpt-5.6-luna",
+    effort: ReasoningEffort = ReasoningEffort.LOW,
+    timeoutSeconds: Long = 75L,
+) : RestrictedNotificationTriageExecutor, PreemptibleRestrictedNotificationTriageExecutor, Closeable {
+    private val runner = CodexAppServerRestrictedTextAnalysisRunner(context, model, effort, timeoutSeconds)
     private val closed = AtomicBoolean(false)
-    private val preemptionEpoch = AtomicLong(0)
-    private val consumedPreemptionEpoch = AtomicLong(0)
-    private val processFence = RestrictedTriageProcessFence(
-        ensureCurrent = ::ensureNotPreempted,
-        abort = ::abortImmediately,
-    )
 
-    init {
-        require(timeoutSeconds in 10..120) { "Restricted triage timeout is invalid" }
-    }
-
-    override fun triage(workItem: RestrictedTriageWorkItem): RestrictedTriageDecision {
-        check(!closed.get()) { "restricted_triage_executor_closed" }
-        val startingPreemptionEpoch = preemptionEpoch.get()
-        if (consumedPreemptionEpoch.getAndSet(startingPreemptionEpoch) !=
-            startingPreemptionEpoch
-        ) {
-            throw NotificationTriagePreemptedException()
-        }
-        try {
-            verifyExecutableOnce()
-            prepareWorkspaceOnce()
-            val context = runCatching(contextProvider::current)
-                .getOrDefault(
-                    NotificationRelevanceContext(
-                        userIsDictating = true,
-                        liveVoiceIsActive = true,
-                        quietModeIsActive = true,
-                    ),
-                )
+    override fun triage(workItem: RestrictedTriageWorkItem): RestrictedTriageDecision =
+        runner.withOperation { epoch ->
+            val context = runCatching(contextProvider::current).getOrDefault(
+                NotificationRelevanceContext(userIsDictating = true, liveVoiceIsActive = true, quietModeIsActive = true),
+            )
             val pipeline = RestrictedNotificationDecisionPipeline(
                 modelRunner = RestrictedNotificationModelStageRunner { request ->
-                    ensureNotPreempted(startingPreemptionEpoch)
-                    runIsolatedStage(request, startingPreemptionEpoch).also {
-                        ensureNotPreempted(startingPreemptionEpoch)
-                    }
+                    runner.runText(RestrictedTextAnalysisRequest(
+                        request.baseInstructions, request.developerInstructions, request.userInput,
+                    ), epoch)
                 },
                 enrichmentProvider = enrichmentProvider,
                 personalMemoryContextProvider = personalMemoryContextProvider,
             )
-            return pipeline.decide(workItem.notification, context).also {
-                ensureNotPreempted(startingPreemptionEpoch)
-            }
-        } catch (failure: Exception) {
-            val currentPreemptionEpoch = preemptionEpoch.get()
-            if (currentPreemptionEpoch != startingPreemptionEpoch) {
-                consumedPreemptionEpoch.accumulateAndGet(currentPreemptionEpoch) { left, right ->
-                    maxOf(left, right)
-                }
-                throw NotificationTriagePreemptedException()
-            }
-            throw failure
+            pipeline.decide(workItem.notification, context).also { runner.ensureCurrent(epoch) }
         }
-    }
 
     override fun preemptCurrent() {
-        preemptionEpoch.incrementAndGet()
-        processFence.abortCurrent()
+        runner.preemptCurrent()
         (enrichmentProvider as? PreemptibleNotificationEnrichmentProvider)?.preemptCurrent()
     }
 
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
-        processFence.abortCurrent()
+        runner.close()
         runCatching { (enrichmentProvider as? Closeable)?.close() }
-        timeoutExecutor.shutdownNow()
-    }
-
-    private fun runIsolatedStage(
-        request: RestrictedNotificationModelStageRequest,
-        startingPreemptionEpoch: Long,
-    ): String {
-        val isolatedDirectories = RestrictedTriageAppServerPolicy.newSessionDirectories(appContext)
-        try {
-            createPrivateDirectories(isolatedDirectories)
-            RestrictedTriageAuthProjector(
-                source = authSource,
-                destination = File(isolatedDirectories.codexHomeDirectory, AUTH_FILE_NAME),
-            ).projectLatest()
-            ensureNotPreempted(startingPreemptionEpoch)
-            return runSession(request, isolatedDirectories, startingPreemptionEpoch)
-        } finally {
-            RestrictedTriageSessionWorkspace.deleteSession(isolatedDirectories)
-        }
-    }
-
-    private fun runSession(
-        request: RestrictedNotificationModelStageRequest,
-        isolatedDirectories: CodexRuntimeDirectories,
-        startingPreemptionEpoch: Long,
-    ): String {
-        val networkStack = RuntimeNetworkStack()
-        var process: Process? = null
-        var timeout: ScheduledFuture<*>? = null
-        val timedOut = AtomicBoolean(false)
-        val stderrExecutor = Executors.newSingleThreadExecutor { runnable ->
-            Thread(runnable, "hans-notification-triage-stderr").apply { isDaemon = true }
-        }
-        try {
-            val network = networkStack.restart(isolatedDirectories)
-            val environment = CodexRuntimeContract.controlledEnvironment(
-                directories = isolatedDirectories,
-                androidRoot = System.getenv("ANDROID_ROOT") ?: "/system",
-                androidData = System.getenv("ANDROID_DATA") ?: "/data",
-                network = network,
-            )
-            process = processFence.start(startingPreemptionEpoch) {
-                ProcessBuilder(RestrictedTriageAppServerPolicy.command(executable))
-                    .directory(isolatedDirectories.workingDirectory)
-                    .also { builder ->
-                        builder.environment().run {
-                            clear()
-                            putAll(environment)
-                        }
-                    }
-                    .start()
-            }
-            val activeProcess = process
-            val stderrDrain = stderrExecutor.submit<Unit> {
-                activeProcess.errorStream.use { stream ->
-                    val buffer = ByteArray(8 * 1_024)
-                    while (stream.read(buffer) >= 0) Unit
-                }
-            }
-            timeout = timeoutExecutor.schedule(
-                {
-                    timedOut.set(true)
-                    activeProcess.destroyForcibly()
-                },
-                timeoutSeconds,
-                TimeUnit.SECONDS,
-            )
-
-            // The process owns these streams. Do not use BufferedOutputStream.use here: its
-            // exceptional close flushes before finally can kill a child that stopped reading.
-            // Every protocol write is explicitly flushed; failure cleanup discards buffered bytes
-            // and terminates the child before closing its underlying pipes.
-            val output = BufferedOutputStream(activeProcess.outputStream)
-            val input = BufferedInputStream(activeProcess.inputStream)
-            val result = executeProtocol(input, output, request, isolatedDirectories, startingPreemptionEpoch)
-            timeout.cancel(false)
-            terminate(activeProcess)
-            runCatching { stderrDrain.get(2, TimeUnit.SECONDS) }
-            if (timedOut.get()) throw RestrictedNotificationTriageFailure("triage_timeout")
-            return result
-        } catch (failure: NotificationTriagePreemptedException) {
-            throw failure
-        } catch (failure: RestrictedNotificationTriageFailure) {
-            throw failure
-        } catch (_: Exception) {
-            if (timedOut.get()) {
-                throw RestrictedNotificationTriageFailure("triage_timeout")
-            }
-            throw RestrictedNotificationTriageFailure("isolated_app_server_failure")
-        } finally {
-            timeout?.cancel(false)
-            process?.let(processFence::release)
-            process?.let(::terminate)
-            networkStack.close()
-            stderrExecutor.shutdownNow()
-        }
-    }
-
-    private fun executeProtocol(
-        input: BufferedInputStream,
-        output: BufferedOutputStream,
-        request: RestrictedNotificationModelStageRequest,
-        isolatedDirectories: CodexRuntimeDirectories,
-        startingPreemptionEpoch: Long,
-    ): String {
-        val accumulator = RestrictedAppServerFrameAccumulator()
-        send(output, RestrictedTriageAppServerPolicy.initializeRequest().json, startingPreemptionEpoch)
-        val initialize = awaitResponse(input, accumulator, INITIALIZE_ID)
-        CodexRuntimeContract.parseInitializeResponse(
-            responseJson = initialize.toString(),
-            expectedRequestId = INITIALIZE_ID,
-            expectedCodexHome = isolatedDirectories.codexHomeDirectory.absolutePath,
-        )
-        send(
-            output,
-            JSONObject().put("method", "initialized").put("params", JSONObject()).toString(),
-            startingPreemptionEpoch,
-        )
-
-        send(
-            output,
-            RestrictedTriageAppServerPolicy.threadStartRequest(
-                cwd = isolatedDirectories.workingDirectory.absolutePath,
-                model = model,
-                effort = effort,
-                baseInstructions = request.baseInstructions,
-                developerInstructions = request.developerInstructions,
-            ).json,
-            startingPreemptionEpoch,
-        )
-        val threadResponse = awaitResponse(input, accumulator, THREAD_START_ID)
-        val threadId = threadResponse.requireResultObject()
-            .requireObject("thread")
-            .requireBoundedString("id", 256)
-
-        send(
-            output,
-            RestrictedTriageAppServerPolicy.turnStartRequest(
-                threadId = threadId,
-                prompt = request.userInput,
-                cwd = isolatedDirectories.workingDirectory.absolutePath,
-                model = model,
-                effort = effort,
-            ).json,
-            startingPreemptionEpoch,
-        )
-        val turnResponse = awaitResponse(input, accumulator, TURN_START_ID)
-        val turnId = turnResponse.requireResultObject()
-            .requireObject("turn")
-            .requireBoundedString("id", 256)
-        while (!accumulator.completed(threadId, turnId)) {
-            ensureNotPreempted(startingPreemptionEpoch)
-            accumulator.accept(readFrame(input))
-        }
-        return accumulator.finalAnswer(threadId, turnId)
-            ?: throw RestrictedNotificationTriageFailure("missing_final_typed_result")
-    }
-
-    private fun awaitResponse(
-        input: BufferedInputStream,
-        accumulator: RestrictedAppServerFrameAccumulator,
-        requestId: Long,
-    ): JSONObject {
-        while (true) {
-            val frame = readFrame(input)
-            accumulator.accept(frame)
-            if (frame.optLong("id", Long.MIN_VALUE) == requestId) {
-                if (frame.has("error")) {
-                    throw RestrictedNotificationTriageFailure("app_server_request_failed")
-                }
-                return frame
-            }
-        }
-    }
-
-    private fun readFrame(input: BufferedInputStream): JSONObject =
-        when (val result = BoundedJsonLineFramer(MAX_SERVER_FRAME_BYTES).readNext(input)) {
-            is JsonLineReadResult.Frame -> runCatching {
-                JSONObject(result.bytes.toString(Charsets.UTF_8))
-            }.getOrElse {
-                throw RestrictedNotificationTriageFailure("malformed_app_server_frame")
-            }
-            is JsonLineReadResult.Oversized ->
-                throw RestrictedNotificationTriageFailure("oversized_app_server_frame")
-            is JsonLineReadResult.PartialEof,
-            JsonLineReadResult.Eof,
-            -> throw RestrictedNotificationTriageFailure("app_server_closed_early")
-        }
-
-    private fun send(output: BufferedOutputStream, frame: String, startingPreemptionEpoch: Long) {
-        val bytes = frame.toByteArray(Charsets.UTF_8)
-        if (bytes.isEmpty() || bytes.size > MAX_CLIENT_FRAME_BYTES) {
-            throw RestrictedNotificationTriageFailure("invalid_client_frame")
-        }
-        processFence.writeCurrent(startingPreemptionEpoch) {
-            output.write(bytes)
-            output.write('\n'.code)
-        }
-        processFence.writeCurrent(startingPreemptionEpoch, output::flush)
-    }
-
-    private fun verifyExecutableOnce() {
-        if (executableVerified.get()) return
-        synchronized(executableVerified) {
-            if (executableVerified.get()) return
-            check(
-                Files.isRegularFile(executable.toPath(), LinkOption.NOFOLLOW_LINKS) &&
-                    executable.canExecute() &&
-                    executable.length() == BuildConfig.CODEX_RUNTIME_BYTES,
-            ) { "restricted_triage_runtime_unavailable" }
-            val digest = MessageDigest.getInstance("SHA-256")
-            FileInputStream(executable).use { input ->
-                val buffer = ByteArray(32 * 1_024)
-                while (true) {
-                    val count = input.read(buffer)
-                    if (count < 0) break
-                    digest.update(buffer, 0, count)
-                }
-            }
-            val sha = digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
-            check(sha == BuildConfig.CODEX_RUNTIME_SHA256) {
-                "restricted_triage_runtime_integrity_failure"
-            }
-            executableVerified.set(true)
-        }
-    }
-
-    private fun prepareWorkspaceOnce() {
-        if (workspacePrepared.get()) return
-        synchronized(workspacePrepared) {
-            if (workspacePrepared.get()) return
-            RestrictedTriageSessionWorkspace.cleanLegacyFixedHome(appContext)
-            RestrictedTriageSessionWorkspace.sweepAbandonedSessions(appContext)
-            workspacePrepared.set(true)
-        }
-    }
-
-    private fun createPrivateDirectories(directories: CodexRuntimeDirectories) {
-        listOf(
-            directories.workingDirectory,
-            directories.homeDirectory,
-            directories.codexHomeDirectory,
-            directories.temporaryDirectory,
-        ).forEach { directory ->
-            check((directory.isDirectory || directory.mkdirs()) && directory.isDirectory) {
-                "restricted_triage_directory_unavailable"
-            }
-        }
-    }
-
-    private fun terminate(process: Process) = RestrictedTriageProcessTermination.terminate(process)
-
-    private fun abortImmediately(process: Process) = RestrictedTriageProcessTermination.abortImmediately(process)
-
-    private fun ensureNotPreempted(startingPreemptionEpoch: Long) {
-        if (closed.get() || preemptionEpoch.get() != startingPreemptionEpoch) {
-            throw NotificationTriagePreemptedException()
-        }
-    }
-
-    private companion object {
-        const val AUTH_FILE_NAME = "auth.json"
-        const val DEFAULT_MODEL = "gpt-5.6-luna"
-        const val DEFAULT_TIMEOUT_SECONDS = 75L
-        const val INITIALIZE_ID = 1L
-        const val THREAD_START_ID = 2L
-        const val TURN_START_ID = 3L
-        const val MAX_CLIENT_FRAME_BYTES = 128 * 1_024
-        const val MAX_SERVER_FRAME_BYTES = 256 * 1_024
     }
 }
 
@@ -591,6 +261,29 @@ internal object RestrictedTriageSessionWorkspace {
     const val SESSIONS_DIRECTORY_NAME = "notification-triage-sessions"
     private const val LEGACY_DIRECTORY_NAME = "notification-triage-app-server"
     private const val ABANDONED_AFTER_MILLIS = 10 * 60 * 1_000L
+    private const val LEASE_FILE_NAME = ".session-lease"
+
+    /** A kernel file lock protects this workspace even from a sweeper in another app process. */
+    fun acquireSession(directories: CodexRuntimeDirectories): Closeable {
+        val session = checkedSession(directories)
+        val sessionsRoot = checkNotNull(session.parentFile) { "triage_session_root_invalid" }.toPath()
+        check(!Files.isSymbolicLink(sessionsRoot)) { "triage_session_root_invalid" }
+        Files.createDirectories(sessionsRoot)
+        check(Files.isDirectory(sessionsRoot, LinkOption.NOFOLLOW_LINKS)) { "triage_session_root_invalid" }
+        // Never attach to another invocation's workspace, even after an improbable UUID collision.
+        Files.createDirectory(session.toPath())
+        try {
+            val channel = FileChannel.open(session.toPath().resolve(LEASE_FILE_NAME),
+                StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)
+            try {
+                val lock = channel.tryLock() ?: error("triage_session_lease_unavailable")
+                return Closeable { try { lock.release() } finally { channel.close() } }
+            } catch (failure: Exception) { channel.close(); throw failure }
+        } catch (failure: Exception) {
+            deleteTreeNoFollow(session.toPath())
+            throw failure
+        }
+    }
 
     fun cleanLegacyFixedHome(context: Context) {
         val legacy = File(context.noBackupFilesDir, LEGACY_DIRECTORY_NAME)
@@ -602,8 +295,10 @@ internal object RestrictedTriageSessionWorkspace {
     fun sweepAbandonedSessions(
         context: Context,
         nowEpochMillis: Long = System.currentTimeMillis(),
-    ) {
-        val root = File(context.cacheDir, SESSIONS_DIRECTORY_NAME)
+    ) = sweepAbandonedSessions(context.cacheDir, nowEpochMillis)
+
+    internal fun sweepAbandonedSessions(cacheDirectory: File, nowEpochMillis: Long) {
+        val root = File(cacheDirectory, SESSIONS_DIRECTORY_NAME)
         if (!Files.exists(root.toPath(), LinkOption.NOFOLLOW_LINKS)) return
         check(Files.isDirectory(root.toPath(), LinkOption.NOFOLLOW_LINKS)) {
             "triage_session_root_invalid"
@@ -613,19 +308,34 @@ internal object RestrictedTriageSessionWorkspace {
                 SESSION_ID_PATTERN.matches(child.name) &&
                 child.lastModified() <= nowEpochMillis - ABANDONED_AFTER_MILLIS
             ) {
-                check(deleteTreeNoFollow(child.toPath())) { "abandoned_triage_cleanup_failed" }
+                if (!Files.isDirectory(child.toPath(), LinkOption.NOFOLLOW_LINKS)) {
+                    check(deleteTreeNoFollow(child.toPath())) { "abandoned_triage_cleanup_failed" }
+                    return@forEach
+                }
+                // Never follow a lease symlink or delete a workspace whose live owner holds it.
+                val channel = FileChannel.open(child.toPath().resolve(LEASE_FILE_NAME),
+                    StandardOpenOption.CREATE, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)
+                channel.use {
+                    val lease = try { channel.tryLock() } catch (_: OverlappingFileLockException) { null }
+                    lease?.use { check(deleteTreeNoFollow(child.toPath())) { "abandoned_triage_cleanup_failed" } }
+                }
             }
         }
     }
 
     fun deleteSession(directories: CodexRuntimeDirectories) {
+        val session = checkedSession(directories)
+        check(deleteTreeNoFollow(session.toPath())) { "triage_session_cleanup_failed" }
+    }
+
+    private fun checkedSession(directories: CodexRuntimeDirectories): File {
         val session = directories.homeDirectory.parentFile
             ?: throw IllegalStateException("triage_session_parent_missing")
         check(SESSION_ID_PATTERN.matches(session.name)) { "triage_session_path_invalid" }
         check(session.parentFile?.name == SESSIONS_DIRECTORY_NAME) {
             "triage_session_path_invalid"
         }
-        check(deleteTreeNoFollow(session.toPath())) { "triage_session_cleanup_failed" }
+        return session
     }
 
     private fun deleteTreeNoFollow(root: Path): Boolean = runCatching {
@@ -663,7 +373,10 @@ internal object RestrictedTriageSessionWorkspace {
         Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}")
 }
 
-internal class RestrictedAppServerFrameAccumulator {
+internal class RestrictedAppServerFrameAccumulator(
+    private val maximumResponseBytes: Int = NotificationTriageBounds.MAX_MODEL_RESPONSE_BYTES,
+) {
+    init { require(maximumResponseBytes in 1..32 * 1_024) }
     private val completedTurns = mutableSetOf<Pair<String, String>>()
     private val finalAnswers = mutableMapOf<Pair<String, String>, String>()
     private var acceptedFrames = 0
@@ -714,7 +427,7 @@ internal class RestrictedAppServerFrameAccumulator {
         if (phase.isNotEmpty() && phase != "final_answer") return
         val text = item.requireBoundedString(
             "text",
-            NotificationTriageBounds.MAX_MODEL_RESPONSE_BYTES,
+            maximumResponseBytes,
         )
         val threadId = params.requireBoundedString("threadId", 256)
         val turnId = params.requireBoundedString("turnId", 256)
@@ -741,7 +454,7 @@ internal class RestrictedTriageAuthProjector(
     private val destination: File,
 ) {
     @Synchronized
-    fun projectLatest() {
+    fun projectLatest(expectedAccountFingerprint: String? = null) {
         check(Files.isRegularFile(source.toPath(), LinkOption.NOFOLLOW_LINKS)) {
             "codex_login_unavailable"
         }
@@ -751,10 +464,15 @@ internal class RestrictedTriageAuthProjector(
             "triage_auth_parent_unavailable"
         }
         val sourceBytes = boundedRead(source)
+        try {
+        if (expectedAccountFingerprint != null) {
+            check(expectedAccountFingerprint.matches(Regex("[0-9a-f]{64}")) &&
+                accountFingerprint(sourceBytes) == expectedAccountFingerprint) { "restricted_analysis_account_changed" }
+        }
         if (
             Files.isRegularFile(destination.toPath(), LinkOption.NOFOLLOW_LINKS) &&
             destination.length() == sourceBytes.size.toLong() &&
-            boundedRead(destination).contentEquals(sourceBytes)
+            matchesDestination(sourceBytes)
         ) {
             applyPrivateMode(destination)
             return
@@ -777,24 +495,54 @@ internal class RestrictedTriageAuthProjector(
         } finally {
             if (temporary.exists()) temporary.delete()
         }
+        } finally { sourceBytes.fill(0) }
+    }
+
+    fun currentAccountFingerprint(): String? = runCatching {
+        val bytes = boundedRead(source)
+        try { accountFingerprint(bytes) } finally { bytes.fill(0) }
+    }.getOrNull()
+
+    private fun matchesDestination(sourceBytes: ByteArray): Boolean {
+        val bytes = boundedRead(destination)
+        return try { bytes.contentEquals(sourceBytes) } finally { bytes.fill(0) }
     }
 
     private fun boundedRead(file: File): ByteArray {
-        check(file.length() in 1..MAX_AUTH_BYTES.toLong()) { "codex_login_invalid" }
-        return FileInputStream(file).use { input ->
-            val buffer = ByteArray(16 * 1_024)
-            val output = java.io.ByteArrayOutputStream(file.length().toInt())
-            var total = 0
-            while (true) {
+        val path = file.toPath()
+        val before = Files.readAttributes(path, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+        check(before.isRegularFile && before.size() in 1..MAX_AUTH_BYTES.toLong()) { "codex_login_invalid" }
+        val bytes = ByteArray(before.size().toInt())
+        try {
+        return FileChannel.open(path, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS).use { input ->
+            check(input.size() == before.size()) { "codex_login_changed" }
+            val buffer = ByteBuffer.wrap(bytes)
+            while (buffer.hasRemaining()) {
                 val count = input.read(buffer)
-                if (count < 0) break
-                total += count
-                check(total <= MAX_AUTH_BYTES) { "codex_login_invalid" }
-                output.write(buffer, 0, count)
+                check(count > 0) { "codex_login_changed" }
             }
-            check(total > 0) { "codex_login_invalid" }
-            output.toByteArray()
+            check(input.read(ByteBuffer.allocate(1)) == -1) { "codex_login_changed" }
+            val after = Files.readAttributes(path, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+            check(after.isRegularFile && before.fileKey() == after.fileKey() && before.size() == after.size() &&
+                before.lastModifiedTime() == after.lastModifiedTime()) { "codex_login_changed" }
+            bytes
         }
+        } catch (failure: Exception) { bytes.fill(0); throw failure }
+    }
+
+    private fun accountFingerprint(bytes: ByteArray): String? {
+        val raw = Charsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(bytes)).toString()
+        if (!isStrictNotificationJsonObject(raw)) return null
+        val root = JSONObject(raw)
+        val mode = root.opt("auth_mode")
+        if (mode != null && mode !== JSONObject.NULL && mode != "chatgpt") return null
+        if (root.has("OPENAI_API_KEY") && !root.isNull("OPENAI_API_KEY")) return null
+        val id = root.optJSONObject("tokens")?.opt("account_id") as? String ?: return null
+        if (!id.matches(Regex("[A-Za-z0-9_-]{1,256}"))) return null
+        return MessageDigest.getInstance("SHA-256").digest(
+            ("hans-chatgpt-account-v1\u0000" + id).toByteArray(Charsets.UTF_8),
+        ).joinToString("") { "%02x".format(it.toInt() and 0xff) }
     }
 
     private fun applyPrivateMode(file: File) {
@@ -812,12 +560,12 @@ internal class RestrictedTriageAuthProjector(
 
 internal class RestrictedNotificationTriageFailure(code: String) : IllegalStateException(code)
 
-private fun JSONObject.requireResultObject(): JSONObject = requireObject("result")
+internal fun JSONObject.requireResultObject(): JSONObject = requireObject("result")
 
-private fun JSONObject.requireObject(key: String): JSONObject =
+internal fun JSONObject.requireObject(key: String): JSONObject =
     optJSONObject(key) ?: throw RestrictedNotificationTriageFailure("malformed_app_server_frame")
 
-private fun JSONObject.requireBoundedString(key: String, maximumUtf8Bytes: Int): String {
+internal fun JSONObject.requireBoundedString(key: String, maximumUtf8Bytes: Int): String {
     val value = opt(key) as? String
         ?: throw RestrictedNotificationTriageFailure("malformed_app_server_frame")
     if (value.isBlank() || value.toByteArray(Charsets.UTF_8).size > maximumUtf8Bytes) {

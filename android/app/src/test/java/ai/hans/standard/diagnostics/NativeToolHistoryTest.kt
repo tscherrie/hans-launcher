@@ -4,6 +4,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
+import java.io.File
 
 class NativeToolHistoryTest {
     private val thread = "00000000-0000-0000-0000-000000000001"
@@ -15,6 +16,50 @@ class NativeToolHistoryTest {
         assertNull(NativeToolHistoryParser.failure(JSONObject(record()).apply {
             getJSONObject("payload").put("type", "dynamic_tool_call_response")
         }.toString(), thread))
+    }
+
+    @Test fun runtimeAcceptanceMatchesLocked01601PayloadNotVersionOnly() {
+        val lockFile = generateSequence(File(System.getProperty("user.dir"))) { it.parentFile }
+            .map { File(it, "runtime/runtime.lock.json") }.first { it.isFile }
+        val runtime = JSONObject(lockFile.readText()).getJSONObject("runtime")
+        assertEquals(NativeToolHistoryRuntimeContract.VERSION_0_160_1, runtime.getString("version"))
+        assertEquals(NativeToolHistoryRuntimeContract.SHA256_0_160_1, runtime.getString("extractedSha256"))
+        assertTrue(NativeToolHistoryRuntimeContract.supports(
+            runtime.getString("version"), runtime.getString("extractedSha256")))
+        assertTrue(NativeToolHistoryRuntimeContract.supports("0.155.0",
+            NativeToolHistoryRuntimeContract.SHA256_0_155))
+    }
+
+    @Test fun unknownRuntimeVersionsHashesAndCrossVersionPairsRemainRejected() {
+        assertFalse(NativeToolHistoryRuntimeContract.supports("0.160.1", "0".repeat(64)))
+        assertFalse(NativeToolHistoryRuntimeContract.supports("0.155.0",
+            NativeToolHistoryRuntimeContract.SHA256_0_160_1))
+        assertFalse(NativeToolHistoryRuntimeContract.supports("0.160.1",
+            NativeToolHistoryRuntimeContract.SHA256_0_155))
+        listOf("", "0.160.0", "0.160.2", "0.161.0", "0.160.1+unknown").forEach { version ->
+            assertFalse(NativeToolHistoryRuntimeContract.supports(version,
+                NativeToolHistoryRuntimeContract.SHA256_0_160_1))
+        }
+    }
+
+    @Test fun normalizes01601NamespacedFailedAndCompletedFalseNativeRecords() {
+        // Synthetic values in the exact Serde shape of pinned d27764b: TurnItem uses PascalCase,
+        // DynamicToolCallItem fields snake_case; its content enum independently uses camelCase.
+        val json = JSONObject(record()).put("timestamp", "2026-10-07T00:00:00.000Z").put("ordinal", 3)
+        val payload = json.getJSONObject("payload").put("started_at_ms", 10).put("completed_at_ms", 20)
+        payload.getJSONObject("item").put("id", "synthetic-tool-id").put("namespace", "hans_phone")
+            .put("arguments", JSONObject().put("private", "never-export"))
+            .put("duration", JSONObject().put("secs", 0).put("nanos", 5_000_000))
+        listOf("failed", "completed").forEach { status ->
+            payload.getJSONObject("item").put("status", status).put("success", false)
+            val result = NativeToolHistoryParser.failure(json.toString(), thread)!!
+            assertEquals("inspect_visual_ui", result.tool)
+            assertEquals(ToolFailureCode.SEMANTIC_FALLBACK_PROOF_REQUIRED, result.failure.code)
+            val output = NativeToolHistoryResult(NativeToolHistoryStatus.AVAILABLE, listOf(result), 1).encode()
+            assertFalse(output.contains("synthetic-tool-id"))
+            assertFalse(output.contains("never-export"))
+            assertFalse(output.contains("hans_phone"))
+        }
     }
 
     @Test fun checksMetadataAndHistoryModeWithoutGuessingLegacy() {

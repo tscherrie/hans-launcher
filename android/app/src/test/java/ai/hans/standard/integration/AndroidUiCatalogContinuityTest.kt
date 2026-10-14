@@ -105,6 +105,8 @@ class AndroidUiCatalogContinuityTest {
             ?.readText()?.replace(Regex("\\s+"), " ")
             ?: error("Missing Hans Standard developer instructions")
         assertTrue("verify the visible or structured result after an action" in instructions)
+        assertTrue("a startup availability snapshot is not authoritative" in instructions)
+        assertTrue("makes no paid request or UI mutation when disabled" in instructions)
         val lower = instructions.lowercase()
         listOf(
             "after every action", "after each action", "after any action", "nach jeder aktion",
@@ -129,6 +131,8 @@ class AndroidUiCatalogContinuityTest {
     }
 
     private fun legacyNamespaces() = listOf(AndroidAccessibilityDynamicToolCatalog.namespace.copy(
-        tools = AndroidAccessibilityDynamicToolCatalog.namespace.tools.filterNot { it.name == "run_steps" },
+        tools = AndroidAccessibilityDynamicToolCatalog.namespace.tools.filterNot {
+            it.name in setOf("run_steps", "perform_goal")
+        },
     ))
 }

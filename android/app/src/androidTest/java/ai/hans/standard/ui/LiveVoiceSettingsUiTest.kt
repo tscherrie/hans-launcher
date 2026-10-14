@@ -169,7 +169,7 @@ class LiveVoiceSettingsUiTest {
         )
 
         compose.onNodeWithTag("read_aloud_live_voice_help")
-            .performScrollTo().assertTextEquals("Liest fertige Textantworten mit derselben Stimme vor. Antworten während eines Telefonats bleiben davon unberührt.")
+            .performScrollTo().assertTextEquals("Wähle, wann fertige Textantworten mit der Android-Systemstimme vorgelesen werden. Antworten während eines Telefonats bleiben davon unberührt.")
         compose.onNodeWithTag("open_voice_chooser").performScrollTo().performClick()
         compose.onNodeWithTag("preview_voice").performClick()
         HansSettings.SUPPORTED_VOICES.forEach { voice ->

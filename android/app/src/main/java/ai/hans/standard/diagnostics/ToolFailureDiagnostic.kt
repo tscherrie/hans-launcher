@@ -3,9 +3,11 @@ package ai.hans.standard.diagnostics
 import java.util.Locale
 
 /**
- * Local-only diagnostic metadata. This type cannot carry tool arguments, output, exception
+ * Local diagnostic metadata. This type cannot carry tool arguments, output, exception
  * messages, tokens, app names or identifiers. Unknown producer values are deliberately discarded.
- * Never serialize this metadata into the App Server's dynamic-tool result wire contract.
+ * The metadata object itself is not serialized into the App Server's dynamic-tool result.
+ * Explicitly allowlisted fixed code/detailCode literals may separately be emitted in tool-result
+ * JSON and persisted native history; raw producer values and exception text must never be emitted.
  */
 data class ToolFailureDiagnostic(
     val code: ToolFailureCode,
@@ -35,6 +37,7 @@ enum class ToolFailureCode {
     DEVICE_UI_STATE_VERIFICATION_REQUIRED,
     ACCESSIBILITY_PERMISSION_REQUIRED,
     ACCESSIBILITY_SERVICE_RECONNECTING,
+    ACCESSIBILITY_STATE_UNAVAILABLE,
     ACCESSIBILITY_SESSION_CLOSED,
     ACCESSIBILITY_SESSION_UNAVAILABLE,
     ACCESSIBILITY_QUEUE_FULL,

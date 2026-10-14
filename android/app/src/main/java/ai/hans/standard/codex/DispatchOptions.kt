@@ -90,6 +90,14 @@ data class DispatchOptions(
     }
 
     companion object {
+        val SOL_6_1_HIGH_FAST = DispatchOptions(
+            model = "gpt-6.1-sol",
+            effort = ReasoningEffort.HIGH,
+            serviceTier = CodexServiceTier.FAST,
+            approvalPolicy = ApprovalPolicy.NEVER,
+            sandbox = DispatchSandbox.DANGER_FULL_ACCESS,
+        )
+
         val ASTRA_MEDIUM = DispatchOptions(
             model = "gpt-6-astra",
             effort = ReasoningEffort.MEDIUM,
@@ -118,7 +126,7 @@ data class DispatchOptions(
             sandbox = DispatchSandbox.DANGER_FULL_ACCESS,
         )
 
-        val DEFAULT = ASTRA_MEDIUM
+        val DEFAULT = SOL_6_1_HIGH_FAST
     }
 }
 

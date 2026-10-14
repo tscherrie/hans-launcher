@@ -24,15 +24,42 @@ class HansSettingsStoreInstrumentedTest {
     }
 
     @Test
-    fun missingPreferencesUseAstraMediumWithoutPretendingToPersistConfirmation() {
+    fun missingPreferencesUseSol61HighFastWithoutPretendingToPersistConfirmation() {
         val preferences = context.getSharedPreferences("hans_settings_v1", Context.MODE_PRIVATE)
         val settings = SharedPreferencesHansSettingsStore(context).read()
 
-        assertEquals("gpt-6-astra", settings.model)
-        assertEquals("medium", settings.reasoningEffort)
+        assertEquals("gpt-6.1-sol", settings.model)
+        assertEquals("high", settings.reasoningEffort)
         assertEquals(HansSettings.DEFAULT_SERVICE_TIER, settings.serviceTier)
         assertFalse(preferences.contains("model"))
         assertFalse(preferences.contains("reasoning_effort"))
+        assertFalse(preferences.contains("service_tier"))
+    }
+
+    @Test
+    fun legacyMissingTierBesideSavedDispatchRemainsStandardWithoutWritingMigration() {
+        val preferences = context.getSharedPreferences("hans_settings_v1", Context.MODE_PRIVATE)
+        listOf("model", "reasoning_effort").forEach { dispatchKey ->
+            assertTrue(preferences.edit().clear().putInt("schema_version", 1)
+                .putString(dispatchKey, if (dispatchKey == "model") "gpt-6-astra" else "medium")
+                .putString("voice", "nova").commit())
+            val restored = SharedPreferencesHansSettingsStore(context).read()
+            assertEquals("default", restored.serviceTier)
+            assertEquals("nova", restored.voice)
+            assertFalse(preferences.contains("service_tier"))
+        }
+    }
+
+    @Test
+    fun savedSol61StandardAndAstraUltraSelectionsSurviveNewFastDefault() {
+        val store = SharedPreferencesHansSettingsStore(context)
+        listOf("gpt-6.1-sol" to "high", "gpt-6-astra" to "ultra").forEach { (model, effort) ->
+            store.saveConfirmedDispatch(model, effort, HansSettings.STANDARD_SERVICE_TIER)
+            val reloaded = SharedPreferencesHansSettingsStore(context).read()
+            assertEquals(model, reloaded.model)
+            assertEquals(effort, reloaded.reasoningEffort)
+            assertEquals("default", reloaded.serviceTier)
+        }
     }
 
     @Test
@@ -128,10 +155,10 @@ class HansSettingsStoreInstrumentedTest {
         store.saveConfirmedDispatch(
             "gpt-5.6-luna",
             "max",
-            HansSettings.DEFAULT_SERVICE_TIER,
+            HansSettings.STANDARD_SERVICE_TIER,
         )
         assertEquals(
-            HansSettings.DEFAULT_SERVICE_TIER,
+            HansSettings.STANDARD_SERVICE_TIER,
             SharedPreferencesHansSettingsStore(context).read().serviceTier,
         )
     }

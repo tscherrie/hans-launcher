@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools" tools:locale="en">
+    <string name="system_speech_routing_help">Uses Android media volume and output, including connected headphones. Phone-call earpiece controls do not apply to read-aloud.</string>
+    <string name="system_speech_network_help">This voice can send text to the installed speech engine provider over the internet. Select an offline voice for local synthesis.</string>
+    <string name="system_speech_disabled">Read-aloud is turned off. Enable it in Speech settings.</string>
+    <string name="system_speech_title">System voice</string>
+    <string name="system_speech_help">Hans reads replies using your phone’s voice. No API key is needed. Phone calls have their own voice. You can change this later in Speech settings or continue without read-aloud.</string>
+    <string name="system_speech_enabled">Read aloud</string>
+    <string name="system_speech_checking">Checking available voices…</string>
+    <string name="system_speech_missing">No installed voice is available for this language.</string>
+    <string name="system_speech_failed">Speech could not play. Check the system voice and try the preview again.</string>
+    <string name="system_speech_speaking">Speaking</string>
+    <string name="system_speech_completed">Playback completed</string>
+    <string name="system_speech_stopped">Playback stopped</string>
+    <string name="system_speech_offline">Offline voice</string>
+    <string name="system_speech_online">Requires internet</string>
+    <string name="system_speech_choose">Choose a system voice</string>
+    <string name="system_speech_speed">Speed: %1$.1f×</string>
+    <string name="system_speech_preview">Play preview</string>
+    <string name="system_speech_stop">Stop</string>
+    <string name="system_speech_preview_unavailable">Turn off silent or vibrate mode, turn up media volume and finish any recording or call before trying again.</string>
+    <string name="system_speech_install">Install voice data</string>
+    <string name="system_speech_install_help">Install or enable a text-to-speech engine and its language data in Android settings. You can continue setup without speech.</string>
+</resources>

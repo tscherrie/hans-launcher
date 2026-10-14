@@ -31,6 +31,9 @@ internal interface AndroidAccessibilityNode : AutoCloseable {
     val actions: Set<SemanticUiAction>
     val childCount: Int
 
+    /** A separately owned public window handle, when Android can resolve this node's owner. */
+    fun window(): AndroidAccessibilityWindow? = null
+
     fun childAt(index: Int): AndroidAccessibilityNode?
 
     fun perform(action: AndroidNodeAction): Boolean

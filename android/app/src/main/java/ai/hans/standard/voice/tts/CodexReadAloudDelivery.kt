@@ -320,7 +320,7 @@ class CodexReadAloudDelivery(
         session.message = next
         seen[next.messageId]?.retired = true // An ambiguous rejection must never replay this output.
         // Retain READY while the request is merely accepted. Only the engine's observed
-        // non-silent-output SPEAKING callback may claim that playback actually began.
+        // playback-start SPEAKING callback may claim that playback actually began.
         publish()
         // Observers may synchronously request the stop barrier. Never speak after that callback
         // has already retired this generation or disposed its physical-output session.

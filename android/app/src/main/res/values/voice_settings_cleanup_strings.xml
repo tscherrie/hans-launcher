@@ -10,7 +10,7 @@
     <string name="voice_settings_selected_voice">Hans’ voice: %1$s</string>
     <string name="voice_settings_choose_voice">Choose Hans’ voice</string>
     <string name="voice_settings_voice_scope">Applies from the next session.</string>
-    <string name="voice_settings_voice_usage">The same voice is used for calls and text read-aloud. Dictation only transcribes your recording.</string>
+    <string name="voice_settings_voice_usage">This voice is used for calls. Completed text uses a separately configured Android system voice. Dictation only transcribes your recording.</string>
     <string name="voice_settings_usage_title">Speaking with Hans</string>
     <string name="voice_settings_task_overview">Dictation: key, otherwise microphone. Press again to stop and send.</string>
     <string name="voice_settings_call_overview">Phone call: tap Hans. Say goodbye to end.</string>
@@ -18,7 +18,7 @@
     <string name="voice_settings_current_voice">Current session: %1$s</string>
     <string name="voice_settings_done">Done</string>
     <string name="voice_settings_text_replies_title">Read text replies aloud</string>
-    <string name="voice_settings_text_replies_help">Reads completed text replies aloud, using the same voice. This does not change replies during a phone call.</string>
+    <string name="voice_settings_text_replies_help">Choose when completed text replies use the Android system voice. This does not change replies during a phone call.</string>
     <string name="voice_settings_key_capture">Briefly press the key you want to use.</string>
     <string name="voice_settings_key_ready">Press briefly to start recording; press again to stop and send. The on-screen microphone is hidden.</string>
     <string name="voice_settings_key_unassigned">Choose a physical key for dictation. Until then, use the microphone at the bottom right.</string>

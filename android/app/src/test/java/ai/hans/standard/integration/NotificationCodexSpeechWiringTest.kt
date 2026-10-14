@@ -9,10 +9,10 @@ import org.junit.Test
 class NotificationCodexSpeechWiringTest {
     private val source = File("src/main/java/ai/hans/standard/integration/AndroidCodexSessionHost.kt").readText()
 
-    @Test fun notificationSpeechUsesChatGptAccessAndNeverRequiresAnApiCredential() {
+    @Test fun notificationSpeechUsesSystemVoiceAndNeverRequiresAnApiCredential() {
         val drain = source.substringAfter("private fun drainPendingNotificationSpeech()")
             .substringBefore("private fun notificationSpeechGateOpenLocked()")
-        assertTrue(drain.contains("hasCodexSpeechAccess()"))
+        assertTrue(drain.contains("hasReadAloudAccess()"))
         assertFalse(drain.contains("speechCredentialStatus()"))
         assertTrue(drain.contains("notificationReadAloud.submitGuarded("))
         assertFalse(drain.contains("ttsCoordinator.submitGuarded("))
@@ -33,14 +33,27 @@ class NotificationCodexSpeechWiringTest {
         assertTrue(source.contains("stopPlaybackAndAwait = {\n                stopNotificationSpeechAndAwait("))
     }
 
-    @Test fun nativeStartAndSpeechAppendRevalidateNotificationAdmission() {
+    @Test fun systemStartAndSpeechRevalidateNotificationAdmissionWithoutLiveOrAccount() {
         val reader = source.substringAfter("private fun createCodexReader(")
             .substringBefore("private fun readAloudPlaybackState(")
-        assertTrue(reader.contains("if (!admissionCurrent() || currentClient() !== owner)"))
-        assertTrue(reader.contains("admissionCurrent() && currentClient() === owner"))
-        assertTrue(reader.contains("mediaMode = LiveVoiceMediaMode.OUTPUT_ONLY"))
+        assertTrue(reader.contains("check(admissionCurrent())"))
+        assertTrue(reader.contains("admissionCurrent() && admissionGuard()"))
+        assertTrue(reader.contains("AndroidSystemSpeech.get(appContext)"))
+        assertFalse(reader.contains("startRealtime("))
+        assertFalse(reader.contains("AndroidWebRtcRealtimeTransport"))
         assertTrue(reader.contains("reader.prepareGuarded"))
         assertTrue(reader.contains("reader.speakGuarded"))
+    }
+
+    @Test fun disablingReadAloudDoesNotDisableOrBypassDictationAuthentication() {
+        val dictation = source.substringAfter("fun hasCodexSpeechAccess(): Boolean =")
+            .substringBefore("fun hasReadAloudAccess()")
+        assertTrue(dictation.contains("AccountPhase.SIGNED_IN"))
+        assertTrue(dictation.contains("AccountIdentity.ChatGpt"))
+        assertFalse(dictation.contains("AndroidSystemSpeech.get"))
+        val readAloud = source.substringAfter("fun hasReadAloudAccess(): Boolean =").substringBefore("/**")
+        assertTrue(readAloud.contains("AndroidSystemSpeech.get(appContext).enabled"))
+        assertFalse(readAloud.contains("SIGNED_IN"))
     }
 
     @Test fun positiveReleaseObserversDoNotInstallContractsWhileStopWaitersHoldDispatchLock() {

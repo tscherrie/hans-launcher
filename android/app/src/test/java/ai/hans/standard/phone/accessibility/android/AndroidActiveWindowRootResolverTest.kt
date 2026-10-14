@@ -132,6 +132,118 @@ class AndroidActiveWindowRootResolverTest {
         assertTrue(candidates.all { it.rootReads == 0 })
     }
 
+    @Test
+    fun emptyWindowEnumerationUsesDirectRootsPublicOwnerWithoutGuessingDisplay() {
+        val node = FakeAndroidAccessibilityNode(nodeWindowId = 41)
+        val owner = FakeWindow(41, 7, active = true, focused = false)
+        val direct = withOwner(node) { owner }
+
+        val resolved = resolver.resolve({ direct }) { emptyList() }
+
+        assertSame(direct, resolved?.root)
+        assertEquals(7, resolved?.displayId)
+        assertEquals(0, node.closeInvocations)
+        assertEquals(0, owner.rootReads)
+        assertEquals(1, owner.closeInvocations)
+        checkNotNull(resolved).root.close()
+        assertEquals(1, node.closeInvocations)
+    }
+
+    @Test
+    fun throwingWindowEnumerationStillUsesIndependentlyValidatedPublicOwner() {
+        val node = FakeAndroidAccessibilityNode(nodeWindowId = 42)
+        val owner = FakeWindow(42, 3, active = false, focused = true)
+        val direct = withOwner(node) { owner }
+
+        val resolved = resolver.resolve({ direct }) { error("synthetic enumeration failure") }
+
+        assertSame(direct, resolved?.root)
+        assertEquals(3, resolved?.displayId)
+        assertEquals(1, owner.closeInvocations)
+        checkNotNull(resolved).root.close()
+    }
+
+    @Test
+    fun ownWindowMetadataMustMatchIdApplicationActivityAndExplicitDisplay() {
+        val invalidOwners = listOf(
+            FakeWindow(50, -1, true, true),
+            FakeWindow(-1, 0, true, true),
+            FakeWindow(51, 0, true, true),
+            FakeWindow(50, 0, false, false),
+            FakeWindow(50, 0, true, true, AndroidAccessibilityWindowKind.OTHER),
+        )
+        invalidOwners.forEach { owner ->
+            val node = FakeAndroidAccessibilityNode(nodeWindowId = 50)
+            assertNull(resolver.resolve({ withOwner(node) { owner } }) { emptyList() })
+            assertEquals(1, owner.closeInvocations)
+            assertEquals(1, node.closeInvocations)
+        }
+    }
+
+    @Test
+    fun unreadableOwnerMetadataIsClosedAndNeverAuthorizesDirectRoot() {
+        val node = FakeAndroidAccessibilityNode(nodeWindowId = 60)
+        val owner = FakeWindow(60, 0, true, true)
+        val unreadable = object : AndroidAccessibilityWindow by owner {
+            override val displayId: Int get() = error("synthetic metadata failure")
+        }
+
+        assertNull(resolver.resolve({ withOwner(node) { unreadable } }) { emptyList() })
+        assertEquals(1, owner.closeInvocations)
+        assertEquals(1, node.closeInvocations)
+    }
+
+    @Test
+    fun failingPublicOwnerLookupDoesNotPreventValidatedCandidateFallback() {
+        val node = FakeAndroidAccessibilityNode(nodeWindowId = 61)
+        val fallbackRoot = FakeAndroidAccessibilityNode(nodeWindowId = 62)
+        val fallback = FakeWindow(62, 4, true, true, root = fallbackRoot)
+
+        val resolved = resolver.resolve(
+            { withOwner(node) { error("synthetic getWindow failure") } },
+        ) { listOf(fallback) }
+
+        assertSame(fallbackRoot, resolved?.root)
+        assertEquals(4, resolved?.displayId)
+        assertEquals(1, node.closeInvocations)
+        assertEquals(1, fallback.closeInvocations)
+        checkNotNull(resolved).root.close()
+    }
+
+    @Test
+    fun fallbackRootWithMismatchedWindowIdIsClosedBeforeTryingAnotherWindow() {
+        val mismatchedRoot = FakeAndroidAccessibilityNode(nodeWindowId = 999)
+        val acceptedRoot = FakeAndroidAccessibilityNode(nodeWindowId = 72)
+        val wrong = FakeWindow(71, 0, true, true, root = mismatchedRoot)
+        val accepted = FakeWindow(72, 2, true, false, root = acceptedRoot)
+
+        val resolved = resolver.resolve({ null }) { listOf(wrong, accepted) }
+
+        assertSame(acceptedRoot, resolved?.root)
+        assertEquals(2, resolved?.displayId)
+        assertEquals(1, mismatchedRoot.closeInvocations)
+        assertEquals(1, wrong.closeInvocations)
+        assertEquals(1, accepted.closeInvocations)
+        checkNotNull(resolved).root.close()
+    }
+
+    @Test
+    fun unreadableFallbackRootIsClosedExactlyOnce() {
+        val root = FakeAndroidAccessibilityNode(nodeWindowId = 80, failOnRead = true)
+        val candidate = FakeWindow(80, 0, true, true, root = root)
+
+        assertNull(resolver.resolve({ null }) { listOf(candidate) })
+        assertEquals(1, root.closeInvocations)
+        assertEquals(1, candidate.closeInvocations)
+    }
+
+    private fun withOwner(
+        node: AndroidAccessibilityNode,
+        owner: () -> AndroidAccessibilityWindow?,
+    ): AndroidAccessibilityNode = object : AndroidAccessibilityNode by node {
+        override fun window(): AndroidAccessibilityWindow? = owner()
+    }
+
     private class FakeWindow(
         override val windowId: Int,
         override val displayId: Int,

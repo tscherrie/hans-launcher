@@ -21,6 +21,14 @@ object NotificationTriageIntegration {
     private val interactiveActivities = ConcurrentHashMap.newKeySet<NotificationInteractiveActivity>()
     private val idleWakeups = java.util.concurrent.CopyOnWriteArraySet<() -> Unit>()
     private val notificationEventWakeups = java.util.concurrent.CopyOnWriteArraySet<() -> Unit>()
+    private val interactiveActivityObservers = java.util.concurrent.CopyOnWriteArraySet<() -> Unit>()
+
+    /** Additional low-priority workers share activity admission without replacing triage hooks. */
+    internal fun attachInteractiveActivityChange(observer: () -> Unit): Closeable {
+        interactiveActivityObservers.add(observer)
+        runCatching(observer)
+        return Closeable { interactiveActivityObservers.remove(observer) }
+    }
 
     internal fun attachNotificationEventWakeup(wakeup: () -> Unit): Closeable {
         notificationEventWakeups.add(wakeup)
@@ -154,6 +162,8 @@ object NotificationTriageIntegration {
             interactiveActivities.remove(activity)
         }
         if (!changed) return
+        // Observers re-probe current activity rather than trusting a potentially reordered boolean.
+        interactiveActivityObservers.forEach { observer -> runCatching(observer) }
         notificationEventWakeups.forEach { wakeup -> runCatching { wakeup() } }
         if (interactiveActivities.isEmpty()) {
             runtimeWakeup.get()?.invoke()

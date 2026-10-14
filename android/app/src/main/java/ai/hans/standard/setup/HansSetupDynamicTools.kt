@@ -956,6 +956,7 @@ class HansSetupDynamicToolExecutor(
         const val MAX_ARGUMENT_BYTES = 16 * 1_024
         val SAFE_CODE = Regex("[a-z0-9_.:-]{1,96}")
         val SETTINGS_STEPS = setOf(
+            HansSetupStep.SYSTEM_SPEECH,
             HansSetupStep.APP_NOTIFICATIONS_ACCESS,
             HansSetupStep.NOTIFICATION_ACCESS,
             HansSetupStep.ACCESSIBILITY_ACCESS,
@@ -964,6 +965,7 @@ class HansSetupDynamicToolExecutor(
             HansSetupStep.OPTIONAL_CAPABILITIES,
         )
         val FRESH_PROBE_STEPS = setOf(
+            HansSetupStep.SYSTEM_SPEECH,
             HansSetupStep.HARDWARE_MAPPING,
             HansSetupStep.APP_NOTIFICATIONS_ACCESS,
             HansSetupStep.NOTIFICATION_ACCESS,

@@ -604,6 +604,40 @@ enum class SpeechCredentialUiStatus {
     TEMPORARILY_UNAVAILABLE,
 }
 
+/** Non-secret local Decisions state; a saved key is never presented as verified API access. */
+data class FastPhoneUseUiState(
+    val requestedEnabled: Boolean = false,
+    val credentialStatus: ai.hans.standard.settings.fastphone.FastPhoneCredentialStatus =
+        ai.hans.standard.settings.fastphone.FastPhoneCredentialStatus.MISSING,
+    val serviceStatus: ai.hans.standard.settings.fastphone.FastPhoneServiceStatus =
+        ai.hans.standard.settings.fastphone.FastPhoneServiceStatus.NOT_VERIFIED,
+) {
+    companion object {
+        fun from(snapshot: ai.hans.standard.settings.fastphone.FastPhoneUseSettingsSnapshot) =
+            FastPhoneUseUiState(snapshot.requestedEnabled, snapshot.credentialStatus, snapshot.serviceStatus)
+    }
+}
+
+/** Persisted progress plus scheduling proof. No relative-time ticks or idle polling. */
+data class PhoneRoutineLearningUiState(
+    val enabled: Boolean = false,
+    val status: ai.hans.standard.fastphone.routines.DailyPhoneRoutineLearningStatus =
+        ai.hans.standard.fastphone.routines.DailyPhoneRoutineLearningStatus.DISABLED,
+    val scheduleStatus: ai.hans.standard.fastphone.routines.android.PhoneRoutineDailyScheduleStatus =
+        ai.hans.standard.fastphone.routines.android.PhoneRoutineDailyScheduleStatus.DISABLED,
+    val scheduled: Boolean = false,
+    val lastSuccessAtMillis: Long? = null,
+    val candidateCount: Int = 0,
+) {
+    companion object {
+        fun from(
+            state: ai.hans.standard.fastphone.routines.DailyPhoneRoutineLearningSnapshot,
+            schedule: ai.hans.standard.fastphone.routines.android.PhoneRoutineDailySchedulingSnapshot,
+        ) = PhoneRoutineLearningUiState(state.enabled, state.status, schedule.status,
+            schedule.scheduled, state.lastSuccessAtMillis, state.candidateCount)
+    }
+}
+
 enum class CapabilityAccessUiId {
     ALL_FILES,
     HOME_APP,
@@ -804,6 +838,8 @@ data class SettingsUiState(
     val fastModeAvailable: Boolean = false,
     /** Reflects only the last App Server-confirmed dispatch, never a staged click. */
     val fastModeEnabled: Boolean = false,
+    val fastPhoneUse: FastPhoneUseUiState = FastPhoneUseUiState(),
+    val phoneRoutineLearning: PhoneRoutineLearningUiState = PhoneRoutineLearningUiState(),
     val voices: List<VoiceUiOption> = emptyList(),
     val selectedVoiceId: String? = null,
     val liveVoices: List<VoiceUiOption> = emptyList(),
@@ -921,6 +957,11 @@ data class SettingsUiCallbacks(
     val onModelSelected: (String) -> Unit,
     val onReasoningEffortSelected: (String) -> Unit,
     val onFastModeChanged: (Boolean) -> Unit = {},
+    val onFastPhoneUseEnabledChanged: (Boolean) -> Unit = {},
+    val onConfigureFastPhoneApiKey: () -> Unit = {},
+    val onRemoveFastPhoneApiKey: () -> Unit = {},
+    val onClearFastPhoneRoutines: () -> Unit = {},
+    val onPhoneRoutineLearningChanged: (Boolean) -> Unit = {},
     val onVoiceSelected: (String) -> Unit,
     val onLiveVoiceSelected: (String) -> Unit = {},
     val onSpeechRateSelected: (Float) -> Unit,

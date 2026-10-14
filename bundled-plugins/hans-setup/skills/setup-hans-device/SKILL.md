@@ -29,9 +29,15 @@ Die ChatGPT-Anmeldung ist eine separate Voraussetzung der Hans-App und wird auss
 
 ## Technische Entscheidungen
 
-Die Zustandsmaschine verwendet diese aktiven Schritte: `intro`, `input_choice`, `hardware_mapping`, `microphone_consent`, `microphone_access`, `camera_capture_test`, `app_notifications_consent`, `app_notifications_access`, `notification_listener_consent`, `notification_access`, `notification_live_test`, `accessibility_consent`, `accessibility_access`, `accessibility_live_test`, `home_role_consent`, `home_role`, `model_reasoning`, `optional_capabilities`, `personal_profile`, `review`, `complete`. Behandle immer nur den aktuell gemeldeten Schritt. Alte gespeicherte Schritte sind keine ausführbaren Angebote und werden beim Fortsetzen nicht wieder aufgenommen.
+Die Zustandsmaschine verwendet diese aktiven Schritte: `intro`, `input_choice`, `hardware_mapping`, `microphone_consent`, `microphone_access`, `camera_capture_test`, `app_notifications_consent`, `app_notifications_access`, `notification_listener_consent`, `notification_access`, `notification_live_test`, `accessibility_consent`, `accessibility_access`, `accessibility_live_test`, `home_role_consent`, `home_role`, `system_speech`, `model_reasoning`, `optional_capabilities`, `personal_profile`, `review`, `complete`. Behandle immer nur den aktuell gemeldeten Schritt. Alte gespeicherte Schritte sind keine ausführbaren Angebote und werden beim Fortsetzen nicht wieder aufgenommen.
 
 Nutze für `input_choice` nur `hardware_toggle` oder `no_hardware_key`: Frage ausschließlich, ob eine physische Aktionstaste zugewiesen werden soll. Biete keine Auswahl zwischen Halten und Tippen an. Die Zuweisung ist optional. Nutze bei Zustimmungsfragen `enable`, bei einer klaren Ablehnung `not_now` und bei `personal_profile` weiterhin `skip`. Eine Ablehnung beendet den betroffenen Punkt und überspringt nur seine abhängigen Zugriffe und Tests; sie darf den Ablauf nicht blockieren. `review` wird ausschließlich durch den oben beschriebenen vorbereiteten, nonce-gebundenen Bestätigungsturn abgeschlossen.
+
+## Vorlesen mit der Android-Systemstimme
+
+Bei `system_speech` erkläre kurz: Fertige Antworten und erlaubte Benachrichtigungen liest Hans mit einer installierten Android-Systemstimme vor, ohne OpenAI-API-Schlüssel oder zusätzliche OpenAI-API-Kosten. Die Telefonstimme wird unabhängig davon eingestellt. Offline-Stimmen werden bevorzugt; als online gekennzeichnete Stimmen können Text an den Anbieter der installierten Sprachengine übertragen.
+
+Frage, ob die Vorlesestimme jetzt eingerichtet werden soll. Bei Zustimmung öffne `request_step_ui` mit `step:"system_speech"`. Die native Oberfläche bietet aktivieren/deaktivieren, Stimme, Tempo und eine freiwillige Hörprobe. Bei fehlender Stimme hilft die verfügbare Android-Sprachdaten-Seite; installiere nichts ungefragt. Prüfe nach Rückkehr mit `verify_step` frisch. Engine-Bereitschaft ist kein Beweis dafür, dass der Nutzer etwas gehört hat. Ein noch laufender Verbindungsaufbau kann eine spätere erneute Prüfung erfordern. `not_now` überspringt nur diesen Einrichtungspunkt und ändert keine bestehenden Vorleseeinstellungen; bei gewünschter Deaktivierung zeige den Schalter. Eine abgeschlossene bestehende Einrichtung wird beim Update nicht wieder geöffnet.
 
 ## Zwei getrennte Sprachfunktionen
 

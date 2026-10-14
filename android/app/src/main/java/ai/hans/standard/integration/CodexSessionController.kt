@@ -203,6 +203,7 @@ internal class CodexSessionController(
     private val desktopRemoteAccessEnabled: Boolean = ai.hans.standard.remotecontrol.DesktopRemoteAccessPolicy.enabled,
     private val notificationExternalDeadlineScheduler: SetupDispatchDeadlineScheduler = ProcessSetupDispatchDeadlineScheduler,
     private val notificationExternalTimeoutMillis: Long = 20_000L,
+    private val userTurnContext: UserTurnContextProvider = UserTurnContextProvider.NONE,
 ) : RuntimeSessionListener {
     // Diagnostic-only state. Never exported, persisted, or used to authorize work.
     private var performanceObservedTurnId: String? = null
@@ -1027,7 +1028,7 @@ internal class CodexSessionController(
         val id = requestIds.next()
         val request = AppServerRequests.threadSettingsUpdate(
             id = id, threadId = threadId, model = selection.model, effort = selection.effort,
-            serviceTier = selection.serviceTier.takeUnless { it == HansSettings.DEFAULT_SERVICE_TIER },
+            serviceTier = selection.serviceTier.takeUnless { it == HansSettings.STANDARD_SERVICE_TIER },
         )
         val pending = PendingSettingsUpdate(
             requestId = id, generation = activeGeneration, contextEpoch = settingsContextEpoch,
@@ -1070,7 +1071,7 @@ internal class CodexSessionController(
         lastThreadSettingsEventSequence = eventSequence
         val observed = event.effort?.let { effort ->
             runCatching {
-                DispatchSelection(event.model, effort, event.serviceTier ?: HansSettings.DEFAULT_SERVICE_TIER)
+                DispatchSelection(event.model, effort, event.serviceTier ?: HansSettings.STANDARD_SERVICE_TIER)
             }.getOrNull()
         }
         provenThreadSettingsSelection = observed
@@ -1662,6 +1663,7 @@ internal class CodexSessionController(
                     expectedTurnId = checkNotNull(unknownActiveTurnId),
                     input = input,
                     clientUserMessageId = messageId,
+                    additionalContext = currentUserTurnContext(threadId, input),
                 ),
             ) else DispatchPolicy.plan(
                 id = requestIds.next(),
@@ -1671,6 +1673,7 @@ internal class CodexSessionController(
                 desiredOptions = checkNotNull(options),
                 catalog = currentCatalog,
                 clientUserMessageId = messageId,
+                additionalContext = currentUserTurnContext(threadId, input),
             )
         } catch (_: Exception) {
             markPendingDispatchFailed(retryable = true)
@@ -2818,7 +2821,7 @@ internal class CodexSessionController(
                         DispatchSelection(
                             resumed.effectiveModel,
                             effort,
-                            resumed.effectiveServiceTier ?: HansSettings.DEFAULT_SERVICE_TIER,
+                            resumed.effectiveServiceTier ?: HansSettings.STANDARD_SERVICE_TIER,
                         )
                     }.getOrNull()
                 }
@@ -2848,7 +2851,7 @@ internal class CodexSessionController(
                 provenThreadSettingsSelection = started.effectiveEffort?.let { effort ->
                     runCatching {
                         DispatchSelection(started.effectiveModel, effort,
-                            started.effectiveServiceTier ?: HansSettings.DEFAULT_SERVICE_TIER)
+                            started.effectiveServiceTier ?: HansSettings.STANDARD_SERVICE_TIER)
                     }.getOrNull()
                 }
                 lastThreadSettingsEventSequence = lastReceivedFrameSequence
@@ -5559,12 +5562,17 @@ internal class CodexSessionController(
             input = pending.input,
             options = checkNotNull(pending.options),
             clientUserMessageId = pending.clientMessageId,
+            additionalContext = currentUserTurnContext(threadId, pending.input),
         )
         transmit(
             request,
             RequestPurpose.TurnStart(pending.clientMessageId, pending.selection, pending.confirmsDefaultSelection),
         )
     }
+
+    /** Optional learned data must never block a genuine user message. */
+    private fun currentUserTurnContext(threadId: String, input: List<CodexInput>) =
+        runCatching { userTurnContext.current(threadId, input.toList()) }.getOrNull()
 
     private fun markDispatchSent(
         messageId: String,

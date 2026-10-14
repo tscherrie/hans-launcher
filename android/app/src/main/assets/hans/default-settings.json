@@ -1,7 +1,8 @@
 {
   "schemaVersion": 1,
-  "model": "gpt-6-astra",
-  "reasoningEffort": "medium",
+  "model": "gpt-6.1-sol",
+  "reasoningEffort": "high",
+  "serviceTier": "priority",
   "activeTurnInputMode": "steer",
   "voice": "fable",
   "speechRate": 1.25,

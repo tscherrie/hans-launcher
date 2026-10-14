@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="system_speech_routing_help">Verwendet Androids Medienlautstärke und Medienausgabe, einschließlich verbundener Kopfhörer. Die Hörerauswahl für Telefonate gilt nicht für das Vorlesen.</string>
+    <string name="system_speech_network_help">Diese Stimme kann Text über das Internet an den Anbieter der installierten Sprachengine senden. Wähle für lokale Sprachausgabe eine Offline-Stimme.</string>
+    <string name="system_speech_disabled">Vorlesen ist ausgeschaltet. Du kannst es in den Spracheinstellungen einschalten.</string>
+    <string name="system_speech_title">Systemstimme</string>
+    <string name="system_speech_help">Hans liest Antworten mit der Stimme deines Telefons vor. Dafür brauchst du keinen API-Schlüssel. Telefonate haben eine eigene Stimme. Du kannst dies später unter Sprache ändern oder ohne Vorlesen fortfahren.</string>
+    <string name="system_speech_enabled">Vorlesen</string>
+    <string name="system_speech_checking">Verfügbare Stimmen werden geprüft…</string>
+    <string name="system_speech_missing">Für diese Sprache ist keine installierte Stimme verfügbar.</string>
+    <string name="system_speech_failed">Die Sprachausgabe konnte nicht abgespielt werden. Prüfe die Systemstimme und versuche die Hörprobe erneut.</string>
+    <string name="system_speech_speaking">Wird vorgelesen</string>
+    <string name="system_speech_completed">Wiedergabe abgeschlossen</string>
+    <string name="system_speech_stopped">Wiedergabe gestoppt</string>
+    <string name="system_speech_offline">Offline-Stimme</string>
+    <string name="system_speech_online">Benötigt Internet</string>
+    <string name="system_speech_choose">Systemstimme auswählen</string>
+    <string name="system_speech_speed">Geschwindigkeit: %1$.1f×</string>
+    <string name="system_speech_preview">Hörprobe abspielen</string>
+    <string name="system_speech_stop">Stopp</string>
+    <string name="system_speech_preview_unavailable">Schalte Lautlos- oder Vibrationsmodus aus, erhöhe die Medienlautstärke und beende eine laufende Aufnahme oder ein Telefonat vor der Hörprobe.</string>
+    <string name="system_speech_install">Sprachdaten installieren</string>
+    <string name="system_speech_install_help">Installiere oder aktiviere eine Sprachausgabe und die benötigten Sprachdaten in den Android-Einstellungen. Du kannst die Einrichtung ohne Sprachausgabe fortsetzen.</string>
+</resources>

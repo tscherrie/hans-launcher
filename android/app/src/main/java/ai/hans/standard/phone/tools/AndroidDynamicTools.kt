@@ -13,8 +13,21 @@ import ai.hans.standard.codex.MAX_DYNAMIC_TOOL_OUTPUT_TEXT_BYTES
 import ai.hans.standard.devicecontrol.tools.AndroidAccessibilityDynamicToolCatalog
 import ai.hans.standard.devicecontrol.tools.AndroidAccessibilityDynamicToolExecutor
 import ai.hans.standard.devicecontrol.tools.AccessibilitySpecialAccessProbe
+import ai.hans.standard.devicecontrol.tools.AccessibilityServiceConnectionProbe
+import ai.hans.standard.devicecontrol.tools.AccessibilitySessionRecovery
 import ai.hans.standard.devicecontrol.tools.GenericUiStepsContract
 import ai.hans.standard.devicecontrol.tools.GenericUiStepsExecutor
+import ai.hans.standard.devicecontrol.tools.FastPhoneUseContract
+import ai.hans.standard.devicecontrol.tools.FastPhoneUseExecutor
+import ai.hans.standard.fastphone.DecisionsAccess
+import ai.hans.standard.fastphone.DecisionsClient
+import ai.hans.standard.fastphone.OpenAiDecisionsClient
+import ai.hans.standard.fastphone.AppChoicePlan
+import ai.hans.standard.fastphone.AppChoiceResult
+import ai.hans.standard.fastphone.AppChoiceResolver
+import ai.hans.standard.fastphone.DecisionsCall
+import ai.hans.standard.fastphone.DecisionsOutcome
+import ai.hans.standard.phone.capabilities.CapabilityObservation
 import ai.hans.standard.phone.capabilities.CapabilityBroker
 import ai.hans.standard.phone.capabilities.CapabilityCommand
 import ai.hans.standard.phone.capabilities.CapabilityConfirmation
@@ -119,7 +132,7 @@ object AndroidDynamicToolCatalog {
             ),
             function(
                 name = "launch_app",
-                description = "Open an installed Android app by package name. Pass the opaque profileId from list_launchable_apps for a non-personal profile; omit it for the personal profile. Confirmation follows the selected Hans action policy.",
+                description = "Open an installed Android app directly. Provide either a known packageName or the user's appName (not both). An exact app name is resolved locally without listing apps to you; optional enabled Fast Phone Use resolves fuzzy names with Decisions. Pass an opaque profileId for a non-personal profile; omit for personal. Existing Android capability checks and selected action policy still apply.",
                 schema = objectSchema(
                     properties = JSONObject()
                         .put(
@@ -127,11 +140,17 @@ object AndroidDynamicToolCatalog {
                             JSONObject().put("type", "string").put("maxLength", 255),
                         )
                         .put(
+                            "appName",
+                            JSONObject().put("type", "string").put("minLength", 1).put("maxLength", 255),
+                        )
+                        .put(
                             "profileId",
                             JSONObject().put("type", "string").put("maxLength", 64),
                         ),
-                    required = listOf("packageName"),
-                ),
+                    required = emptyList(),
+                ).put("oneOf", org.json.JSONArray()
+                    .put(JSONObject().put("required", org.json.JSONArray(listOf("packageName"))))
+                    .put(JSONObject().put("required", org.json.JSONArray(listOf("appName"))))),
             ),
             function(
                 name = "open_view",
@@ -211,6 +230,9 @@ class AndroidDynamicToolExecutor(
         AccessibilitySpecialAccessProbe { false },
     private val accessibilityUiAvailability: UiInteractionAvailabilityProbe =
         UiInteractionAvailabilityProbe.FAIL_CLOSED,
+    private val fastPhoneUseAccess: DecisionsAccess? = null,
+    private val decisionsClient: DecisionsClient = OpenAiDecisionsClient(),
+    private val onFastPhoneGoalCompleted: (ai.hans.standard.fastphone.routines.RoutineObservation) -> Unit = {},
 ) : DynamicToolExecutor {
     private val accessibilityExecutor = AndroidAccessibilityDynamicToolExecutor(
         // The outer cancellable dispatch owns queueing. Running the delegate inline on that worker
@@ -223,7 +245,35 @@ class AndroidDynamicToolExecutor(
         backgroundExecutor = backgroundExecutor,
         launch = ::executeSafely,
         availability = accessibilityUiAvailability,
+        missingSessionResult = ::missingAccessibilitySession,
     )
+    private val fastPhoneUseExecutor = fastPhoneUseAccess?.let { access ->
+        FastPhoneUseExecutor(
+            backgroundExecutor = backgroundExecutor,
+            launch = ::executeSafely,
+            availability = accessibilityUiAvailability,
+            access = access,
+            client = decisionsClient,
+            onCompleted = onFastPhoneGoalCompleted,
+            missingSessionResult = ::missingAccessibilitySession,
+        )
+    }
+    private val activeAppChoices = java.util.concurrent.ConcurrentHashMap<DynamicToolExecutionGate, DecisionsCall>()
+
+    private fun missingAccessibilitySession(): DynamicToolExecutionResult =
+        AccessibilitySessionRecovery.unavailable(
+            accessibilitySpecialAccess,
+            AccessibilityServiceConnectionProbe {
+                ai.hans.standard.phone.accessibility.android.HansAccessibilitySessions.isServiceConnected()
+            },
+        )
+
+    /** A paid-mode/key revision must wake waits and cancel the old HTTP request immediately. */
+    fun invalidateFastPhoneUseConfiguration() {
+        fastPhoneUseExecutor?.invalidateConfiguration()
+        activeAppChoices.keys.forEach { it.cancel() }
+        activeAppChoices.values.forEach(DecisionsCall::cancel)
+    }
 
     override val specs: List<DynamicToolNamespaceSpec> =
         listOf(AndroidDynamicToolCatalog.namespace) + accessibilityExecutor.specs
@@ -243,6 +293,9 @@ class AndroidDynamicToolExecutor(
         if (call.namespace == AndroidAccessibilityDynamicToolCatalog.NAMESPACE &&
             call.tool == GenericUiStepsContract.NAME
         ) return uiStepsExecutor.executeCancellable(call, cancellation, completion)
+        if (call.namespace == AndroidAccessibilityDynamicToolCatalog.NAMESPACE &&
+            call.tool == FastPhoneUseContract.NAME && fastPhoneUseExecutor != null
+        ) return fastPhoneUseExecutor.executeCancellable(call, cancellation, completion)
         val gate = DynamicToolExecutionGate(cancellation, completion)
         val scheduled = gate.schedule(backgroundExecutor) {
             if (call.namespace == AndroidAccessibilityDynamicToolCatalog.NAMESPACE) {
@@ -272,7 +325,14 @@ class AndroidDynamicToolExecutor(
                 },
             )
         }
-        return gate
+        return object : DynamicToolExecutionHandle {
+            override fun cancel(): ai.hans.standard.codex.DynamicToolCancellationDisposition {
+                val disposition = gate.cancel()
+                activeAppChoices[gate]?.cancel()
+                return disposition
+            }
+            override fun onQuiescent(listener: () -> Unit) = gate.onQuiescent(listener)
+        }
     }
 
     override fun failureResult(
@@ -290,14 +350,26 @@ class AndroidDynamicToolExecutor(
         call: DynamicToolCallParams,
         gate: DynamicToolExecutionGate,
     ): DynamicToolExecutionResult {
+        if (call.namespace == AndroidDynamicToolCatalog.NAMESPACE && call.tool == "launch_app") {
+            val args = runCatching { JSONObject(call.argumentsJson) }.getOrNull()
+            if (args?.has("appName") == true) return launchByAppName(call, args, gate)
+        }
         val decoded = decode(call)
         if (decoded is Decoded.Rejected) return projected(decoded.result)
         decoded as Decoded.Command
+        return projected(executeCapability(call, decoded, gate))
+    }
+
+    private fun executeCapability(
+        call: DynamicToolCallParams,
+        decoded: Decoded.Command,
+        gate: DynamicToolExecutionGate,
+    ): CapabilityExecutionResult {
         val confirmation = if (decoded.risk == ConfirmationRisk.NONE) {
             null
         } else {
             if (!gate.markExternalEffectStarted()) {
-                return projected(failed(call, "dynamic_tool_cancelled"))
+                return failed(call, "dynamic_tool_cancelled")
             }
             try {
                 confirmationProvider.confirmedGrant(
@@ -310,11 +382,11 @@ class AndroidDynamicToolExecutor(
                     ),
                 )
             } catch (_: Exception) {
-                return projected(failed(call, "confirmation_provider_failed"))
+                return failed(call, "confirmation_provider_failed")
             }
         }
         if (!gate.markExternalEffectStarted()) {
-            return projected(failed(call, "dynamic_tool_cancelled"))
+            return failed(call, "dynamic_tool_cancelled")
         }
         val result = broker.execute(decoded.command, confirmation).let { capabilityResult ->
             if (capabilityResult.errorCode?.startsWith("confirmation_required_") == true) {
@@ -323,7 +395,67 @@ class AndroidDynamicToolExecutor(
                 capabilityResult
             }
         }
-        return projected(result)
+        return result
+    }
+
+    /** Keeps discovery, optional choice and launch inside the same existing outer phone lease. */
+    private fun launchByAppName(
+        call: DynamicToolCallParams,
+        args: JSONObject,
+        gate: DynamicToolExecutionGate,
+    ): DynamicToolExecutionResult {
+        val name: String
+        val profile: String?
+        try {
+            requireOnlyKeys(args, setOf("appName", "profileId"))
+            name = JsonContract.requiredString(args, "appName", 255)
+            profile = JsonContract.optionalString(args, "profileId", 64)
+        } catch (_: Exception) { return projected(rejected(call, "invalid_arguments")) }
+        val listCall = call.copy(tool = "list_launchable_apps", argumentsJson = "{}",
+            callId = "app-choice-list-${callIdempotencyKey(call.callId).value}")
+        val command = decode(listCall) as? Decoded.Command
+            ?: return projected(failed(call, "app_catalog_unavailable"))
+        val listed = executeCapability(listCall, command, gate)
+        if (listed.status != CapabilityExecutionStatus.SUCCEEDED) return projected(listed)
+        val catalog = (listed.observation as? CapabilityObservation.LaunchableApps)?.apps
+            ?: return projected(failed(call, "app_catalog_unavailable"))
+        val chosen = when (val plan = AppChoiceResolver.prepare(catalog, name, profile)) {
+            is AppChoicePlan.Resolved -> plan.app
+            is AppChoicePlan.Rejected -> return projected(failed(call, plan.code))
+            is AppChoicePlan.NeedsDecision -> {
+                val access = fastPhoneUseAccess
+                    ?: return projected(failed(call, "fast_phone_disabled"))
+                if (!access.isEnabled()) return projected(failed(call, "fast_phone_disabled"))
+                val revision = access.revision()
+                val key = access.readApiKey() ?: return projected(failed(call, "fast_phone_key_missing"))
+                val request = try {
+                    decisionsClient.create(plan.question, key, OpenAiDecisionsClient.MAX_CALL_MS)
+                } finally { key.fill('\u0000') }
+                activeAppChoices[gate] = request
+                gate.onQuiescent { activeAppChoices.remove(gate, request) }
+                val result = try {
+                    if (!gate.markExternalEffectStarted() || access.revision() != revision || !access.isEnabled()) {
+                        request.cancel()
+                        return projected(failed(call, "dynamic_tool_cancelled"))
+                    }
+                    request.execute()
+                } catch (_: Exception) {
+                    return projected(failed(call, "fast_phone_service_unavailable"))
+                }
+                if (access.revision() != revision || !access.isEnabled()) {
+                    return projected(failed(call, "fast_phone_configuration_changed"))
+                }
+                if (result is DecisionsOutcome.Failure) access.recordFailure(result.code, revision)
+                else access.recordSuccess(revision)
+                when (val selection = plan.resolve(result)) {
+                    is AppChoiceResult.Rejected -> return projected(failed(call, selection.code))
+                    is AppChoiceResult.Resolved -> selection.app
+                }
+            }
+        }
+        // The final public API execution rechecks the gate, permissions and live profile access.
+        return executeSafely(call.copy(argumentsJson = JSONObject().put("packageName", chosen.packageName)
+            .put("profileId", chosen.profileId).toString()), gate)
     }
 
     private fun decode(call: DynamicToolCallParams): Decoded {

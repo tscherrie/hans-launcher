@@ -2,6 +2,8 @@ package ai.hans.standard.ui
 
 import ai.hans.standard.R
 import ai.hans.standard.BuildConfig
+import ai.hans.standard.settings.fastphone.FastPhoneCredentialStatus
+import ai.hans.standard.settings.fastphone.FastPhoneServiceStatus
 import ai.hans.standard.remotecontrol.DesktopRemoteAccessPolicy
 import ai.hans.standard.localization.HansTextResolver
 import ai.hans.standard.localization.AndroidHansTextResolver
@@ -511,6 +513,111 @@ private fun RuntimeSettings(
         }
     }
 
+    FastPhoneUseSettings(state.fastPhoneUse, state.phoneRoutineLearning, callbacks)
+}
+
+@Composable
+private fun FastPhoneUseSettings(state: FastPhoneUseUiState, learning: PhoneRoutineLearningUiState,
+    callbacks: SettingsUiCallbacks) {
+    SettingsSection(title = stringResource(R.string.fast_phone_title)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
+            Text(stringResource(R.string.fast_phone_enable), modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.bodyLarge)
+            Switch(checked = state.requestedEnabled, onCheckedChange = callbacks.onFastPhoneUseEnabledChanged,
+                modifier = Modifier.testTag("fast_phone_use_enabled"))
+        }
+        Text(stringResource(R.string.fast_phone_description), style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+        val status = when {
+            !state.requestedEnabled -> R.string.fast_phone_status_off
+            state.credentialStatus == FastPhoneCredentialStatus.MISSING -> R.string.fast_phone_status_key_missing
+            state.credentialStatus == FastPhoneCredentialStatus.TEMPORARILY_UNAVAILABLE ->
+                R.string.fast_phone_status_key_unavailable
+            else -> when (state.serviceStatus) {
+                FastPhoneServiceStatus.NOT_VERIFIED -> R.string.fast_phone_status_unverified
+                FastPhoneServiceStatus.VERIFIED -> R.string.fast_phone_status_verified
+                FastPhoneServiceStatus.INVALID_KEY -> R.string.fast_phone_status_key_rejected
+                FastPhoneServiceStatus.OUT_OF_CREDITS -> R.string.fast_phone_status_quota
+                FastPhoneServiceStatus.RATE_LIMITED -> R.string.fast_phone_status_rate_limit
+                FastPhoneServiceStatus.NETWORK_UNAVAILABLE -> R.string.fast_phone_status_network
+                FastPhoneServiceStatus.SERVICE_UNAVAILABLE -> R.string.fast_phone_status_service
+            }
+        }
+        Text(stringResource(status), modifier = Modifier.testTag("fast_phone_use_status"),
+            style = MaterialTheme.typography.bodyMedium)
+        OutlinedButton(onClick = callbacks.onConfigureFastPhoneApiKey,
+            modifier = Modifier.fillMaxWidth().testTag("configure_fast_phone_api_key")) {
+            Text(stringResource(if (state.credentialStatus == FastPhoneCredentialStatus.MISSING)
+                R.string.fast_phone_add_key else R.string.fast_phone_replace_key))
+        }
+        if (state.credentialStatus != FastPhoneCredentialStatus.MISSING) {
+            TextButton(onClick = callbacks.onRemoveFastPhoneApiKey,
+                modifier = Modifier.fillMaxWidth().testTag("remove_fast_phone_api_key")) {
+                Text(stringResource(R.string.fast_phone_remove_key))
+            }
+        }
+        TextButton(onClick = callbacks.onOpenOpenAiApiKeyPage,
+            modifier = Modifier.fillMaxWidth().testTag("fast_phone_create_api_key")) {
+            Text(stringResource(R.string.fast_phone_create_key))
+        }
+        TextButton(onClick = callbacks.onOpenOpenAiBillingPage,
+            modifier = Modifier.fillMaxWidth().testTag("fast_phone_open_billing")) {
+            Text(stringResource(R.string.fast_phone_billing))
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
+            Text(stringResource(R.string.fast_phone_learning_enable), modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.bodyLarge)
+            Switch(checked = learning.enabled, onCheckedChange = callbacks.onPhoneRoutineLearningChanged,
+                enabled = state.requestedEnabled || learning.enabled,
+                modifier = Modifier.testTag("fast_phone_daily_learning_enabled"))
+        }
+        Text(stringResource(R.string.fast_phone_learning_help),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(stringResource(phoneRoutineLearningStatusText(learning)),
+            modifier = Modifier.testTag("fast_phone_daily_learning_status"),
+            style = MaterialTheme.typography.bodyMedium)
+        learning.lastSuccessAtMillis?.let { timestamp ->
+            val date = java.text.DateFormat.getDateInstance(java.text.DateFormat.MEDIUM)
+                .format(java.util.Date(timestamp))
+            Text(stringResource(R.string.fast_phone_learning_last_success, date, learning.candidateCount),
+                modifier = Modifier.testTag("fast_phone_daily_learning_result"),
+                style = MaterialTheme.typography.bodyMedium)
+        }
+        TextButton(onClick = callbacks.onClearFastPhoneRoutines,
+            modifier = Modifier.fillMaxWidth().testTag("clear_fast_phone_routines")) {
+            Text(stringResource(R.string.fast_phone_forget_routines))
+        }
+    }
+}
+
+internal fun phoneRoutineLearningStatusText(state: PhoneRoutineLearningUiState): Int {
+    val status = state.status
+    val schedule = state.scheduleStatus
+    return when {
+        status == ai.hans.standard.fastphone.routines.DailyPhoneRoutineLearningStatus.ERROR ->
+            R.string.fast_phone_learning_error
+        !state.enabled -> R.string.fast_phone_learning_off
+        schedule == ai.hans.standard.fastphone.routines.android.PhoneRoutineDailyScheduleStatus.WAITING_FOR_LOGIN ->
+            R.string.fast_phone_learning_wait_login
+        schedule == ai.hans.standard.fastphone.routines.android.PhoneRoutineDailyScheduleStatus.WAITING_FOR_INTERACTION ->
+            R.string.fast_phone_learning_wait_idle
+        schedule == ai.hans.standard.fastphone.routines.android.PhoneRoutineDailyScheduleStatus.WAITING_FOR_NETWORK ->
+            R.string.fast_phone_learning_wait_network
+        schedule == ai.hans.standard.fastphone.routines.android.PhoneRoutineDailyScheduleStatus.SCHEDULING_FAILED ->
+            R.string.fast_phone_learning_schedule_failed
+        status == ai.hans.standard.fastphone.routines.DailyPhoneRoutineLearningStatus.RUNNING ->
+            R.string.fast_phone_learning_running
+        status == ai.hans.standard.fastphone.routines.DailyPhoneRoutineLearningStatus.BACKOFF ->
+            R.string.fast_phone_learning_retry
+        status == ai.hans.standard.fastphone.routines.DailyPhoneRoutineLearningStatus.WAITING_FOR_HISTORY ->
+            R.string.fast_phone_learning_wait_history
+        status == ai.hans.standard.fastphone.routines.DailyPhoneRoutineLearningStatus.ALREADY_ANALYZED_TODAY ||
+            status == ai.hans.standard.fastphone.routines.DailyPhoneRoutineLearningStatus.NO_NEW_HISTORY ->
+            R.string.fast_phone_learning_current
+        state.scheduled -> R.string.fast_phone_learning_scheduled
+        else -> R.string.fast_phone_learning_waiting
+    }
 }
 
 @Composable
@@ -566,6 +673,7 @@ private fun SpeechSettings(state: SettingsUiState, callbacks: SettingsUiCallback
 @Composable
 private fun ReadAloudSettings(state: SettingsUiState, callbacks: SettingsUiCallbacks) {
     SettingsSection(title = stringResource(R.string.voice_settings_text_replies_title)) {
+        SystemSpeechControls()
         Text(
             text = stringResource(R.string.voice_settings_text_replies_help),
             style = MaterialTheme.typography.bodyMedium,

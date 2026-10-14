@@ -21,6 +21,9 @@
     <exclude domain="sharedpref" path="hans_file_links_v1.xml" />
     <!-- Ciphertext is device-bound to a non-exportable Android Keystore key. -->
     <exclude domain="sharedpref" path="hans_speech_credential_v1.xml" />
+    <!-- Paid Decisions opt-in and device-bound credential must never migrate or restore. -->
+    <exclude domain="sharedpref" path="hans_fast_phone_credential_v1.xml" />
+    <exclude domain="sharedpref" path="hans_fast_phone_use_v1.xml" />
     <!-- Interview drafts and confirmation nonces stay device-local, including interrupted writes. -->
     <!-- Only the confirmed summary is portable through the user's explicit Hans export. -->
     <exclude domain="file" path="hans-user-profile-v1.json" />

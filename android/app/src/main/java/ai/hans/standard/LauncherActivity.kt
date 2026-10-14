@@ -421,6 +421,9 @@ class LauncherActivity : HansLocaleAwareActivity() {
     private var cameraCaptureChoiceDialog: AlertDialog? = null
     private var setupAccessibilityPostconditionCheck: Runnable? = null
     private var speechCredentialDialog: AndroidSpeechCredentialDialog? = null
+    private var fastPhoneCredentialDialog: ai.hans.standard.ui.AndroidFastPhoneCredentialDialog? = null
+    private var fastPhoneUseSubscription: AutoCloseable? = null
+    private var phoneRoutineLearningSubscription: AutoCloseable? = null
     private var pendingSetupPermissionInteraction: PendingSetupPermissionInteraction? = null
     private var pendingSetupCameraCapture: PendingSetupCameraCapture? = null
     private var pendingSetupQuickSettingsTile: PendingSetupQuickSettingsTile? = null
@@ -785,6 +788,29 @@ class LauncherActivity : HansLocaleAwareActivity() {
                 sessionHost.saveSpeechCredential(credential)
                 sessionHost.speechCredentialStatus() == SpeechCredentialStatus.AVAILABLE
             }.getOrDefault(false)
+        }
+        fastPhoneCredentialDialog = ai.hans.standard.ui.AndroidFastPhoneCredentialDialog(this) {
+            sessionHost.fastPhoneUseStore.saveApiKey(it)
+        }
+        fastPhoneUseSubscription = sessionHost.fastPhoneUseStore.subscribe { snapshot ->
+            runOnUiThread {
+                if (!isDestroyed) {
+                    localUi = localUi.copy(
+                        fastPhoneUse = ai.hans.standard.ui.FastPhoneUseUiState.from(snapshot),
+                        revision = localUi.revision + 1,
+                    )
+                }
+            }
+        }
+        val routineLearning = (application as HansApplication).phoneRoutineLearning
+        phoneRoutineLearningSubscription = routineLearning.subscribe {
+            runOnUiThread {
+                if (!isDestroyed) localUi = localUi.copy(
+                    phoneRoutineLearning = ai.hans.standard.ui.PhoneRoutineLearningUiState.from(
+                        routineLearning.snapshot(), routineLearning.schedulingSnapshot()),
+                    revision = localUi.revision + 1,
+                )
+            }
         }
         mediaExecutor.execute {
             cameraCaptureCoordinator.cleanupAbandonedCaptures()
@@ -1182,6 +1208,10 @@ class LauncherActivity : HansLocaleAwareActivity() {
         acceptInternetSnapshot((application as HansApplication).internetConnectivity.snapshot())
         localUi = localUi.copy(
             speechCredentialStatus = currentSpeechCredentialUiStatus(),
+            fastPhoneUse = ai.hans.standard.ui.FastPhoneUseUiState.from(sessionHost.fastPhoneUseStore.snapshot()),
+            phoneRoutineLearning = (application as HansApplication).phoneRoutineLearning.let {
+                ai.hans.standard.ui.PhoneRoutineLearningUiState.from(it.snapshot(), it.schedulingSnapshot())
+            },
             revision = localUi.revision + 1,
         )
         refreshCapabilityAccess()
@@ -1520,6 +1550,12 @@ class LauncherActivity : HansLocaleAwareActivity() {
         cameraCaptureChoiceDialog = null
         speechCredentialDialog?.close()
         speechCredentialDialog = null
+        fastPhoneCredentialDialog?.close()
+        fastPhoneCredentialDialog = null
+        fastPhoneUseSubscription?.close()
+        fastPhoneUseSubscription = null
+        phoneRoutineLearningSubscription?.close()
+        phoneRoutineLearningSubscription = null
         activeSetupSpeechCredentialToken = null
         periodicAccountRefresh.close()
         videoTranscriptions.values.forEach(VideoAudioTranscriptionCancellation::cancel)
@@ -2787,10 +2823,10 @@ class LauncherActivity : HansLocaleAwareActivity() {
             onReadAssistantMessageAloud = { text ->
                 if (!sessionHost.replayVisibleAssistantMessage(text)) {
                     showShortMessage(
-                        if (sessionHost.hasCodexSpeechAccess()) {
+                        if (sessionHost.hasReadAloudAccess()) {
                             tr(R.string.integration_read_aloud_is_unavailable_during_recording_or_for_this__d1c49a0)
                         } else {
-                            tr(R.string.codex_live_sign_in_required)
+                            tr(R.string.system_speech_disabled)
                         },
                     )
                 }
@@ -2987,7 +3023,7 @@ class LauncherActivity : HansLocaleAwareActivity() {
                 val requestedTier = if (enabled) {
                     HansSettings.FAST_SERVICE_TIER
                 } else {
-                    HansSettings.DEFAULT_SERVICE_TIER
+                    HansSettings.STANDARD_SERVICE_TIER
                 }
                 if (
                     current == null ||
@@ -3017,10 +3053,10 @@ class LauncherActivity : HansLocaleAwareActivity() {
             onPreviewVoice = {
                 if (!sessionHost.previewSpeech()) {
                     showShortMessage(
-                        if (sessionHost.hasCodexSpeechAccess()) {
+                        if (sessionHost.hasReadAloudAccess()) {
                             tr(R.string.integration_read_aloud_is_unavailable_during_recording_or_for_this__d1c49a0)
                         } else {
-                            tr(R.string.codex_live_sign_in_required)
+                            tr(R.string.system_speech_disabled)
                         },
                     )
                 }
@@ -3055,6 +3091,34 @@ class LauncherActivity : HansLocaleAwareActivity() {
             onDisplayMotionModeSelected = ::selectDisplayMotionMode,
             onConfigureSpeechCredential = { showSpeechCredentialEntry() },
             onRemoveSpeechCredential = ::confirmSpeechCredentialRemoval,
+            onFastPhoneUseEnabledChanged = { enabled ->
+                if (!sessionHost.fastPhoneUseStore.setEnabled(enabled)) {
+                    showShortMessage(tr(R.string.fast_phone_key_save_failed))
+                }
+            },
+            onConfigureFastPhoneApiKey = {
+                fastPhoneCredentialDialog?.show { }
+            },
+            onRemoveFastPhoneApiKey = {
+                if (!sessionHost.fastPhoneUseStore.removeApiKey()) {
+                    showShortMessage(tr(R.string.fast_phone_key_save_failed))
+                }
+            },
+            onClearFastPhoneRoutines = {
+                sessionHost.forgetLearnedPhoneGoals { success ->
+                    runOnUiThread {
+                        showShortMessage(tr(if (success) R.string.fast_phone_routines_forgotten
+                            else R.string.fast_phone_routines_forget_failed))
+                    }
+                }
+            },
+            onPhoneRoutineLearningChanged = { enabled ->
+                (application as HansApplication).phoneRoutineLearning.setEnabled(enabled) { success ->
+                    if (!success) runOnUiThread {
+                        showShortMessage(tr(R.string.fast_phone_learning_save_failed))
+                    }
+                }
+            },
             onOpenOpenAiApiKeyPage = { openFixedOpenAiPage(OPENAI_API_KEYS_URL) },
             onOpenOpenAiBillingPage = { openFixedOpenAiPage(OPENAI_BILLING_URL) },
             onExportBackup = {
@@ -3566,6 +3630,14 @@ class LauncherActivity : HansLocaleAwareActivity() {
                 return@runOnUiThread
             }
             if (command is SetupUiCommand.OpenSettings) {
+                if (command.token.step == HansSetupStep.SYSTEM_SPEECH) {
+                    val opened = runCatching {
+                        startActivity(Intent(this, ai.hans.standard.ui.SystemSpeechSettingsActivity::class.java))
+                    }.isSuccess
+                    completion(if (opened) SetupUiCommandResult.Accepted(settingsOpened = true)
+                        else SetupUiCommandResult.Rejected("system_speech_settings_unavailable"))
+                    return@runOnUiThread
+                }
                 if (command.token.step == HansSetupStep.SPEECH_CREDENTIAL_ACCESS) {
                     completion(SetupUiCommandResult.Rejected("setup_api_key_step_retired"))
                     return@runOnUiThread

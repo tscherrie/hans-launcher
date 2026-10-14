@@ -41,7 +41,7 @@ class DispatchPolicyTest {
             threadId = "thread-1",
             activeTurn = activeSolTurn,
             input = listOf(CodexInput.Text("Benutze jetzt Astra")),
-            desiredOptions = DispatchOptions.DEFAULT,
+            desiredOptions = DispatchOptions.ASTRA_MEDIUM,
             catalog = catalog,
         )
 
@@ -51,7 +51,7 @@ class DispatchPolicyTest {
             setOf(OptionDifference.MODEL, OptionDifference.EFFORT),
             boundary.differences,
         )
-        assertEquals(DispatchOptions.DEFAULT, boundary.desiredOptions)
+        assertEquals(DispatchOptions.ASTRA_MEDIUM, boundary.desiredOptions)
     }
 
     @Test
@@ -82,7 +82,7 @@ class DispatchPolicyTest {
             threadId = "thread-1",
             activeTurn = null,
             input = listOf(CodexInput.Text("Wie geht es dir?")),
-            desiredOptions = DispatchOptions.DEFAULT,
+            desiredOptions = DispatchOptions.ASTRA_MEDIUM,
             catalog = catalog,
         )
 
@@ -96,6 +96,24 @@ class DispatchPolicyTest {
             "dangerFullAccess",
             params.getJSONObject("sandboxPolicy").getString("type"),
         )
+    }
+
+    @Test
+    fun freshDefaultStartsSol61HighFastOnlyWhenCatalogAdvertisesTheTier() {
+        val sol = model("gpt-6.1-sol", setOf(ReasoningEffort.HIGH), ReasoningEffort.HIGH)
+        val enabledCatalog = ModelCatalog(listOf(sol.copy(serviceTiers = listOf(
+            ModelServiceTier("priority", "Priority", "Fast"),
+        ))))
+        val request = DispatchPolicy.plan(RequestId.Number(4), "thread-1", null,
+            listOf(CodexInput.Text("Hello")), DispatchOptions.DEFAULT, enabledCatalog) as DispatchPlan.StartTurn
+        val params = JSONObject(request.request.json).getJSONObject("params")
+        assertEquals("gpt-6.1-sol", params.getString("model"))
+        assertEquals("high", params.getString("effort"))
+        assertEquals("priority", params.getString("serviceTier"))
+        assertThrows(UnsupportedProtocolValueException::class.java) {
+            DispatchPolicy.plan(RequestId.Number(5), "thread-1", null,
+                listOf(CodexInput.Text("Hello")), DispatchOptions.DEFAULT, ModelCatalog(listOf(sol)))
+        }
     }
 
     @Test

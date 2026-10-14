@@ -68,6 +68,10 @@ internal object NotificationEventStateCodec {
                     NotificationEventPhase.CANCELLED) || record.settledAtEpochMillis != null)
                 require(record.settledAtEpochMillis == null || record.settledAtEpochMillis >= 0 && record.phase in setOf(
                     NotificationEventPhase.COMPLETED, NotificationEventPhase.FAILED, NotificationEventPhase.CANCELLED))
+                // A committed report can outlive its active Android source, but it is never
+                // a pending task or a reason to restore the erased external-event payload.
+                require(record.report == null || record.phase in setOf(NotificationEventPhase.ACCEPTED,
+                    NotificationEventPhase.COMPLETED, NotificationEventPhase.FAILED) && record.payloadJson.isEmpty())
                 if (record.payloadJson.isNotEmpty()) {
                     require(notificationEventSha256(record.payloadJson) == record.payloadSha256)
                     val payload = JSONObject(record.payloadJson)

@@ -158,6 +158,14 @@ interface HansAccessibilitySession {
     fun retainSnapshotForCommands(correlation: UiSnapshotCorrelation): Boolean =
         currentSnapshot()?.correlation == correlation
 
+    /**
+     * Freshly revalidates the retained original frame before visual fallback. The live host
+     * must prove unchanged window, display, root identity and complete semantic content. A
+     * newer observation alone is not proof; missing/expired retained evidence fails closed.
+     * This read never extends the original frame's lifetime or grants command retention.
+     */
+    fun currentSnapshotForVisualFallback(correlation: UiSnapshotCorrelation): SemanticUiSnapshot? = null
+
     /** Exact, short-lived post-action receipt only; never capture or substitute a current frame. */
     fun receiptSnapshotForObservation(correlation: UiSnapshotCorrelation): SemanticUiSnapshot? = null
 
@@ -324,6 +332,7 @@ internal class BoundedAccessibilityCommandSession(
         (SemanticUiSnapshot) -> Boolean,
     ) -> SemanticUiSnapshot? = { _, _, _ -> null },
     private val wakeSnapshotWait: () -> Unit = {},
+    private val currentSnapshotForVisualFallback: (UiSnapshotCorrelation) -> SemanticUiSnapshot? = { null },
 ) : HansAccessibilitySession, AutoCloseable {
     private val closed = AtomicBoolean(false)
     private val commandWorker = AtomicReference<Thread?>()
@@ -368,6 +377,18 @@ internal class BoundedAccessibilityCommandSession(
 
     override fun retainSnapshotForCommands(correlation: UiSnapshotCorrelation): Boolean =
         !closed.get() && runCatching { retainForCommands(correlation) }.getOrDefault(false)
+
+    override fun currentSnapshotForVisualFallback(
+        correlation: UiSnapshotCorrelation,
+    ): SemanticUiSnapshot? {
+        if (closed.get() || correlation.sessionId != sessionId) return null
+        return runCatching { currentSnapshotForVisualFallback.invoke(correlation) }.getOrNull()
+            ?.takeIf {
+                !closed.get() && it.correlation.sessionId == sessionId &&
+                    it.correlation.windowId == correlation.windowId &&
+                    it.correlation.snapshotId.value >= correlation.snapshotId.value && it.isComplete
+            }
+    }
 
     override fun receiptSnapshotForObservation(correlation: UiSnapshotCorrelation): SemanticUiSnapshot? {
         if (closed.get() || correlation.sessionId != sessionId) return null

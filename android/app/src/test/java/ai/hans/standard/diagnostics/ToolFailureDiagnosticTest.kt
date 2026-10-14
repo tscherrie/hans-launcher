@@ -44,6 +44,14 @@ class ToolFailureDiagnosticTest {
     }
 
     @Test
+    fun inaccessibleAccessibilityStateHasOneReviewedFixedCodeNotAnArbitrarySuffix() {
+        assertEquals(ToolFailureCode.ACCESSIBILITY_STATE_UNAVAILABLE,
+            ToolFailureDiagnostic.fromCodes("accessibility_state_unavailable").code)
+        assertEquals(ToolFailureCode.UNKNOWN,
+            ToolFailureDiagnostic.fromCodes("accessibility_state_unavailable_private_detail").code)
+    }
+
+    @Test
     fun everyExistingSnapshotFailureIsExplicitlyRepresented() {
         AccessibilitySnapshotFailure.entries.forEach {
             assertTrue(ToolFailureDetail.fromCode(it.detailCode) != ToolFailureDetail.UNKNOWN)

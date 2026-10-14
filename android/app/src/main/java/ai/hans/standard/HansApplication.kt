@@ -1092,6 +1092,10 @@ open class HansApplication : Application() {
         )
     }
 
+    val phoneRoutineLearning: ai.hans.standard.fastphone.routines.PhoneRoutineLearningIntegration by lazy(
+        LazyThreadSafetyMode.SYNCHRONIZED,
+    ) { ai.hans.standard.fastphone.routines.PhoneRoutineLearningIntegration(this) }
+
     val automationRuntime: AutomationRuntimeOwner by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         AndroidAutomationRuntimeFactory.create(
             context = this,
@@ -1281,11 +1285,13 @@ open class HansApplication : Application() {
         check(HansBackupProcessState.maintenance.isRecoveryReady) { "backup_recovery_required" }
         if (productRuntimeInitialized) {
             automationRuntime.scheduleChanged()
+            phoneRoutineLearning.reconcile()
             return
         }
         productRuntimeInitialized = true
         HansAutomationRuntime.install(automationRuntime)
         automationRuntime.scheduleChanged()
+        phoneRoutineLearning.start()
         networkRecoveryMonitor = ValidatedNetworkRecoveryMonitor(
             context = this,
             onRestored = {
@@ -1389,6 +1395,7 @@ open class HansApplication : Application() {
         dictationLifecycleRegistration?.close()
         dictationLifecycleRegistration = null
         runCatching { automationGateway.close() }
+        runCatching { phoneRoutineLearning.close() }
         if (pythonRuntimeDelegate.isInitialized()) runCatching { pythonRuntime.close() }
         if (remoteMcpSessionRegistryDelegate.isInitialized()) {
             runCatching { remoteMcpSessionRegistry.close() }

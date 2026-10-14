@@ -71,6 +71,36 @@ class ReleaseProvenanceTest(unittest.TestCase):
             self.assertEqual(base64.b64decode(bundle["verificationMaterial"]["certificate"]["rawBytes"]),
                              ssl.PEM_cert_to_DER_cert(base64.b64decode(original["cert"]).decode()))
 
+    def test_original_companions_match_the_published_release_assets(self):
+        assets = {item["name"]: item for item in load("release-metadata.json")["assets"]}
+        for role in ("runtime", "codeModeHost", "schemaGenerator"):
+            pin = LOCK[role]
+            name = pin.get("extractedName", pin["releaseAsset"].removesuffix(".tar.gz"))
+            asset = assets[name + ".sigstore"]
+            original = (EVIDENCE / (role + ".original.sigstore.json")).read_bytes()
+            self.assertEqual(asset["size"], len(original))
+            self.assertEqual(asset["digest"], "sha256:" + hashlib.sha256(original).hexdigest())
+            self.assertEqual(asset["browser_download_url"],
+                             pin["releaseUrl"].removesuffix(".tar.gz") + ".sigstore")
+
+    def test_current_compatibility_report_is_bound_to_its_retained_inputs(self):
+        proof = load("source-compatibility.json")
+        original = (EVIDENCE / "input-verification.json").read_bytes()
+        inputs = json.loads(original)
+        self.assertEqual(proof["scope"], "current-source-input-compatibility-not-native-source-reproduction")
+        self.assertEqual(proof["derivedFrom"], {
+            "path": "input-verification.json", "sha256": hashlib.sha256(original).hexdigest(),
+        })
+        self.assertEqual(proof["runtimeVersion"], LOCK["runtime"]["version"])
+        self.assertEqual(inputs["upstream"], LOCK["upstream"])
+        self.assertFalse(proof["nativeSourceBuildProven"])
+        self.assertFalse(proof["fullNativeLegalClosure"])
+        self.assertFalse(proof["publicReleaseGatePassed"])
+        source_rows = {row["path"]: row for row in inputs["sourceFiles"]}
+        for row in (*proof["memoryMigrations"], *proof["topLevelNoticesUnchanged"]):
+            expected = {"name": row["path"].split("/")[-1], **source_rows[row["path"]]}
+            self.assertEqual(row, expected)
+
     def test_bounded_memory_source_and_notices_do_not_claim_transitive_clearance(self):
         proof = load("source-compatibility.json")
         self.assertFalse(proof["publicReady"])

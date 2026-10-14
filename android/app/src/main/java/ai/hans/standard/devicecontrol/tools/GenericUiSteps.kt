@@ -59,6 +59,9 @@ internal class GenericUiStepsExecutor(
     private val availability: UiInteractionAvailabilityProbe,
     private val evidenceEpoch: () -> Long = HansPhoneToolEvidence::epoch,
     private val nowMillis: () -> Long = { System.nanoTime() / 1_000_000 },
+    private val missingSessionResult: () -> DynamicToolExecutionResult = {
+        DeviceControlProjection.failure("accessibility_session_unavailable")
+    },
 ) : DynamicToolExecutor {
     override val specs = emptyList<DynamicToolNamespaceSpec>() // Included in the existing android_ui namespace.
     private val ledger = LinkedHashMap<String, Pair<String, DynamicToolExecutionResult?>>()
@@ -117,7 +120,11 @@ internal class GenericUiStepsExecutor(
     private fun run(call: DynamicToolCallParams, gate: DynamicToolExecutionGate,
         waitingSession: AtomicReference<HansAccessibilitySession?>, progress: Progress): DynamicToolExecutionResult {
         val plan = runCatching { decode(call) }.getOrElse { return failure("invalid_arguments") }
-        val session = sessions() ?: return failure("accessibility_session_unavailable")
+        val session = sessions() ?: return missingSessionResult().let { unavailable ->
+            unavailable.copy(contentText = JSONObject(unavailable.contentText)
+                .put("replayed", false).put("steps", JSONArray()).put("retrySequence", false)
+                .put("externalEffectMayHaveStarted", false).toString())
+        }
         val epoch = evidenceEpoch()
         val receipts = progress.receipts
         val deadline = nowMillis() + plan.timeoutMs

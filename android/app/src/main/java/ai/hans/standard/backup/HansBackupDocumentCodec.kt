@@ -233,7 +233,7 @@ object HansBackupDocumentCodec {
             serviceTier = if (has("serviceTier") && !isNull("serviceTier")) {
                 getString("serviceTier")
             } else {
-                HansSettings.DEFAULT_SERVICE_TIER
+                HansSettings.STANDARD_SERVICE_TIER
             },
             activeTurnInputMode = ActiveTurnInputMode.STEER,
             voice = getString("voice"),

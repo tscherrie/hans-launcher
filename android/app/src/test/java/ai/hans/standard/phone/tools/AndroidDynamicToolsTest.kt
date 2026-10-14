@@ -64,15 +64,16 @@ class AndroidDynamicToolsTest {
                 !schema.getBoolean("additionalProperties")
         })
         assertEquals(
-            setOf("packageName", "profileId"),
+            setOf("packageName", "appName", "profileId"),
             schemas.getValue("launch_app").getJSONObject("properties")
                 .keys().asSequence().toSet(),
         )
         assertEquals(
-            listOf("packageName"),
+            emptyList<String>(),
             schemas.getValue("launch_app").getJSONArray("required")
                 .let { required -> (0 until required.length()).map(required::getString) },
         )
+        assertEquals(2, schemas.getValue("launch_app").getJSONArray("oneOf").length())
         assertEquals(
             setOf("destination", "packageName"),
             schemas.getValue("open_settings").getJSONObject("properties")
@@ -144,6 +145,84 @@ class AndroidDynamicToolsTest {
             listOf("launch:org.example.app@$privateId", "launch:org.example.app@personal"),
             adapter.calls,
         )
+    }
+
+    @Test
+    fun exactAppNameUsesLocalCatalogAndPublicLaunchWithoutPaidRequest() {
+        val adapter = FakeToolAdapter()
+        val result = executor(adapter, allowAll()).run(
+            call("launch_app", "exact-name", """{"appName":"Example"}"""),
+        )
+        assertTrue(result.success)
+        assertEquals(listOf("list", "launch:org.example.app@personal"), adapter.calls)
+    }
+
+    @Test
+    fun appNameDiscoveryStillRequiresItsOwnCapabilityGrant() {
+        val adapter = FakeToolAdapter()
+        val result = executor(adapter).run(call("launch_app", "name-denied", """{"appName":"Example"}"""))
+        assertFalse(result.success)
+        assertTrue(adapter.calls.isEmpty())
+    }
+
+    @Test
+    fun fuzzyNameUsesOnlyEnabledDecisionsAndCurrentOpaqueAppChoice() {
+        val adapter = FakeToolAdapter()
+        var requests = 0
+        val access = TestAppChoiceAccess()
+        val result = AndroidDynamicToolExecutor(broker(adapter), Executor(Runnable::run), allowAll(),
+            fastPhoneUseAccess = access,
+            decisionsClient = ai.hans.standard.fastphone.DecisionsClient { question, _, _ ->
+                requests++
+                assertEquals(listOf("app_0", "escalate"), question.choices.map { it.id })
+                object : ai.hans.standard.fastphone.DecisionsCall {
+                    override fun cancel() = Unit
+                    override fun execute() = ai.hans.standard.fastphone.DecisionsOutcome.Selected("app_0", .99)
+                }
+            }).run(call("launch_app", "fuzzy-name", """{"appName":"example app please"}"""))
+        assertTrue(result.success)
+        assertEquals(1, requests)
+        assertEquals(listOf("list", "launch:org.example.app@personal"), adapter.calls)
+    }
+
+    @Test
+    fun disablingDuringDecisionPreventsAppLaunch() {
+        val adapter = FakeToolAdapter()
+        val access = TestAppChoiceAccess()
+        val result = AndroidDynamicToolExecutor(broker(adapter), Executor(Runnable::run), allowAll(),
+            fastPhoneUseAccess = access,
+            decisionsClient = ai.hans.standard.fastphone.DecisionsClient { _, _, _ ->
+                object : ai.hans.standard.fastphone.DecisionsCall {
+                    override fun cancel() = Unit
+                    override fun execute(): ai.hans.standard.fastphone.DecisionsOutcome {
+                        access.enabled = false
+                        return ai.hans.standard.fastphone.DecisionsOutcome.Selected("app_0", .99)
+                    }
+                }
+            }).run(call("launch_app", "disabled-name", """{"appName":"the example app"}"""))
+        assertFalse(result.success)
+        assertEquals(listOf("list"), adapter.calls)
+    }
+
+    @Test
+    fun nameAndPackageTogetherAreRejectedBeforeDiscoveryOrLaunch() {
+        val adapter = FakeToolAdapter()
+        assertFalse(executor(adapter, allowAll()).run(call("launch_app", "both-name-package",
+            """{"appName":"Example","packageName":"org.example.app"}""")).success)
+        assertTrue(adapter.calls.isEmpty())
+    }
+
+    private fun allowAll() = DynamicToolConfirmationProvider { request ->
+        CapabilityConfirmation(request.capabilityId, request.idempotencyKey, request.risk)
+    }
+
+    private class TestAppChoiceAccess : ai.hans.standard.fastphone.DecisionsAccess {
+        var enabled = true
+        override fun isEnabled() = enabled
+        override fun revision() = 1L
+        override fun readApiKey() = "test-not-a-real-credential".toCharArray()
+        override fun recordSuccess(expectedRevision: Long) = Unit
+        override fun recordFailure(code: String, expectedRevision: Long) = Unit
     }
 
     @Test

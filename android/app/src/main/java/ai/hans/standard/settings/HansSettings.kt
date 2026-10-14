@@ -59,9 +59,11 @@ data class HansSettings(
     }
 
     companion object {
-        const val DEFAULT_MODEL = "gpt-6-astra"
-        const val DEFAULT_REASONING_EFFORT = "medium"
-        const val DEFAULT_SERVICE_TIER = CodexServiceTier.STANDARD
+        const val DEFAULT_MODEL = "gpt-6.1-sol"
+        const val DEFAULT_REASONING_EFFORT = "high"
+        /** Product preference for a fresh installation, never a synonym for wire `default`. */
+        const val DEFAULT_SERVICE_TIER = CodexServiceTier.FAST
+        const val STANDARD_SERVICE_TIER = CodexServiceTier.STANDARD
         const val FAST_SERVICE_TIER = CodexServiceTier.FAST
         const val DEFAULT_VOICE = "fable"
         const val DEFAULT_LIVE_VOICE = LiveVoiceApiVoiceResolver.DEFAULT_VOICE
@@ -92,7 +94,7 @@ data class HansSettings(
         )
         val SUPPORTED_REASONING_EFFORTS: Set<String> = REASONING_EFFORT_ORDER.toSet()
         val SUPPORTED_SERVICE_TIERS: Set<String> = setOf(
-            DEFAULT_SERVICE_TIER,
+            STANDARD_SERVICE_TIER,
             FAST_SERVICE_TIER,
         )
 
@@ -291,7 +293,11 @@ class SharedPreferencesHansSettingsStore(
                 reasoningEffort = preferences.getString(KEY_REASONING_EFFORT, null)
                     ?: HansSettings.DEFAULT_REASONING_EFFORT,
                 serviceTier = preferences.getString(KEY_SERVICE_TIER, null)
-                    ?: HansSettings.DEFAULT_SERVICE_TIER,
+                    // A missing tier beside a saved dispatch predates Fast and means Standard.
+                    // Reading an upgrade never silently turns that user's Fast setting on.
+                    ?: if (preferences.contains(KEY_MODEL) || preferences.contains(KEY_REASONING_EFFORT)) {
+                        HansSettings.STANDARD_SERVICE_TIER
+                    } else HansSettings.DEFAULT_SERVICE_TIER,
                 voice = preferences.getString(KEY_VOICE, null) ?: HansSettings.DEFAULT_VOICE,
                 // A newly added, absent, invalid or wrongly typed Live value must not reset
                 // unrelated existing preferences, especially the user's TTS voice.

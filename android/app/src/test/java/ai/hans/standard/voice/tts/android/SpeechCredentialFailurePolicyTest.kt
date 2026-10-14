@@ -30,6 +30,15 @@ class SpeechCredentialFailurePolicyTest {
         assertTrue(recovery.shouldClearBeforeReplacing(TestFailure()))
     }
 
+    @Test
+    fun failedDurableClearDoesNotReportMissingOrEscapeAsAnUnhandledReadError() {
+        val recovery = recoveryFor(SpeechCredentialFailureDisposition.CLEAR_INVALID_MATERIAL)
+        val status = recovery.recoverReadFailure(TestFailure()) {
+            throw IllegalStateException("synthetic storage unavailable")
+        }
+        assertEquals(SpeechCredentialStatus.TEMPORARILY_UNAVAILABLE, status)
+    }
+
     private fun recoveryFor(
         disposition: SpeechCredentialFailureDisposition,
     ): SpeechCredentialFailureRecovery = SpeechCredentialFailureRecovery(

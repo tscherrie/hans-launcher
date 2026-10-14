@@ -1473,8 +1473,8 @@ class HansClientUiProjectorTest {
         timeline = emptyList(),
         pendingSelection = null,
         confirmedSelection = DispatchSelection(
-            DispatchOptions.DEFAULT.model,
-            DispatchOptions.DEFAULT.effort,
+            DispatchOptions.ASTRA_MEDIUM.model,
+            DispatchOptions.ASTRA_MEDIUM.effort,
         ),
         problem = null,
     )

@@ -109,6 +109,9 @@ internal class AccessibilityNodeInfoNode(
     override val childCount: Int
         get() = openNode().childCount
 
+    override fun window(): AndroidAccessibilityWindow? =
+        openNode().window?.let(::AccessibilityWindowInfoWindow)
+
     override fun childAt(index: Int): AndroidAccessibilityNode? =
         openNode().getChild(index)?.let(::AccessibilityNodeInfoNode)
 
